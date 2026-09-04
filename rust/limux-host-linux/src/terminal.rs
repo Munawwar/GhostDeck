@@ -1689,10 +1689,12 @@ pub fn create_terminal(
         let open_url_external_for_press = open_url_external.clone();
         let open_url_external_for_release = open_url_external.clone();
         let click = gtk::GestureClick::new();
+        let pressed_button = Rc::new(Cell::new(None));
         click.set_button(0); // all buttons
         let sc = surface_cell.clone();
         let gl_for_focus = gl_area.clone();
         let had_focus = had_focus.clone();
+        let pressed_button_for_press = pressed_button.clone();
         click.connect_pressed(move |gesture, _n, x, y| {
             let btn = gesture.current_button();
             // Grab keyboard focus on any click
@@ -1707,6 +1709,7 @@ pub fn create_terminal(
                     2 => GHOSTTY_MOUSE_MIDDLE,
                     _ => GHOSTTY_MOUSE_UNKNOWN,
                 };
+                pressed_button_for_press.set(Some(button));
                 let mods = translate_mouse_mods(gesture.current_event_state());
                 unsafe {
                     ghostty_surface_mouse_pos(surface, x, y, mods);
@@ -1716,26 +1719,42 @@ pub fn create_terminal(
                 }
             }
         });
-        let sc2 = surface_cell.clone();
-        click.connect_released(move |gesture, _n, x, y| {
-            let btn = gesture.current_button();
-            if btn == 3 {
-                return;
-            }
-            if let Some(surface) = *sc2.borrow() {
-                let button = match btn {
-                    1 => GHOSTTY_MOUSE_LEFT,
-                    2 => GHOSTTY_MOUSE_MIDDLE,
-                    _ => GHOSTTY_MOUSE_UNKNOWN,
-                };
-                let mods = translate_mouse_mods(gesture.current_event_state());
-                unsafe {
-                    ghostty_surface_mouse_pos(surface, x, y, mods);
-                    open_url_external_for_release.set(mods & GHOSTTY_MODS_CTRL != 0);
-                    ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, button, mods);
-                    open_url_external_for_release.set(false);
+        let release_button = Rc::new(
+            move |gesture: &gtk::GestureClick,
+                  btn: Option<u32>,
+                  position: Option<(f64, f64)>,
+                  allow_external_url: bool| {
+                let button = pressed_button.take().or_else(|| {
+                    btn.filter(|btn| *btn != 3).map(|btn| match btn {
+                        1 => GHOSTTY_MOUSE_LEFT,
+                        2 => GHOSTTY_MOUSE_MIDDLE,
+                        _ => GHOSTTY_MOUSE_UNKNOWN,
+                    })
+                });
+                if let (Some(surface), Some(button)) = (*surface_cell.borrow(), button) {
+                    let mods = translate_mouse_mods(gesture.current_event_state());
+                    unsafe {
+                        if let Some((x, y)) = position {
+                            ghostty_surface_mouse_pos(surface, x, y, mods);
+                        }
+                        open_url_external_for_release
+                            .set(allow_external_url && mods & GHOSTTY_MODS_CTRL != 0);
+                        ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, button, mods);
+                        open_url_external_for_release.set(false);
+                    }
                 }
-            }
+            },
+        );
+        let release_button_for_release = release_button.clone();
+        click.connect_released(move |gesture, _n, x, y| {
+            release_button_for_release(gesture, Some(gesture.current_button()), Some((x, y)), true);
+        });
+        let release_button_for_cancel = release_button.clone();
+        click.connect_cancel(move |gesture, _| {
+            release_button_for_cancel(gesture, None, None, false);
+        });
+        click.connect_unpaired_release(move |gesture, x, y, btn, _| {
+            release_button(gesture, Some(btn), Some((x, y)), false);
         });
         gl_area.add_controller(click);
     }
