@@ -77,9 +77,7 @@ for _ in $(seq 1 450); do
   sleep 0.1
 done
 if [ -z "$WINDOW" ] || [ ! -S "$LIMUX_SOCKET" ]; then echo "Host startup timed out"; exit 1; fi
-# Keep split ratios at exactly 0.5 to isolate cwd behavior from the existing
-# session-save conflict caused by fractional-ratio JSON round trips.
-xdotool windowsize --sync "$WINDOW" 1201 760 windowfocus --sync "$WINDOW"
+xdotool windowsize --sync "$WINDOW" 1200 760 windowfocus --sync "$WINDOW"
 sleep 1
 
 wait_for_count() {

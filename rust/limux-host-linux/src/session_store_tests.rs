@@ -1,5 +1,5 @@
 use super::*;
-use crate::layout_state::{LayoutNodeState, PaneState, TabState};
+use crate::layout_state::{LayoutNodeState, PaneState, SplitOrientation, SplitState, TabState};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::{Arc, Barrier};
 use tempfile::tempdir;
@@ -32,6 +32,69 @@ fn saved(store: &mut SessionStore, state: &AppSessionState) {
 }
 fn disk(directory: &Path) -> AppSessionState {
     read_session(directory).unwrap().state
+}
+
+fn split_workspace(ratio: f64) -> WorkspaceState {
+    let mut state = workspace(1);
+    state.layout = LayoutNodeState::Split(SplitState {
+        orientation: SplitOrientation::Horizontal,
+        ratio,
+        start: Box::new(state.layout),
+        end: Box::new(workspace(3).layout),
+    });
+    state
+}
+
+#[test]
+fn fractional_split_ratio_survives_repeated_edits_and_reload() {
+    let dir = tempdir().unwrap();
+    initial(dir.path());
+    let (mut store, loaded) = SessionStore::load_from_dir(dir.path()).unwrap();
+    let mut local = loaded.state;
+    // This ratio previously lost one ULP when parsed from the saved JSON.
+    local.workspaces[0] = split_workspace(0.49948293691830403);
+    saved(&mut store, &local);
+
+    for name in ["first edit", "second edit"] {
+        local.workspaces[0].name = name.into();
+        saved(&mut store, &local);
+        assert_eq!(disk(dir.path()), local);
+    }
+
+    let (mut reloaded, loaded) = SessionStore::load_from_dir(dir.path()).unwrap();
+    assert_eq!(loaded.state, local);
+    reloaded.restored(loaded.state);
+    local.workspaces[0].name = "edit after reload".into();
+    saved(&mut reloaded, &local);
+    assert_eq!(disk(dir.path()), local);
+}
+
+#[test]
+fn concurrent_fractional_split_ratio_edits_still_conflict() {
+    let dir = tempdir().unwrap();
+    let mut base = initial(dir.path());
+    base.workspaces[0] = split_workspace(0.5);
+    layout_state::save_session_atomic_in(dir.path(), &base).unwrap();
+    let (mut a, _) = SessionStore::load_from_dir(dir.path()).unwrap();
+    let (mut b, _) = SessionStore::load_from_dir(dir.path()).unwrap();
+    let ratio: f64 = 0.49948293691830403;
+    let mut ours = base.clone();
+    ours.workspaces[0] = split_workspace(ratio);
+    let mut theirs = base;
+    theirs.workspaces[0] = split_workspace(f64::from_bits(ratio.to_bits() + 1));
+    saved(&mut a, &ours);
+
+    let SaveOutcome::Conflict {
+        recovery,
+        workspaces,
+    } = b.save(&theirs).unwrap()
+    else {
+        panic!("expected conflict between distinct split ratios")
+    };
+    assert_eq!(workspaces, vec!["workspace-1"]);
+    assert_eq!(disk(dir.path()), ours);
+    let recovered: AppSessionState = serde_json::from_slice(&fs::read(recovery).unwrap()).unwrap();
+    assert_eq!(recovered, theirs);
 }
 
 #[test]
