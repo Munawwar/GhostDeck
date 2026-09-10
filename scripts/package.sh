@@ -87,8 +87,9 @@ assert_glibc_compatibility() {
 assert_cli_entrypoint() {
     local path="$1"
     local label="$2"
+    local help
 
-    if ! "$path" --help 2>&1 | grep -q "limux CLI"; then
+    if ! help="$("$path" --help 2>&1)" || ! grep -q "limux CLI" <<< "$help"; then
         echo "ERROR: ${label} is not the limux CLI entrypoint: ${path}"
         exit 1
     fi
@@ -533,8 +534,8 @@ is_legacy_limux_host() {
 
     [ -x "$path" ] || return 1
     help="$("$path" --help 2>&1 || true)"
-    printf '%s\n' "$help" | grep -q "limux CLI" && return 1
-    printf '%s\n' "$help" | grep -q "GApplication" && return 0
+    grep -q "limux CLI" <<< "$help" && return 1
+    grep -q "GApplication" <<< "$help" && return 0
     "$path" --json identify >/tmp/limux-installer-probe.log 2>&1 && return 1
     grep -q "Unknown option --json" /tmp/limux-installer-probe.log
 }
@@ -562,6 +563,7 @@ EOF_PATHS
 warn_if_limux_is_shadowed() {
     local expected="$PREFIX/bin/limux"
     local first
+    local help
 
     first="$(PATH="$PREFIX/bin:$PATH" command -v limux 2>/dev/null || true)"
     if [ "$first" != "$expected" ]; then
@@ -569,7 +571,7 @@ warn_if_limux_is_shadowed() {
         echo "         Agent/CLI commands require the Limux CLI entrypoint."
     fi
 
-    if ! "$expected" --help 2>&1 | grep -q "limux CLI"; then
+    if ! help="$("$expected" --help 2>&1)" || ! grep -q "limux CLI" <<< "$help"; then
         echo "ERROR: installed limux entrypoint is not the CLI: $expected" >&2
         exit 1
     fi

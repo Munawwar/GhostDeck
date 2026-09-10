@@ -19,5 +19,6 @@ cargo fmt --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace -- --test-threads=1
 ./scripts/tests/test-release-version.sh
+./scripts/tests/test-package-entrypoint.sh
 ./scripts/tests/test-package-svg-loader.sh
 ./scripts/tests/test-aur-source-package.sh
