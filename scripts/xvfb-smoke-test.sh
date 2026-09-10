@@ -269,6 +269,9 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 start_compositor
+cargo test --locked $CARGO_FLAGS -p limux-host-linux shutdown_uses_the_terminal_gl_context \
+  -- --ignored --test-threads=1 >"$LOG_DIR/terminal-gl-context.txt" 2>&1 \
+  || { cat "$LOG_DIR/terminal-gl-context.txt"; exit 1; }
 start_host host
 
 echo
@@ -353,16 +356,33 @@ for cycle in $(seq 1 10); do
 
   "$LIMUX_CLI" --json new-pane --workspace "$TEARDOWN_WORKSPACE" --direction right \
     >"$LOG_DIR/stage1c-pane-$cycle-1.json"
+  # Use a clean shell so Ctrl+D is EOF regardless of personal key bindings.
   "$LIMUX_CLI" --json new-pane --workspace "$TEARDOWN_WORKSPACE" --direction down \
+    --command "exec /bin/bash --noprofile --norc" \
     >"$LOG_DIR/stage1c-pane-$cycle-2.json"
   wait_for_host_child_count "$((BASELINE_CHILDREN + 3))"
 
   EXIT_SURFACE="$(jq -r '.surface_ref' "$LOG_DIR/stage1c-pane-$cycle-2.json")"
-  "$LIMUX_CLI" send --workspace "$TEARDOWN_WORKSPACE" --surface "$EXIT_SURFACE" exit \
-    >"$LOG_DIR/stage1c-exit-$cycle.txt"
+  wait_for_healthy_surfaces "$TEARDOWN_WORKSPACE" "$LOG_DIR/stage1c-health-before-$cycle.json"
+  # A realized renderer does not imply that the shell has reached its prompt.
+  READY_FILE="$DEMO_DIR/ctrl-d-ready-$cycle"
+  "$LIMUX_CLI" send --workspace "$TEARDOWN_WORKSPACE" --surface "$EXIT_SURFACE" \
+    "printf ready > '$READY_FILE'" >"$LOG_DIR/stage1c-ready-send-$cycle.txt"
   "$LIMUX_CLI" send-key --workspace "$TEARDOWN_WORKSPACE" --surface "$EXIT_SURFACE" Enter \
-    >"$LOG_DIR/stage1c-exit-enter-$cycle.txt"
+    >"$LOG_DIR/stage1c-ready-enter-$cycle.txt"
+  for _ in $(seq 1 50); do
+    [ -f "$READY_FILE" ] && break
+    sleep 0.1
+  done
+  [ -f "$READY_FILE" ] || { echo "FAIL: Ctrl+D shell did not become ready"; exit 1; }
+  "$LIMUX_CLI" send-key --workspace "$TEARDOWN_WORKSPACE" --surface "$EXIT_SURFACE" '<Ctrl>d' \
+    >"$LOG_DIR/stage1c-ctrl-d-$cycle.txt"
   wait_for_host_child_count "$((BASELINE_CHILDREN + 2))"
+  wait_for_healthy_surfaces "$TEARDOWN_WORKSPACE" "$LOG_DIR/stage1c-health-after-$cycle.json"
+  jq -e --arg closed "$EXIT_SURFACE" '
+    .surfaces | length == 2 and all(.[]; .surface_ref != $closed)
+  ' "$LOG_DIR/stage1c-health-after-$cycle.json" >/dev/null \
+    || { echo "FAIL: Ctrl+D did not close only its terminal"; exit 1; }
 
   "$LIMUX_CLI" close-workspace --workspace "$TEARDOWN_WORKSPACE" \
     >"$LOG_DIR/stage1c-close-$cycle.txt"

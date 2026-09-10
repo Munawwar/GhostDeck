@@ -193,14 +193,9 @@ fn gtk_runtime_at_least(major: u32, minor: u32, micro: u32) -> bool {
     gtk_runtime_version() >= (major, minor, micro)
 }
 
-fn main() {
+/// Configure the embedded renderer before GTK initializes, including in tests.
+fn prepare_ghostty_runtime() {
     limux_ghostty_sys::ensure_glad_symbols_linked();
-
-    // Handle --version flag
-    if std::env::args().any(|a| a == "--version" || a == "-v") {
-        println!("Limux {VERSION}");
-        return;
-    }
 
     // Ghostty requires desktop OpenGL, not GLES. Must set the GTK renderer
     // environment before GTK initializes, and the exact knobs differ by GTK
@@ -218,6 +213,16 @@ fn main() {
     // terminfo, and shell integration. Prefer Limux-bundled resources but
     // fall back to common system Ghostty install locations.
     set_ghostty_runtime_env();
+}
+
+fn main() {
+    // Handle --version flag
+    if std::env::args().any(|a| a == "--version" || a == "-v") {
+        println!("Limux {VERSION}");
+        return;
+    }
+
+    prepare_ghostty_runtime();
     sanitize_terminal_child_env();
 
     // WebKitGTK's bubblewrap sandbox requires unprivileged user namespaces,

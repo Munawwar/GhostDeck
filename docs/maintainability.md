@@ -16,6 +16,32 @@ That script is the source of truth for the repository quality gate and currently
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace`
 
+## Live GTK Regression Tests
+
+For changes to terminal rendering, surface lifetime, or the live control bridge,
+also run the maintained headless Weston harness from the repository root:
+
+```bash
+LIMUX_SMOKE_PROFILE=debug ./scripts/xvfb-smoke-test.sh
+```
+
+It requires Weston, `jq`, `setsid`, the host build dependencies, and the embedded
+Ghostty library built as described in the README. It builds the CLI and host,
+uses a private socket and temporary session/configuration directories, and
+retains logs on failure. The `Rust Quality` workflow runs this harness as well.
+
+Tests that require a graphical display are marked `#[ignore]` so the ordinary
+`cargo test --workspace` run can work without a display. They must be explicitly
+invoked by the harness under Weston; an ignored test alone does not provide
+coverage in the quality gate.
+
+The terminal shutdown regression checks that freeing a terminal selects its
+own OpenGL context even when another widget's context is current. The harness
+then exercises ten multi-pane workspace cycles: it waits for the target shell
+to execute a readiness command, sends Ctrl+D at an empty prompt, checks that
+only that terminal disappears and the other two remain healthy, and closes
+the workspace to check that its child processes are released.
+
 ## Ground Rules
 
 - Keep one source of truth for command metadata, flags, and business rules.

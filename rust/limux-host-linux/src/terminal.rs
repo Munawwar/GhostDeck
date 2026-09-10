@@ -275,7 +275,7 @@ impl TerminalHandle {
         self.im_fallback.set_client_widget(gtk::Widget::NONE);
 
         if let Some(surface) = self.surface_cell.borrow_mut().take() {
-            free_terminal_surface(surface, &self.clipboard_context_cell);
+            free_terminal_surface(surface, &self.clipboard_context_cell, &self.gl_area);
         } else {
             let clipboard_context = self.clipboard_context_cell.replace(ptr::null_mut());
             if !clipboard_context.is_null() {
@@ -1368,6 +1368,7 @@ pub(crate) fn default_font_size() -> f32 {
 fn free_terminal_surface(
     surface: ghostty_surface_t,
     clipboard_context_cell: &Cell<*mut ClipboardContext>,
+    gl_area: &gtk::GLArea,
 ) {
     let surface_key = surface as usize;
     let entry = SURFACE_MAP.with(|map| map.borrow_mut().remove(&surface_key));
@@ -1383,6 +1384,14 @@ fn free_terminal_surface(
     }
 
     clipboard::cancel_surface_requests(surface_key);
+
+    // The Linux C API frees GL objects in the caller's current context. A
+    // shell exit runs from an idle callback, where another terminal's context
+    // (or none) may be current. Bind this terminal before freeing its renderer.
+    // An unrealized surface already released its GL resources in unrealize.
+    if gl_area.is_realized() {
+        gl_area.make_current();
+    }
 
     // Ghostty can invoke callbacks while its worker threads stop. Keep callback
     // userdata and widgets alive until deinitialization finishes.
@@ -2842,6 +2851,48 @@ fn translate_mouse_mods(state: gtk::gdk::ModifierType) -> c_int {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a graphical display and Ghostty resources"]
+    fn shutdown_uses_the_terminal_gl_context() {
+        crate::prepare_ghostty_runtime();
+        gtk::init().expect("GTK display required");
+        init_ghostty();
+        let terminal = create_terminal(
+            Some("/tmp"),
+            TerminalOptions {
+                startup_command: Some("/bin/sh".to_string()),
+                ..TerminalOptions::default()
+            },
+            TerminalCallbacks::disconnected(),
+        );
+        let other_area = gtk::GLArea::new();
+        let contents = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        contents.append(&terminal.root);
+        contents.append(&other_area);
+        let window = gtk::Window::builder()
+            .default_width(640)
+            .default_height(480)
+            .child(&contents)
+            .build();
+        window.present();
+        assert!(terminal.handle.surface_cell.borrow().is_some());
+        let terminal_context = terminal.handle.gl_area.context().expect("terminal context");
+        assert_eq!(terminal_context.api(), gtk::gdk::GLAPI::GL);
+        other_area.make_current();
+        assert!(other_area.error().is_none());
+        assert_ne!(
+            gtk::gdk::GLContext::current(),
+            Some(terminal_context.clone())
+        );
+
+        terminal.handle.shutdown();
+
+        assert_eq!(gtk::gdk::GLContext::current(), Some(terminal_context));
+        assert!(terminal.handle.surface_cell.borrow().is_none());
+        terminal.handle.shutdown(); // A second close must remain harmless.
+        window.close();
+    }
 
     #[test]
     fn physical_size_matches_logical_allocation_times_scale_factor() {
