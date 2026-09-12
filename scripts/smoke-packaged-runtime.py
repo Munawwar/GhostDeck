@@ -10,11 +10,14 @@ import contextlib
 import http.server
 import json
 import os
+import re
 import secrets
+import select
 import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -35,30 +38,125 @@ def wait_for(check, processes, description):
     raise RuntimeError(f"timed out waiting for {description}")
 
 
-def descendants(pid):
+def child_pids(pid):
     children = set()
     for path in Path(f"/proc/{pid}/task").glob("*/children"):
         with contextlib.suppress(FileNotFoundError, ProcessLookupError):
             children.update(int(value) for value in path.read_text().split())
-    return children | {child for pid in children for child in descendants(pid)}
+    return children
 
 
-def stop(process):
+def capture_processes(process, stack):
+    if process.poll() is not None:
+        return []
+    fd = os.pidfd_open(process.pid)
+    stack.callback(os.close, fd)
+    owned = [(process.pid, fd)]
+    for pid, parent_fd in owned:
+        for child in child_pids(pid):
+            with contextlib.suppress(FileNotFoundError, ProcessLookupError):
+                fd = os.pidfd_open(child)
+                stack.callback(os.close, fd)
+                parent = int(
+                    Path(f"/proc/{child}/stat").read_text().rsplit(")", 1)[1].split()[1]
+                )
+                # Check ancestry while both pidfd identities are still alive.
+                # A recycled numeric child PID must not become a cleanup target.
+                if parent == pid and not select.select([parent_fd, fd], [], [], 0)[0]:
+                    owned.append((child, fd))
+    return [fd for _pid, fd in owned]
+
+
+def mounts_under(root):
+    mounts = []
+    for line in Path("/proc/self/mountinfo").read_text().splitlines():
+        fields, filesystem = line.split(" - ", 1)
+        target = Path(
+            re.sub(
+                r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), fields.split()[4]
+            )
+        )
+        if target.is_relative_to(root):
+            kind, source, options = filesystem.split()
+            mounts.append((target, kind, source, options.split(",")))
+    return mounts
+
+
+def detach_runtime_mounts(runtime):
+    allowed = {
+        runtime / "doc": ("fuse.portal", "portal"),
+        runtime / "gvfs": ("fuse.gvfsd-fuse", "gvfsd-fuse"),
+    }
+    mounts = mounts_under(runtime)
+    for target, kind, source, options in mounts:
+        if (
+            allowed.get(target) != (kind, source)
+            or f"user_id={os.getuid()}" not in options
+        ):
+            raise RuntimeError(
+                f"refusing to unmount unexpected private mount: {target}"
+            )
+    for target, _kind, _source, _options in mounts:
+        print(f"Detaching lingering private runtime mount: {target}", flush=True)
+        try:
+            subprocess.run(
+                ["fusermount3", "-u", "-z", "--", str(target)],
+                check=True,
+                timeout=5,
+            )
+        except subprocess.CalledProcessError:
+            # Auto-unmount may win the race after the mountinfo snapshot.
+            if any(mount[0] == target for mount in mounts_under(runtime)):
+                raise
+
+
+def remove_runtime_directory(root):
+    # Never traverse a FUSE mount, including a disconnected one. stat() on a
+    # stale document-portal mount raises ENOTCONN instead of identifying it.
+    mounts = mounts_under(root)
+    if mounts:
+        raise RuntimeError(f"refusing to delete mounted smoke directory: {mounts}")
+    shutil.rmtree(root)
+
+
+def stop(process, runtime=None):
     # PTY shells and WebKit helpers can start new process groups. Capture only
     # this test's descendants before terminating their parent D-Bus session.
-    children = descendants(process.pid)
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        for pid in children:
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(pid, sig)
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(process.pid, sig)
-        try:
-            process.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            continue
-        if sig == signal.SIGTERM:
-            time.sleep(0.1)
+    with contextlib.ExitStack() as stack:
+        owned = capture_processes(process, stack)
+
+        def signal_owned(sig):
+            for fd in owned:
+                with contextlib.suppress(ProcessLookupError):
+                    signal.pidfd_send_signal(fd, sig)
+
+        def wait_stopped():
+            deadline = time.monotonic() + 3
+            while True:
+                process.poll()
+                exited = len(select.select(owned, [], [], 0)[0]) == len(owned)
+                if exited and (runtime is None or not mounts_under(runtime)):
+                    return True
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(0.05)
+
+        signal_owned(signal.SIGTERM)
+        # fusermount auto-unmount helpers ignore TERM and need time to observe
+        # the portal's exit. Waiting only for the D-Bus parent kills them early.
+        if wait_stopped():
+            return
+        errors = []
+        if runtime is not None:
+            try:
+                detach_runtime_mounts(runtime)
+            except (RuntimeError, OSError, subprocess.SubprocessError) as error:
+                errors.append(str(error))
+        signal_owned(signal.SIGKILL)
+        if not wait_stopped():
+            errors.append("owned processes or private mounts remain after cleanup")
+        if errors:
+            raise RuntimeError("; ".join(errors))
 
 
 def run(args, root):
@@ -318,11 +416,21 @@ def run(args, root):
             "Packaged runtime smoke: OK (terminal health, executed input/readback, browser load/JavaScript)"
         )
     finally:
+        failure = sys.exception()
+        cleanup_errors = []
         for process in reversed(processes):
-            stop(process)
+            try:
+                stop(process, root / "runtime")
+            except (RuntimeError, OSError, subprocess.SubprocessError) as error:
+                cleanup_errors.append(str(error))
         server.shutdown()
         server.server_close()
         thread.join(timeout=3)
+        if cleanup_errors:
+            message = "Runtime cleanup failed: " + "; ".join(cleanup_errors)
+            if failure is None:
+                raise RuntimeError(message)
+            print(message, file=sys.stderr, flush=True)
 
 
 def main():
@@ -346,21 +454,24 @@ def main():
     args = parser.parse_args()
     if not args.appimage and args.library_dir is None:
         parser.error("--library-dir is required outside AppImage mode")
-    for tool in ("weston", "dbus-run-session"):
+    for tool in ("weston", "dbus-run-session", "fusermount3"):
         if shutil.which(tool) is None:
             parser.error(f"missing runtime dependency: {tool}")
-    with tempfile.TemporaryDirectory(prefix="limux-package-runtime-") as directory:
-        root = Path(directory)
-        try:
-            run(args, root)
-        except (RuntimeError, OSError, subprocess.TimeoutExpired) as error:
-            print(f"FAIL: {error}", flush=True)
-            for log in root.glob("*.log"):
+    root = Path(tempfile.mkdtemp(prefix="limux-package-runtime-"))
+    try:
+        run(args, root)
+        remove_runtime_directory(root)
+    except BaseException as error:
+        print(f"FAIL: {error}\nSmoke diagnostics retained at {root}", flush=True)
+        for log in root.glob("*.log"):
+            try:
                 print(
                     f"== {log.name} ==\n{log.read_text(errors='replace')[-16000:]}",
                     flush=True,
                 )
-            raise SystemExit(1) from error
+            except OSError as log_error:
+                print(f"Cannot read {log}: {log_error}", flush=True)
+        raise
 
 
 if __name__ == "__main__":
