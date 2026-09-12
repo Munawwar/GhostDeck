@@ -2852,6 +2852,21 @@ fn translate_mouse_mods(state: gtk::gdk::ModifierType) -> c_int {
 mod tests {
     use super::*;
 
+    unsafe extern "C" {
+        // libepoxy exports a dispatch pointer, not a directly callable symbol.
+        static mut epoxy_glGetString: unsafe extern "C" fn(u32) -> *const u8;
+    }
+
+    fn current_gl_string(name: u32) -> String {
+        assert!(gtk::gdk::GLContext::current().is_some());
+        // The graphical test has made its live terminal context current.
+        let value = unsafe { epoxy_glGetString(name) };
+        assert!(!value.is_null(), "OpenGL string {name:#x} unavailable");
+        unsafe { std::ffi::CStr::from_ptr(value.cast()) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
     #[test]
     #[ignore = "requires a graphical display and Ghostty resources"]
     fn shutdown_uses_the_terminal_gl_context() {
@@ -2879,6 +2894,18 @@ mod tests {
         assert!(terminal.handle.surface_cell.borrow().is_some());
         let terminal_context = terminal.handle.gl_area.context().expect("terminal context");
         assert_eq!(terminal_context.api(), gtk::gdk::GLAPI::GL);
+        terminal_context.make_current();
+        assert_eq!(
+            gtk::gdk::GLContext::current(),
+            Some(terminal_context.clone())
+        );
+        let vendor = current_gl_string(0x1f00); // GL_VENDOR
+        let renderer = current_gl_string(0x1f01); // GL_RENDERER
+        let version = current_gl_string(0x1f02); // GL_VERSION
+        println!(
+            "terminal GL: {}",
+            serde_json::json!({ "vendor": vendor, "renderer": renderer, "version": version })
+        );
         other_area.make_current();
         assert!(other_area.error().is_none());
         assert_ne!(
@@ -2892,6 +2919,37 @@ mod tests {
         assert!(terminal.handle.surface_cell.borrow().is_none());
         terminal.handle.shutdown(); // A second close must remain harmless.
         window.close();
+
+        // A deliberate renderer mismatch must fail only after terminal cleanup.
+        if std::env::var("LIMUX_SMOKE_GRAPHICS").as_deref() == Ok("hardware") {
+            let renderer_lower = renderer.to_ascii_lowercase();
+            assert!(
+                ![
+                    "llvmpipe",
+                    "softpipe",
+                    "swrast",
+                    "software rasterizer",
+                    "swiftshader"
+                ]
+                .iter()
+                .any(|software| renderer_lower.contains(software)),
+                "hardware mode selected a software renderer: {renderer}"
+            );
+        }
+        for (key, actual) in [
+            ("LIMUX_EXPECT_GL_VENDOR", vendor.as_str()),
+            ("LIMUX_EXPECT_GL_RENDERER", renderer.as_str()),
+        ] {
+            if let Ok(expected) = std::env::var(key) {
+                assert!(
+                    !expected.is_empty()
+                        && actual
+                            .to_ascii_lowercase()
+                            .contains(&expected.to_ascii_lowercase()),
+                    "{key}: expected {expected:?}, got {actual:?}"
+                );
+            }
+        }
     }
 
     #[test]

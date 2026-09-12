@@ -8,18 +8,103 @@
 # Usage:
 #   ./scripts/xvfb-smoke-test.sh                # release build
 #   LIMUX_SMOKE_PROFILE=debug ./scripts/xvfb-smoke-test.sh
+#   LIMUX_SMOKE_GRAPHICS=hardware LIMUX_EXPECT_GL_VENDOR=NVIDIA \
+#     LIMUX_EXPECT_GL_RENDERER='RTX 5070 Ti' ./scripts/xvfb-smoke-test.sh
 set -euo pipefail
 
 PROFILE="${LIMUX_SMOKE_PROFILE:-release}"
+GRAPHICS="${LIMUX_SMOKE_GRAPHICS:-software}"
+CYCLES="${LIMUX_SMOKE_CYCLES:-10}"
+case "$GRAPHICS" in
+  software) ;;
+  hardware)
+    if [ -z "${LIMUX_EXPECT_GL_VENDOR:-}" ] || [ -z "${LIMUX_EXPECT_GL_RENDERER:-}" ]; then
+      echo "FAIL: hardware mode requires LIMUX_EXPECT_GL_VENDOR and LIMUX_EXPECT_GL_RENDERER"
+      exit 2
+    fi
+    ;;
+  *) echo "FAIL: LIMUX_SMOKE_GRAPHICS must be software or hardware"; exit 2 ;;
+esac
+if [[ ! "$CYCLES" =~ ^([1-9]|[1-9][0-9]|100)$ ]]; then
+  echo "FAIL: LIMUX_SMOKE_CYCLES must be between 1 and 100"
+  exit 2
+fi
+KEEP_ARTIFACTS="${LIMUX_SMOKE_KEEP_ARTIFACTS:-0}"
+if [ "$GRAPHICS" = hardware ]; then KEEP_ARTIFACTS=1; fi
+case "$KEEP_ARTIFACTS" in
+  0|1) ;;
+  *) echo "FAIL: LIMUX_SMOKE_KEEP_ARTIFACTS must be 0 or 1"; exit 2 ;;
+esac
+if [ "${1:-}" != --inside-dbus ]; then
+  command -v dbus-run-session >/dev/null || { echo "FAIL: dbus-run-session missing"; exit 2; }
+  command -v findmnt >/dev/null || { echo "FAIL: findmnt missing"; exit 2; }
+  command -v jq >/dev/null || { echo "FAIL: jq missing"; exit 2; }
+  DEMO_DIR="$(mktemp -d -t limux-smoke-XXXXXX)"
+  export LIMUX_SMOKE_RUN_DIR="$DEMO_DIR"
+  export XDG_DATA_HOME="$DEMO_DIR/data" XDG_STATE_HOME="$DEMO_DIR/state"
+  export XDG_CONFIG_HOME="$DEMO_DIR/config" XDG_CACHE_HOME="$DEMO_DIR/cache"
+  export XDG_RUNTIME_DIR="$DEMO_DIR/runtime"
+  mkdir -p "$XDG_DATA_HOME/limux" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR"
+  chmod 700 "$XDG_RUNTIME_DIR"
+  export GTK_USE_PORTAL=0 GIO_USE_VFS=local GTK_A11Y=none
+  unset DBUS_SESSION_BUS_ADDRESS DBUS_STARTER_ADDRESS DBUS_STARTER_BUS_TYPE DISPLAY WAYLAND_DISPLAY
+  unset GNOME_KEYRING_CONTROL SSH_AUTH_SOCK GPG_AGENT_INFO
+  export GDK_BACKEND=wayland WAYLAND_DISPLAY=wayland-limux-smoke
+  # Terminal smoke needs a bus, not desktop service activation. In particular,
+  # do not start portals or keyrings that can use paths outside the private XDG.
+  cat > "$DEMO_DIR/dbus.conf" <<'SMOKE_DBUS'
+<busconfig>
+  <type>session</type>
+  <listen>unix:tmpdir=/tmp</listen>
+  <auth>EXTERNAL</auth>
+  <policy context="default">
+    <allow send_destination="*" eavesdrop="true"/>
+    <allow eavesdrop="true"/>
+    <allow own="*"/>
+  </policy>
+</busconfig>
+SMOKE_DBUS
+
+  # D-Bus activation inherits the private paths too. Only this outer invocation
+  # owns directory cleanup, after its private bus and smoke command have exited.
+  result=0
+  dbus-run-session --config-file="$DEMO_DIR/dbus.conf" -- bash "$0" --inside-dbus || result=$?
+  if [ "$result" -eq 0 ] && [ "$KEEP_ARTIFACTS" = 0 ]; then
+    # Portals may leave a private FUSE mount briefly after the bus exits.
+    # Read the kernel mount table without resolving or touching those paths.
+    private_mounts=""
+    for _ in $(seq 1 50); do
+      if ! private_mounts="$(findmnt --kernel --list --json --output TARGET --nocanonicalize \
+        | jq -r --arg root "$DEMO_DIR" '.filesystems[].target | select(. == $root or startswith($root + "/"))')"; then
+        echo "FAIL: could not verify private mounts before cleanup"
+        result=1
+        break
+      fi
+      [ -z "$private_mounts" ] && break
+      sleep 0.1
+    done
+    if [ -n "$private_mounts" ]; then
+      echo "FAIL: private mounts remain after D-Bus shutdown: $private_mounts"
+      result=1
+    fi
+    if [ "$result" -eq 0 ]; then rm -rf "$DEMO_DIR"; fi
+  fi
+  if [ "$result" -ne 0 ] || [ "$KEEP_ARTIFACTS" = 1 ]; then
+    echo "artifacts retained at: $DEMO_DIR"
+  fi
+  exit "$result"
+fi
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
-DEMO_DIR="$(mktemp -d -t limux-smoke-XXXXXX)"
+DEMO_DIR="${LIMUX_SMOKE_RUN_DIR:?private smoke directory missing}"
 LOG_DIR="$DEMO_DIR/logs"
 mkdir -p "$LOG_DIR"
 
 echo "== limux agent-integrations smoke test =="
 echo "profile:   $PROFILE"
+echo "graphics:  $GRAPHICS (headless Wayland)"
+echo "cycles:    $CYCLES"
 echo "demo dir:  $DEMO_DIR"
 echo "log dir:   $LOG_DIR"
 
@@ -58,6 +143,15 @@ LIBGHOSTTY_DIR="$ROOT_DIR/ghostty/zig-out/lib"
 if [ -d "$LIBGHOSTTY_DIR" ]; then
   export LD_LIBRARY_PATH="$LIBGHOSTTY_DIR:${LD_LIBRARY_PATH:-}"
 fi
+export GHOSTTY_RESOURCES_DIR="$ROOT_DIR/ghostty/zig-out/share/ghostty"
+export GHOSTTY_SHELL_INTEGRATION_XDG_DIR="$GHOSTTY_RESOURCES_DIR/shell-integration"
+export TERMINFO="$ROOT_DIR/ghostty/zig-out/share/terminfo"
+
+# Personal shell startup files can consume the native autostart input. Keep
+# the POSIX-shell fixture deterministic without changing the user's home.
+export SHELL=/bin/sh ENV=/dev/null PS1='' PS2=''
+mkdir -p "$XDG_CONFIG_HOME/ghostty"
+printf 'command = /bin/sh\n' > "$XDG_CONFIG_HOME/ghostty/config"
 
 # --- 3. Stage 0: dry-run agent-team (no host) ----------------------------
 # Fast sanity pass — if this fails nothing else will work.
@@ -81,12 +175,6 @@ export LIMUX_SOCKET="$SOCKET"
 export LIMUX_SOCKET_PATH="$SOCKET"
 export LIMUX_SOCKET_MODE="runtime"
 unset LIMUX_PANE_ID LIMUX_SURFACE_ID LIMUX_TAB_ID LIMUX_WORKSPACE_ID
-export XDG_DATA_HOME="$DEMO_DIR/data"
-export XDG_STATE_HOME="$DEMO_DIR/state"
-export XDG_CONFIG_HOME="$DEMO_DIR/config"
-export XDG_RUNTIME_DIR="$DEMO_DIR/runtime"
-mkdir -p "$XDG_DATA_HOME/limux" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR"
-chmod 700 "$XDG_RUNTIME_DIR"
 mkdir -p "$DEMO_DIR/autostart-cwd"
 cat > "$XDG_DATA_HOME/limux/session.json" <<SMOKE_SESSION
 {
@@ -123,17 +211,27 @@ SMOKE_SESSION
 
 echo
 echo "== stage 1: boot limux host under headless Weston =="
-export LIBGL_ALWAYS_SOFTWARE=1
-export GALLIUM_DRIVER="${GALLIUM_DRIVER:-llvmpipe}"
-export LP_NUM_THREADS=1
+WESTON_RENDERER_ARGS=()
+if [ "$GRAPHICS" = hardware ]; then
+  unset LIBGL_ALWAYS_SOFTWARE GALLIUM_DRIVER LP_NUM_THREADS
+  WESTON_RENDERER_ARGS=(--use-gl)
+  export GDK_DEBUG="${GDK_DEBUG:+$GDK_DEBUG,}opengl"
+else
+  export LIBGL_ALWAYS_SOFTWARE=1
+  export GALLIUM_DRIVER="${GALLIUM_DRIVER:-llvmpipe}"
+  export LP_NUM_THREADS=1
+fi
 export GDK_BACKEND=wayland
 export WAYLAND_DISPLAY=wayland-limux-smoke
+unset DISPLAY
 HOST_PID=""
 WESTON_PID=""
 
 start_compositor() {
   setsid weston \
     --backend=headless-backend.so \
+    --no-config \
+    "${WESTON_RENDERER_ARGS[@]}" \
     --socket="$WAYLAND_DISPLAY" \
     --idle-time=0 \
     --width=1280 \
@@ -260,18 +358,19 @@ cleanup() {
       echo "-- $log (tail) --"
       tail -n 40 "$log" || true
     done
-    echo "artifacts retained at: $DEMO_DIR"
-  else
-    # Clean slate on success.
-    rm -rf "$DEMO_DIR"
   fi
 }
 trap cleanup EXIT INT TERM
 
 start_compositor
 cargo test --locked $CARGO_FLAGS -p limux-host-linux shutdown_uses_the_terminal_gl_context \
-  -- --ignored --test-threads=1 >"$LOG_DIR/terminal-gl-context.txt" 2>&1 \
+  -- --ignored --test-threads=1 --nocapture >"$LOG_DIR/terminal-gl-context.txt" 2>&1 \
   || { cat "$LOG_DIR/terminal-gl-context.txt"; exit 1; }
+cat "$LOG_DIR/terminal-gl-context.txt"
+if [ "$GRAPHICS" = hardware ] && ! grep -Fq 'terminal GL: ' "$LOG_DIR/terminal-gl-context.txt"; then
+  echo "FAIL: hardware regression did not report its terminal GL context"
+  exit 1
+fi
 start_host host
 
 echo
@@ -346,7 +445,7 @@ echo "stage 1b: OK (surface realized, terminal I/O and key levels verified)"
 echo
 echo "== stage 1c: terminal teardown releases workspace processes =="
 BASELINE_CHILDREN="$(host_child_count)"
-for cycle in $(seq 1 10); do
+for cycle in $(seq 1 "$CYCLES"); do
   "$LIMUX_CLI" --json new-workspace --cwd "$DEMO_DIR" \
     >"$LOG_DIR/stage1c-workspace-$cycle.json"
   TEARDOWN_WORKSPACE="$(jq -r '.workspace_ref' "$LOG_DIR/stage1c-workspace-$cycle.json")"
@@ -388,7 +487,7 @@ for cycle in $(seq 1 10); do
     >"$LOG_DIR/stage1c-close-$cycle.txt"
   wait_for_host_child_count "$BASELINE_CHILDREN"
 done
-echo "stage 1c: OK (10 multi-pane workspace cycles returned to $BASELINE_CHILDREN child process)"
+echo "stage 1c: OK ($CYCLES multi-pane workspace cycles returned to $BASELINE_CHILDREN child process)"
 
 # --- 5. Stage 2: live agent-team ------------------------------------------
 echo
