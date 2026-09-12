@@ -68,6 +68,7 @@ pub(crate) struct AppState {
     app: adw::Application,
     window: adw::ApplicationWindow,
     top_bar: Option<adw::HeaderBar>,
+    sidebar_toggle: Option<gtk::ToggleButton>,
     top_bar_visible: bool,
     config: Rc<RefCell<app_config::AppConfig>>,
     css_provider: gtk::CssProvider,
@@ -1091,6 +1092,7 @@ fn apply_sidebar_state_immediately(state: &State, sidebar_state: &layout_state::
         if sidebar_state.visible { width } else { 0 },
         sidebar_state.visible,
     );
+    sync_sidebar_toggle(state);
 }
 
 fn apply_top_bar_state_immediately(state: &State, visible: bool) {
@@ -1621,6 +1623,15 @@ pub fn build_window(app: &adw::Application) {
         bar.set_title_widget(Some(&gtk::Label::builder().label(&title).build()));
         Some(bar)
     };
+    let sidebar_toggle = header.as_ref().map(|header| {
+        let button = gtk::ToggleButton::builder()
+            .icon_name("sidebar-show-symbolic")
+            .action_name("win.toggle-sidebar")
+            .focus_on_click(false)
+            .build();
+        header.pack_start(&button);
+        button
+    });
 
     let stack = gtk::Stack::new();
     stack.set_transition_type(gtk::StackTransitionType::None);
@@ -1726,6 +1737,7 @@ pub fn build_window(app: &adw::Application) {
         app: app.clone(),
         window: window.clone(),
         top_bar: header.clone(),
+        sidebar_toggle,
         top_bar_visible: true,
         config,
         css_provider: provider.clone(),
@@ -2479,6 +2491,7 @@ fn apply_shortcut_config(state: &State, shortcuts: ResolvedShortcutConfig) {
     };
 
     apply_shortcuts_to_application(&app, &shortcuts_rc);
+    sync_sidebar_toggle(state);
     for root in workspace_roots {
         refresh_shortcut_tooltips_in_layout(&root, &shortcuts_rc);
     }
@@ -5470,6 +5483,34 @@ fn first_leaf_pane(widget: &gtk::Widget) -> gtk::Widget {
 /// Default sidebar width in pixels.
 const SIDEBAR_WIDTH: i32 = 220;
 
+fn sync_sidebar_toggle(state: &State) {
+    let (button, visible, shortcut) = {
+        let s = state.borrow();
+        let Some(button) = s.sidebar_toggle.clone() else {
+            return;
+        };
+        let visible = s.sidebar_animation.as_ref().map_or_else(
+            || sidebar_is_visible(&s),
+            |animation| animation.value_to() > 10.0,
+        );
+        (
+            button,
+            visible,
+            s.shortcuts.display_label_for_id(ShortcutId::ToggleSidebar),
+        )
+    };
+    let label = if visible {
+        "Hide sidebar"
+    } else {
+        "Show sidebar"
+    };
+    let tooltip = shortcut.map_or_else(|| label.to_string(), |key| format!("{label} ({key})"));
+    button.set_active(visible);
+    button.set_tooltip_text(Some(&tooltip));
+    button.update_property(&[gtk::accessible::Property::Label(label)]);
+    button.update_state(&[gtk::accessible::State::Expanded(Some(visible))]);
+}
+
 fn sync_top_bar_visibility(state: &State) {
     let (top_bar, preferred_visible, fullscreened) = {
         let s = state.borrow();
@@ -5558,10 +5599,12 @@ fn toggle_sidebar(state: &State) {
             };
             if is_current {
                 set_sidebar_state_widgets(&sidebar_shell, &sidebar_handle, 0, false);
+                sync_sidebar_toggle(&state_for_done);
                 request_session_save(&state_for_done);
             }
         });
         state.borrow_mut().sidebar_animation = Some(animation.clone());
+        sync_sidebar_toggle(state);
         animation.play();
     } else {
         // Expand: make sidebar visible, then animate position from 0 to remembered width.
@@ -5592,10 +5635,12 @@ fn toggle_sidebar(state: &State) {
                 }
             };
             if is_current {
+                sync_sidebar_toggle(&state_for_done);
                 request_session_save(&state_for_done);
             }
         });
         state.borrow_mut().sidebar_animation = Some(animation.clone());
+        sync_sidebar_toggle(state);
         animation.play();
     }
 }
