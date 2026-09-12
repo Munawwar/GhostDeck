@@ -5483,19 +5483,22 @@ fn first_leaf_pane(widget: &gtk::Widget) -> gtk::Widget {
 /// Default sidebar width in pixels.
 const SIDEBAR_WIDTH: i32 = 220;
 
+fn sidebar_target_is_visible(state: &AppState) -> bool {
+    state.sidebar_animation.as_ref().map_or_else(
+        || sidebar_is_visible(state),
+        |animation| animation.value_to() > 10.0,
+    )
+}
+
 fn sync_sidebar_toggle(state: &State) {
     let (button, visible, shortcut) = {
         let s = state.borrow();
         let Some(button) = s.sidebar_toggle.clone() else {
             return;
         };
-        let visible = s.sidebar_animation.as_ref().map_or_else(
-            || sidebar_is_visible(&s),
-            |animation| animation.value_to() > 10.0,
-        );
         (
             button,
-            visible,
+            sidebar_target_is_visible(&s),
             s.shortcuts.display_label_for_id(ShortcutId::ToggleSidebar),
         )
     };
@@ -5548,8 +5551,8 @@ fn toggle_sidebar(state: &State) {
     let (sidebar_shell, sidebar_handle, current, is_visible, target_width, prior_animation, epoch) = {
         let mut s = state.borrow_mut();
         let current = sidebar_width(&s.sidebar_shell);
-        let is_visible = current > 10; // treat < 10px as collapsed
-        if is_visible {
+        let is_visible = sidebar_target_is_visible(&s);
+        if is_visible && s.sidebar_animation.is_none() {
             s.sidebar_expanded_width = current;
         }
         let target_width = s.sidebar_expanded_width.max(SIDEBAR_WIDTH);
@@ -5607,8 +5610,8 @@ fn toggle_sidebar(state: &State) {
         sync_sidebar_toggle(state);
         animation.play();
     } else {
-        // Expand: make sidebar visible, then animate position from 0 to remembered width.
-        set_sidebar_state_widgets(&sidebar_shell, &sidebar_handle, 0, true);
+        // Expand from the current position to the remembered width.
+        set_sidebar_state_widgets(&sidebar_shell, &sidebar_handle, current, true);
         let target = adw::CallbackAnimationTarget::new({
             let sidebar_shell = sidebar_shell.clone();
             move |value| {
@@ -5617,7 +5620,7 @@ fn toggle_sidebar(state: &State) {
         });
         let animation = adw::TimedAnimation::builder()
             .widget(&sidebar_shell)
-            .value_from(0.0)
+            .value_from(current as f64)
             .value_to(target_width as f64)
             .duration(200)
             .easing(adw::Easing::EaseInOutCubic)

@@ -133,18 +133,26 @@ key() { xdotool key --clearmodifiers "$1"; }
 click() { xdotool mousemove --window "$WINDOW" "$1" "$2" click "${3:-1}"; }
 
 wait_for_sidebar() {
-  local visible=$1
+  local visible=$1 label=${2:-sidebar}
   for _ in $(seq 1 50); do
     if jq -e --argjson visible "$visible" \
       '.sidebar.visible == $visible and .sidebar.width == 300' \
       "$XDG_DATA_HOME/limux/session.json" >/dev/null; then
-      echo "PASS: sidebar visible=$visible preserves restored width"
+      echo "PASS: $label visible=$visible preserves restored width"
       return
     fi
     sleep 0.1
   done
-  echo "FAIL: sidebar visible=$visible with restored width 300 was not persisted"
+  echo "FAIL: $label visible=$visible with restored width 300 was not persisted"
   exit 1
+}
+
+rapid_sidebar_clicks() {
+  local count=$1 visible=$2
+  xdotool mousemove --window "$WINDOW" 20 25 click --repeat "$count" --delay 50 1
+  # Initial and final state can match; wait for animation/save, not stale JSON.
+  sleep 0.6
+  wait_for_sidebar "$visible" "sidebar after $count rapid clicks"
 }
 
 wait_for_count cwd-main 1
@@ -160,6 +168,11 @@ click 20 25
 wait_for_sidebar false
 click 20 25
 wait_for_sidebar true
+
+rapid_sidebar_clicks 2 true
+rapid_sidebar_clicks 3 false
+rapid_sidebar_clicks 2 false
+rapid_sidebar_clicks 3 true
 
 set_directory "$RUN_DIR/workspace/nested"
 key ctrl+shift+t
