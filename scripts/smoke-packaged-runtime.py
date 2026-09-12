@@ -7,6 +7,7 @@
 
 import argparse
 import contextlib
+import ctypes
 import http.server
 import json
 import os
@@ -22,6 +23,25 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+
+
+def require_pidfd_support():
+    missing = [
+        f"{module.__name__}.{name}"
+        for module, name in (
+            (os, "pidfd_open"),
+            (os, "P_PIDFD"),
+            (os, "waitid"),
+            (signal, "pidfd_send_signal"),
+        )
+        if getattr(module, name, None) is None
+    ]
+    if missing:
+        raise RuntimeError(
+            f"Python at {sys.executable} lacks Linux pidfd support: {', '.join(missing)}. "
+            "Select a Python build with these APIs, for example "
+            "UV_PYTHON=/usr/bin/python3 on Ubuntu 24.04."
+        )
 
 
 def wait_for(check, processes, description):
@@ -46,12 +66,25 @@ def child_pids(pid):
     return children
 
 
-def capture_processes(process, stack):
-    if process.poll() is not None:
-        return []
-    fd = os.pidfd_open(process.pid)
+@contextlib.contextmanager
+def child_subreaper():
+    libc = ctypes.CDLL(None, use_errno=True)
+    previous = ctypes.c_int()
+    if libc.prctl(37, ctypes.byref(previous), 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "PR_GET_CHILD_SUBREAPER failed")
+    if libc.prctl(36, 1, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "PR_SET_CHILD_SUBREAPER failed")
+    try:
+        yield
+    finally:
+        if libc.prctl(36, previous.value, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "restoring child subreaper failed")
+
+
+def capture_processes(root_pid, stack):
+    fd = os.pidfd_open(root_pid)
     stack.callback(os.close, fd)
-    owned = [(process.pid, fd)]
+    owned = [(root_pid, fd)]
     for pid, parent_fd in owned:
         for child in child_pids(pid):
             with contextlib.suppress(FileNotFoundError, ProcessLookupError):
@@ -60,11 +93,15 @@ def capture_processes(process, stack):
                 parent = int(
                     Path(f"/proc/{child}/stat").read_text().rsplit(")", 1)[1].split()[1]
                 )
-                # Check ancestry while both pidfd identities are still alive.
-                # A recycled numeric child PID must not become a cleanup target.
-                if parent == pid and not select.select([parent_fd, fd], [], [], 0)[0]:
+                # Direct children cannot be recycled until this harness reaps
+                # them. Retain their zombies too, so adopted children get reaped.
+                if (
+                    parent == pid
+                    and not select.select([parent_fd], [], [], 0)[0]
+                    and (pid == os.getpid() or not select.select([fd], [], [], 0)[0])
+                ):
                     owned.append((child, fd))
-    return [fd for _pid, fd in owned]
+    return owned[1:]
 
 
 def mounts_under(root):
@@ -119,32 +156,62 @@ def remove_runtime_directory(root):
     shutil.rmtree(root)
 
 
-def stop(process, runtime=None):
-    # PTY shells and WebKit helpers can start new process groups. Capture only
-    # this test's descendants before terminating their parent D-Bus session.
+def stop(processes, runtime=None):
+    # The harness is a subreaper: helpers remain its descendants even when a
+    # wrapper has already exited or a helper starts its own process group.
     with contextlib.ExitStack() as stack:
-        owned = capture_processes(process, stack)
+        owned = {}
+
+        def capture_new(sig):
+            with contextlib.ExitStack() as snapshot:
+                for pid, fd in capture_processes(os.getpid(), snapshot):
+                    if pid in owned and not select.select([owned[pid]], [], [], 0)[0]:
+                        continue
+                    if pid in owned:
+                        os.close(owned.pop(pid))
+                    owned[pid] = os.dup(fd)
+                    with contextlib.suppress(ProcessLookupError):
+                        signal.pidfd_send_signal(owned[pid], sig)
+
+        def close_owned():
+            for fd in owned.values():
+                os.close(fd)
+
+        stack.callback(close_owned)
 
         def signal_owned(sig):
-            for fd in owned:
+            for fd in owned.values():
                 with contextlib.suppress(ProcessLookupError):
                     signal.pidfd_send_signal(fd, sig)
 
-        def wait_stopped():
+        def reap():
+            for process in processes:
+                process.poll()
+            direct = {p.pid for p in processes if p.returncode is None}
+            for pid, fd in owned.items():
+                if pid not in direct:
+                    with contextlib.suppress(ChildProcessError):
+                        os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG)
+
+        def wait_stopped(sig):
             deadline = time.monotonic() + 3
             while True:
-                process.poll()
-                exited = len(select.select(owned, [], [], 0)[0]) == len(owned)
+                capture_new(sig)
+                reap()
+                exited = len(select.select(list(owned.values()), [], [], 0)[0]) == len(
+                    owned
+                )
                 if exited and (runtime is None or not mounts_under(runtime)):
-                    return True
+                    reap()
+                    if not child_pids(os.getpid()):
+                        return True
                 if time.monotonic() >= deadline:
                     return False
                 time.sleep(0.05)
 
-        signal_owned(signal.SIGTERM)
         # fusermount auto-unmount helpers ignore TERM and need time to observe
         # the portal's exit. Waiting only for the D-Bus parent kills them early.
-        if wait_stopped():
+        if wait_stopped(signal.SIGTERM):
             return
         errors = []
         if runtime is not None:
@@ -153,7 +220,7 @@ def stop(process, runtime=None):
             except (RuntimeError, OSError, subprocess.SubprocessError) as error:
                 errors.append(str(error))
         signal_owned(signal.SIGKILL)
-        if not wait_stopped():
+        if not wait_stopped(signal.SIGKILL):
             errors.append("owned processes or private mounts remain after cleanup")
         if errors:
             raise RuntimeError("; ".join(errors))
@@ -418,11 +485,10 @@ def run(args, root):
     finally:
         failure = sys.exception()
         cleanup_errors = []
-        for process in reversed(processes):
-            try:
-                stop(process, root / "runtime")
-            except (RuntimeError, OSError, subprocess.SubprocessError) as error:
-                cleanup_errors.append(str(error))
+        try:
+            stop(processes, root / "runtime")
+        except (RuntimeError, OSError, subprocess.SubprocessError) as error:
+            cleanup_errors.append(str(error))
         server.shutdown()
         server.server_close()
         thread.join(timeout=3)
@@ -454,12 +520,17 @@ def main():
     args = parser.parse_args()
     if not args.appimage and args.library_dir is None:
         parser.error("--library-dir is required outside AppImage mode")
+    try:
+        require_pidfd_support()
+    except RuntimeError as error:
+        parser.error(str(error))
     for tool in ("weston", "dbus-run-session", "fusermount3"):
         if shutil.which(tool) is None:
             parser.error(f"missing runtime dependency: {tool}")
     root = Path(tempfile.mkdtemp(prefix="limux-package-runtime-"))
     try:
-        run(args, root)
+        with child_subreaper():
+            run(args, root)
         remove_runtime_directory(root)
     except BaseException as error:
         print(f"FAIL: {error}\nSmoke diagnostics retained at {root}", flush=True)
