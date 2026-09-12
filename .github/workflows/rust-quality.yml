@@ -136,3 +136,6 @@ jobs:
 
       - name: Check terminal directory inheritance
         run: ./scripts/tests/test-terminal-cwd.sh
+
+      - name: Check tab double-click rename
+        run: ./scripts/tests/test-tab-rename.sh

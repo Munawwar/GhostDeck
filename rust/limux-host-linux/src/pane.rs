@@ -2395,7 +2395,8 @@ fn build_tab_button_from_label(
         let callbacks = internals.callbacks.clone();
         let pane_widget = internals.pane_outer.downgrade();
         let tab_button = tab_btn.clone();
-        click.connect_pressed(move |gesture, _, _, _| {
+        let label = label.clone();
+        click.connect_pressed(move |gesture, n_press, _, _| {
             if handle_tab_interaction_while_renaming(&tab_button, &tab_state) {
                 gesture.set_state(gtk::EventSequenceState::Denied);
                 return;
@@ -2410,6 +2411,17 @@ fn build_tab_button_from_label(
                 );
             }
             (callbacks.on_state_changed)();
+            if n_press == 2 {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                let tab_strip = tab_strip.clone();
+                let label = label.clone();
+                let tab_state = tab_state.clone();
+                let tab_id = tab_id.clone();
+                let callbacks = callbacks.clone();
+                glib::idle_add_local_once(move || {
+                    show_rename_dialog(&tab_strip, &label, &tab_state, &tab_id, &callbacks);
+                });
+            }
         });
     }
     tab_btn.add_controller(click);
