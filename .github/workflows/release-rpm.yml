@@ -83,6 +83,7 @@ jobs:
             cpio \
             dbus-x11 \
             desktop-file-utils \
+            fuse3 \
             gettext \
             libadwaita-1-dev \
             libepoxy-dev \
@@ -109,6 +110,9 @@ jobs:
 
       - name: Test AppImage SVG loader packaging
         run: ./scripts/tests/test-package-svg-loader.sh
+
+      - name: Test packaged runtime cleanup
+        run: uv run scripts/tests/test-smoke-cleanup.py
 
       - name: Build RPM package
         env:
