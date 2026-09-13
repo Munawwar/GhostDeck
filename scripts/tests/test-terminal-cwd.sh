@@ -38,7 +38,7 @@ printf 'command = /bin/sh\nshell-integration = none\nfont-size = 12\n' \
   >"$XDG_CONFIG_HOME/ghostty/config"
 jq -n --arg base "$RUN_DIR" '{
   version: 1, active_workspace_index: 0, top_bar_visible: true,
-  sidebar: {visible: true, width: 220},
+  sidebar: {visible: false, width: 300},
   workspaces: [
     {id: "cwd-main", name: "cwd-main", folder_path: ($base + "/workspace"),
      autostart_command: ("printf '\''%s\\n'\'' \"$LIMUX_SURFACE_ID\" >> " + $base + "/autostart.log"),
@@ -132,8 +132,48 @@ set_directory() {
 key() { xdotool key --clearmodifiers "$1"; }
 click() { xdotool mousemove --window "$WINDOW" "$1" "$2" click "${3:-1}"; }
 
+wait_for_sidebar() {
+  local visible=$1 label=${2:-sidebar}
+  for _ in $(seq 1 50); do
+    if jq -e --argjson visible "$visible" \
+      '.sidebar.visible == $visible and .sidebar.width == 300' \
+      "$XDG_DATA_HOME/limux/session.json" >/dev/null; then
+      echo "PASS: $label visible=$visible preserves restored width"
+      return
+    fi
+    sleep 0.1
+  done
+  echo "FAIL: $label visible=$visible with restored width 300 was not persisted"
+  exit 1
+}
+
+rapid_sidebar_clicks() {
+  local count=$1 visible=$2
+  xdotool mousemove --window "$WINDOW" 20 25 click --repeat "$count" --delay 50 1
+  # Initial and final state can match; wait for animation/save, not stale JSON.
+  sleep 0.6
+  wait_for_sidebar "$visible" "sidebar after $count rapid clicks"
+}
+
 wait_for_count cwd-main 1
 assert_directory "$RUN_DIR/workspace" initial-directory
+wait_for_sidebar false
+click 20 25
+wait_for_sidebar true
+key ctrl+alt+m
+wait_for_sidebar false
+key ctrl+alt+m
+wait_for_sidebar true
+click 20 25
+wait_for_sidebar false
+click 20 25
+wait_for_sidebar true
+
+rapid_sidebar_clicks 2 true
+rapid_sidebar_clicks 3 false
+rapid_sidebar_clicks 2 false
+rapid_sidebar_clicks 3 true
+
 set_directory "$RUN_DIR/workspace/nested"
 key ctrl+shift+t
 wait_for_count cwd-main 2
