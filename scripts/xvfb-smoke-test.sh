@@ -325,19 +325,32 @@ wait_for_healthy_surfaces() {
 }
 
 host_child_count() {
-  awk '{ count += NF } END { print count + 0 }' /proc/"$HOST_PID"/task/*/children
+  local count
+  # A thread can exit after glob expansion. Do not emit a partial scan's count.
+  if count="$(awk '{ count += NF } END { print count + 0 }' /proc/"$HOST_PID"/task/*/children 2>/dev/null)"; then
+    printf '%s\n' "$count"
+    return 0
+  fi
+  return 1
 }
 
 wait_for_host_child_count() {
-  local expected="$1"
+  local expected="${1:-}" count last_count=unavailable
   for _ in $(seq 1 100); do
-    if [ "$(host_child_count)" -eq "$expected" ]; then
-      return 0
+    if count="$(host_child_count)"; then
+      last_count="$count"
+      if [ -z "$expected" ]; then
+        printf '%s\n' "$count"
+        return 0
+      fi
+      if [ "$count" -eq "$expected" ]; then
+        return 0
+      fi
     fi
     sleep 0.1
   done
 
-  echo "FAIL: host child count is $(host_child_count), expected $expected"
+  echo "FAIL: host $HOST_PID child count: last complete=$last_count, expected=${expected:-readable}" >&2
   return 1
 }
 
@@ -444,7 +457,7 @@ echo "stage 1b: OK (surface realized, terminal I/O and key levels verified)"
 
 echo
 echo "== stage 1c: terminal teardown releases workspace processes =="
-BASELINE_CHILDREN="$(host_child_count)"
+BASELINE_CHILDREN="$(wait_for_host_child_count)"
 for cycle in $(seq 1 "$CYCLES"); do
   "$LIMUX_CLI" --json new-workspace --cwd "$DEMO_DIR" \
     >"$LOG_DIR/stage1c-workspace-$cycle.json"
