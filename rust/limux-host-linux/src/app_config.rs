@@ -39,6 +39,30 @@ impl ColorScheme {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowControlsSide {
+    Left,
+    #[default]
+    Right,
+}
+
+impl WindowControlsSide {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
+        }
+    }
+
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "left" => Some(Self::Left),
+            "right" => Some(Self::Right),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
@@ -51,6 +75,8 @@ pub struct AppConfig {
     pub notifications: NotificationConfig,
     #[serde(skip)]
     pub clipboard: ClipboardConfig,
+    #[serde(skip)]
+    pub interface: InterfaceConfig,
     #[serde(skip)]
     pub links: LinkConfig,
     #[serde(skip)]
@@ -103,6 +129,23 @@ impl UiScale {
 
     pub fn is_default(self) -> bool {
         (self.0 - DEFAULT_UI_SCALE).abs() < f32::EPSILON
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InterfaceConfig {
+    pub window_controls_side: WindowControlsSide,
+    pub show_top_bar: bool,
+    pub show_workspace_indicators: bool,
+}
+
+impl Default for InterfaceConfig {
+    fn default() -> Self {
+        Self {
+            window_controls_side: WindowControlsSide::default(),
+            show_top_bar: true,
+            show_workspace_indicators: true,
+        }
     }
 }
 
@@ -405,6 +448,24 @@ fn parse_app_config_value(root: &Value) -> AppConfig {
         .map(|v| v as f32)
         .filter(|v| (1.0..=255.0).contains(v));
 
+    let interface_obj = root.get("interface").and_then(Value::as_object);
+
+    let window_controls_side = interface_obj
+        .and_then(|interface| interface.get("window_controls_side"))
+        .and_then(Value::as_str)
+        .and_then(WindowControlsSide::from_str)
+        .unwrap_or_default();
+
+    let show_top_bar = interface_obj
+        .and_then(|interface| interface.get("show_top_bar"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
+    let show_workspace_indicators = interface_obj
+        .and_then(|interface| interface.get("show_workspace_indicators"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
     AppConfig {
         focus: FocusConfig {
             hover_terminal_focus,
@@ -424,6 +485,11 @@ fn parse_app_config_value(root: &Value) -> AppConfig {
         },
         clipboard: ClipboardConfig {
             copy_selection_to_clipboard,
+        },
+        interface: InterfaceConfig {
+            window_controls_side,
+            show_top_bar,
+            show_workspace_indicators,
         },
         links: LinkConfig { open_destination },
         font_size,
@@ -485,6 +551,14 @@ fn save_to_path(path: &Path, config: &AppConfig) -> Result<(), String> {
         "clipboard".to_string(),
         json!({
             "copy_selection_to_clipboard": config.clipboard.copy_selection_to_clipboard,
+        }),
+    );
+    root.insert(
+        "interface".to_string(),
+        json!({
+            "window_controls_side": config.interface.window_controls_side.as_str(),
+            "show_top_bar": config.interface.show_top_bar,
+            "show_workspace_indicators": config.interface.show_workspace_indicators,
         }),
     );
     root.insert(
@@ -632,6 +706,47 @@ mod tests {
     use std::ffi::OsString;
 
     use tempfile::TempDir;
+
+    #[test]
+    fn interface_preferences_round_trip_without_losing_link_settings() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("settings.json");
+        for side in [WindowControlsSide::Left, WindowControlsSide::Right] {
+            let config = AppConfig {
+                interface: InterfaceConfig {
+                    window_controls_side: side,
+                    show_top_bar: false,
+                    show_workspace_indicators: false,
+                },
+                links: LinkConfig {
+                    open_destination: LinkOpenDestination::BrowserTab,
+                },
+                ..Default::default()
+            };
+
+            save_to_path(&path, &config).expect("save config");
+            let loaded = load_from_path(&path);
+            assert!(loaded.warnings.is_empty());
+            assert_eq!(loaded.config, config);
+        }
+    }
+
+    #[test]
+    fn missing_and_invalid_interface_preferences_use_defaults() {
+        for root in [
+            json!({}),
+            json!({"interface": {
+                "window_controls_side": "unknown",
+                "show_top_bar": "false",
+                "show_workspace_indicators": null
+            }}),
+        ] {
+            assert_eq!(
+                parse_app_config_value(&root).interface,
+                InterfaceConfig::default()
+            );
+        }
+    }
 
     struct EnvVarGuard {
         key: &'static str,

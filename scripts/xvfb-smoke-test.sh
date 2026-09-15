@@ -384,6 +384,12 @@ if [ "$GRAPHICS" = hardware ] && ! grep -Fq 'terminal GL: ' "$LOG_DIR/terminal-g
   echo "FAIL: hardware regression did not report its terminal GL context"
   exit 1
 fi
+for regression in \
+  split_tree::tests::split_ratio_callbacks_release_unmapped_paned \
+  settings_editor::tests::interface_controls_restore_effective_values_after_save_failure; do
+  cargo test --locked $CARGO_FLAGS -p limux-host-linux "$regression" \
+    -- --exact --ignored --test-threads=1 --nocapture
+done
 start_host host
 
 echo

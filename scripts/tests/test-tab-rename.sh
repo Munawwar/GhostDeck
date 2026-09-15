@@ -97,6 +97,13 @@ type_name() {
   xdotool type --clearmodifiers --delay 20 "$1"
 }
 
+xdotool mousemove --window "$WINDOW" 335 65 click 2
+sleep 0.5
+"$CLI" --json --id-format both list-panels --workspace rename \
+  | jq -e '.surfaces | length == 2 and any(.surface_id == "1:browser")' >/dev/null \
+  || { echo 'FAIL: middle click closed a pinned browser tab'; exit 1; }
+echo 'PASS: middle click preserves a pinned tab'
+
 # A single click must activate the browser without creating a rename editor.
 click_tab 335
 "$CLI" --json --id-format both list-panels --workspace rename \
@@ -190,3 +197,16 @@ for operation in surface pane; do
   assert_title terminal 'Hidden renamed'
 done
 echo 'PASS: hidden tabs support scoped rename/pin and surface/pane focus restores zoom'
+
+xdotool mousemove --window "$WINDOW" 245 65 click 2
+for _ in $(seq 1 50); do
+  if "$CLI" --json --id-format both list-panels --workspace rename \
+    | jq -e --arg zoom "$ZOOM_SURFACE" '.surfaces | length == 2 and
+      any(.surface_id == "1:browser") and any(.surface_id == $zoom)' >/dev/null; then
+    echo 'PASS: middle click closes an unpinned terminal tab'
+    exit 0
+  fi
+  sleep 0.1
+done
+echo 'FAIL: middle click did not close the unpinned terminal tab'
+exit 1
