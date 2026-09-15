@@ -155,7 +155,11 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: limux-linux-packages-${{ steps.version.outputs.version }}
-          path: dist/*
+          path: |
+            dist/limux-${{ steps.version.outputs.version }}-linux-x86_64.tar.gz
+            dist/limux_${{ steps.version.outputs.version }}_amd64.deb
+            dist/Limux-${{ steps.version.outputs.version }}-x86_64.AppImage
+          if-no-files-found: error
           retention-days: 30
 
   publish:
@@ -177,6 +181,10 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ needs.packages.outputs.version }}
-          files: dist/*
+          files: |
+            dist/limux-${{ needs.packages.outputs.version }}-linux-x86_64.tar.gz
+            dist/limux_${{ needs.packages.outputs.version }}_amd64.deb
+            dist/Limux-${{ needs.packages.outputs.version }}-x86_64.AppImage
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
