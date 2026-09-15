@@ -208,6 +208,7 @@ Usage: limux [--socket <path>] [--json] [--id-format refs|both|uuids] <command> 
 Running `limux` with no arguments launches the GTK app.
 
 Common commands:
+  activate (present the existing window; never launch a new instance)
   identify [--workspace <id|ref>] [--surface <id|ref>]
   list-panels [--workspace <id|ref>]
   list-panes [--workspace <id|ref>]
@@ -666,6 +667,30 @@ async fn selected_surface_for_pane(
         bail!("pane.surfaces returned an empty surface handle");
     }
     Ok(handle)
+}
+
+fn window_activation_params(activation_token: Option<&str>, startup_id: Option<&str>) -> Value {
+    match activation_token
+        .filter(|token| !token.is_empty())
+        .or_else(|| startup_id.filter(|token| !token.is_empty()))
+    {
+        Some(token) => json!({ "activation_token": token }),
+        None => json!({}),
+    }
+}
+
+async fn run_activate(client: &mut Client, args: &[String]) -> Result<Value> {
+    if !args.is_empty() {
+        bail!("activate takes no arguments; use --socket <path> before activate to target an instance");
+    }
+    let activation_token = env::var("XDG_ACTIVATION_TOKEN").ok();
+    let startup_id = env::var("DESKTOP_STARTUP_ID").ok();
+    client
+        .call(
+            "window.activate",
+            window_activation_params(activation_token.as_deref(), startup_id.as_deref()),
+        )
+        .await
 }
 
 async fn run_identify(client: &mut Client, args: &[String]) -> Result<Value> {
@@ -3484,6 +3509,14 @@ async fn execute_command(client: &mut Client, opts: &GlobalOptions) -> Result<Co
 
     let mut out = match command {
         "--version" | "-V" => CommandOutput::Text(format!("limux {}", env!("CARGO_PKG_VERSION"))),
+        "activate" => {
+            let payload = run_activate(client, args).await?;
+            if opts.json_output {
+                CommandOutput::Json(payload)
+            } else {
+                CommandOutput::Text("OK".to_string())
+            }
+        }
         "identify" => CommandOutput::Json(run_identify(client, args).await?),
         "list-panels" | "list-panes" | "list-workspaces" | "surface-health" => {
             let payload = run_list(client, command, args).await?;
@@ -3792,6 +3825,46 @@ mod cli_arg_tests {
                 CommandOutput::Json(_) => panic!("version should be plain text"),
             }
         }
+    }
+
+    #[test]
+    fn activation_prefers_xdg_token_and_preserves_opaque_values() {
+        assert_eq!(window_activation_params(None, None), json!({}));
+        assert_eq!(window_activation_params(Some(""), Some("")), json!({}));
+        assert_eq!(
+            window_activation_params(Some(""), Some("launcher_TIME123")),
+            json!({ "activation_token": "launcher_TIME123" })
+        );
+        assert_eq!(
+            window_activation_params(None, Some("launcher_TIME123")),
+            json!({ "activation_token": "launcher_TIME123" })
+        );
+        assert_eq!(
+            window_activation_params(Some(" opaque token "), Some("launcher_TIME123")),
+            json!({ "activation_token": " opaque token " })
+        );
+    }
+
+    #[tokio::test]
+    async fn activate_requires_an_existing_socket_and_rejects_arguments() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("absent.sock");
+        let mut client = Client::new(socket.clone());
+        let opts = default_opts(args(&["activate"]));
+        assert!(!should_launch_host(&opts));
+        let error = execute_command(&mut client, &opts).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("failed to connect to socket {}", socket.display())
+        );
+
+        let error = execute_command(
+            &mut client,
+            &default_opts(args(&["activate", "--workspace", "other"])),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().starts_with("activate takes no arguments"));
     }
 
     #[tokio::test]
