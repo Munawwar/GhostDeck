@@ -2923,6 +2923,13 @@ fn connect_desktop_notification_closed_watch(
     ))
 }
 
+fn present_existing_window(window: &adw::ApplicationWindow, activation_token: Option<&str>) {
+    if let Some(token) = activation_token.filter(|token| !token.is_empty()) {
+        window.set_startup_id(token);
+    }
+    window.present();
+}
+
 fn activate_desktop_notification_target(
     state: &State,
     target: &DesktopNotificationTarget,
@@ -2948,10 +2955,7 @@ fn activate_desktop_notification_target(
         )
     };
 
-    if let Some(token) = activation_token.filter(|token| !token.is_empty()) {
-        window.set_startup_id(token);
-    }
-    window.present();
+    present_existing_window(&window, activation_token);
     switch_workspace(state, workspace_idx);
     sidebar_list.select_row(Some(&row));
 
@@ -4444,6 +4448,14 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 })
             };
             let _ = reply.send(Ok(result));
+        }
+        ControlCommand::ActivateWindow {
+            activation_token,
+            reply,
+        } => {
+            let window = state.borrow().window.clone();
+            present_existing_window(&window, activation_token.as_deref());
+            let _ = reply.send(Ok(serde_json::json!({ "presented": true })));
         }
         ControlCommand::CurrentWorkspace { reply } => {
             let result = {

@@ -117,6 +117,7 @@ jobs:
             libgl1-mesa-dri \
             libgtk-4-dev \
             libwebkitgtk-6.0-dev \
+            metacity \
             pkg-config \
             util-linux \
             weston \
@@ -139,3 +140,6 @@ jobs:
 
       - name: Check tab double-click rename
         run: ./scripts/tests/test-tab-rename.sh
+
+      - name: Check existing-window activation
+        run: ./scripts/tests/test-window-activate.sh
