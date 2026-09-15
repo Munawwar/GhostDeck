@@ -145,6 +145,7 @@ jobs:
         with:
           name: limux-rpm-${{ steps.version.outputs.version }}
           path: ${{ steps.rpm.outputs.rpm_path }}
+          if-no-files-found: error
           retention-days: 30
 
   publish:
@@ -166,6 +167,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ needs.rpm.outputs.version }}
-          files: dist/*
+          files: dist/limux-${{ needs.rpm.outputs.version }}-1.x86_64.rpm
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
