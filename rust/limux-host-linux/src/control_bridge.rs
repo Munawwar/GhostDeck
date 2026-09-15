@@ -19,6 +19,7 @@ const METHODS: &[&str] = &[
     "system.ping",
     "system.identify",
     "system.capabilities",
+    "window.activate",
     "workspace.current",
     "workspace.list",
     "workspace.create",
@@ -106,6 +107,10 @@ pub struct CreatePaneRequest {
 pub enum ControlCommand {
     Identify {
         caller: Option<Value>,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    ActivateWindow {
+        activation_token: Option<String>,
         reply: mpsc::Sender<BridgeResult>,
     },
     CurrentWorkspace {
@@ -222,6 +227,7 @@ impl ControlCommand {
     pub fn respond(self, result: BridgeResult) {
         match self {
             Self::Identify { reply, .. }
+            | Self::ActivateWindow { reply, .. }
             | Self::CurrentWorkspace { reply }
             | Self::ListWorkspaces { reply }
             | Self::ListPanes { reply, .. }
@@ -627,6 +633,30 @@ fn handle_method(
             (
                 ControlCommand::Identify {
                     caller: params.get("caller").cloned(),
+                    reply,
+                },
+                rx,
+            )
+        }
+        "window.activate" => {
+            let activation_token = match params.get("activation_token") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(token)) if !token.contains('\0') => {
+                    (!token.is_empty()).then(|| token.clone())
+                }
+                _ => {
+                    return error_response(
+                        id,
+                        BridgeError::invalid_params(
+                            "activation_token must be a string without NUL characters",
+                        ),
+                    );
+                }
+            };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::ActivateWindow {
+                    activation_token,
                     reply,
                 },
                 rx,
@@ -1155,6 +1185,52 @@ mod tests {
             .expect("v1 request should parse");
         assert_eq!(request.method, "workspace.create");
         assert_eq!(request.params["cwd"], "/tmp");
+    }
+
+    #[test]
+    fn window_activate_queues_presentation_with_an_optional_opaque_token() {
+        for (params, expected) in [
+            (json!({}), None),
+            (json!({ "activation_token": null }), None),
+            (json!({ "activation_token": "" }), None),
+            (
+                json!({ "activation_token": " opaque token " }),
+                Some(" opaque token "),
+            ),
+        ] {
+            let response = dispatch_request(
+                &json!({ "id": "activate", "method": "window.activate", "params": params })
+                    .to_string(),
+                &|command| match command {
+                    ControlCommand::ActivateWindow {
+                        activation_token,
+                        reply,
+                    } => {
+                        assert_eq!(activation_token.as_deref(), expected);
+                        reply.send(Ok(json!({ "presented": true }))).unwrap();
+                    }
+                    other => panic!("unexpected command: {other:?}"),
+                },
+            );
+            assert_eq!(response.error, None);
+            assert_eq!(response.id, Some(json!("activate")));
+            assert_eq!(response.result, Some(json!({ "presented": true })));
+        }
+    }
+
+    #[test]
+    fn window_activate_rejects_invalid_tokens_before_gtk_dispatch() {
+        for token in [json!(42), json!(true), json!({}), json!("token\0suffix")] {
+            let response = dispatch_request(
+                &json!({ "method": "window.activate", "params": { "activation_token": token } })
+                    .to_string(),
+                &|command| panic!("invalid activation token should not dispatch: {command:?}"),
+            );
+            assert_eq!(
+                response.error.as_ref().map(|error| error.code),
+                Some(INVALID_PARAMS_CODE)
+            );
+        }
     }
 
     #[test]

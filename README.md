@@ -206,6 +206,32 @@ and [`CLAUDE.md`](CLAUDE.md) in the repo root — those cover the build
 loop, crate map, and the `feat/cmux-parity` roadmap tracked in
 [`docs/cmux-parity-plan.md`](docs/cmux-parity-plan.md).
 
+## Activate an existing window
+
+Bind a desktop global shortcut to `limux activate` to bring the running Limux
+window forward without opening another instance or changing its selected
+workspace or tab. Use the full executable path in your shortcut if your desktop
+does not include Limux's install directory in `PATH`.
+
+The command uses the existing control socket. To target a particular instance:
+
+```bash
+limux --socket /path/to/instance.sock activate
+```
+
+An explicit `--socket` takes precedence over `LIMUX_SOCKET`, `LIMUX_SOCKET_PATH`,
+and the default runtime socket. If no instance is listening there, activation
+fails with a socket connection error; it never launches an instance. Running
+plain `limux` still launches the app, and independent instances remain supported.
+
+Limux forwards `XDG_ACTIVATION_TOKEN`, or `DESKTOP_STARTUP_ID` when no token is
+available, to GTK. Your compositor decides whether to grant focus, especially
+on Wayland where a global shortcut may need a valid activation token. A successful
+command means presentation was requested, not that focus was guaranteed.
+Socket authentication is unchanged: the default `localUser` policy permits a
+shortcut run by the same user; `LIMUX_SOCKET_MODE=limuxOnly` rejects commands
+from outside that Limux process's descendants, including desktop shortcuts.
+
 ## Keyboard shortcuts
 
 Most host-owned defaults use `Ctrl+Alt` so plain terminal `Ctrl` editing keys pass through. Fullscreen defaults to `F11`. Custom remaps may also use `Cmd`, which Limux maps to either the Linux `Meta` or `Super` modifier. `Opt` maps to `Alt`.
