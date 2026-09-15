@@ -37,6 +37,16 @@ impl SplitNode {
         matches!(self, SplitNode::Leaf { .. })
     }
 
+    fn collect_panes(&self, panes: &mut Vec<gtk::Widget>) {
+        match self {
+            SplitNode::Leaf { pane_widget } => panes.push(pane_widget.clone()),
+            SplitNode::Split { left, right, .. } => {
+                left.collect_panes(panes);
+                right.collect_panes(panes);
+            }
+        }
+    }
+
     /// Find the leaf containing `target` and replace it with `replacement`.
     pub(crate) fn replace(&mut self, target: &gtk::Widget, replacement: SplitNode) -> bool {
         match self {
@@ -197,6 +207,14 @@ impl SplitTreeContainer {
         self.tree.borrow().is_leaf()
     }
 
+    pub(crate) fn retire_panes(&self) {
+        let mut panes = Vec::new();
+        self.tree.borrow().collect_panes(&mut panes);
+        for pane_widget in panes {
+            pane::retire_pane(&pane_widget);
+        }
+    }
+
     pub(crate) fn toggle_zoom(self: &Rc<Self>, target: &gtk::Widget) -> bool {
         if self.zoomed_pane.borrow().is_some() {
             self.restore_zoom();
@@ -205,6 +223,21 @@ impl SplitTreeContainer {
             self.zoom_pane(target);
             true
         }
+    }
+
+    pub(crate) fn reveal_pane(self: &Rc<Self>, target: &gtk::Widget) -> bool {
+        let should_restore = self
+            .zoomed_pane
+            .borrow()
+            .as_ref()
+            .is_some_and(|zoomed| zoomed != target);
+        if !should_restore {
+            return false;
+        }
+        self.zoomed_pane.borrow_mut().take();
+        *self.last_focused.borrow_mut() = Some(target.clone());
+        self.trigger_rebuild();
+        true
     }
 
     fn zoom_pane(self: &Rc<Self>, target: &gtk::Widget) {
@@ -552,6 +585,7 @@ pub(crate) fn build_split_node_from_layout(
     shortcuts: &Rc<crate::shortcut_config::ResolvedShortcutConfig>,
     ws_id: &str,
     working_directory: Option<&str>,
+    autostart_command: &Rc<RefCell<Option<String>>>,
     layout: &LayoutNodeState,
 ) -> SplitNode {
     match layout {
@@ -561,8 +595,12 @@ pub(crate) fn build_split_node_from_layout(
                 shortcuts,
                 ws_id,
                 working_directory,
-                Some(pane_state),
-                false,
+                autostart_command.clone(),
+                crate::window::PaneCreationOptions {
+                    initial_state: Some(pane_state),
+                    skip_default_tab: false,
+                    suppress_initial_autostart: false,
+                },
             );
             SplitNode::Leaf {
                 pane_widget: pane.upcast(),
@@ -583,6 +621,7 @@ pub(crate) fn build_split_node_from_layout(
                     shortcuts,
                     ws_id,
                     working_directory,
+                    autostart_command,
                     &split_state.start,
                 )),
                 right: Box::new(build_split_node_from_layout(
@@ -590,6 +629,7 @@ pub(crate) fn build_split_node_from_layout(
                     shortcuts,
                     ws_id,
                     working_directory,
+                    autostart_command,
                     &split_state.end,
                 )),
             }

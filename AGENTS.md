@@ -119,8 +119,8 @@ The CLI surface lives in `rust/limux-cli/src/main.rs`:
 - `build_agents_md` writes the generated runtime protocol file.
 
 Keep `limux agent-team --dry-run` working without a host. For live behavior,
-the Xvfb smoke script exercises the bridge, generated `AGENTS.md`, workspace
-name addressing, and by-name send path.
+the headless Weston smoke script exercises terminal surface health, input and
+screen readback, bridge routing, generated `AGENTS.md`, and session restart.
 
 ## Repository Rules
 

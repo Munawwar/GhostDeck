@@ -15,6 +15,14 @@ pub type ghostty_app_t = *mut c_void;
 pub type ghostty_config_t = *mut c_void;
 pub type ghostty_surface_t = *mut c_void;
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ghostty_string_s {
+    pub ptr: *const c_char,
+    pub len: usize,
+    pub sentinel: bool,
+}
+
 // -------------------------------------------------------------------
 // Enums
 // -------------------------------------------------------------------
@@ -22,7 +30,10 @@ pub type ghostty_surface_t = *mut c_void;
 pub const GHOSTTY_PLATFORM_INVALID: c_int = 0;
 pub const GHOSTTY_PLATFORM_MACOS: c_int = 1;
 pub const GHOSTTY_PLATFORM_IOS: c_int = 2;
-pub const GHOSTTY_PLATFORM_LINUX: c_int = 3;
+pub const GHOSTTY_PLATFORM_OPENGL: c_int = 3;
+pub const GHOSTTY_PLATFORM_METAL_EXTERNAL: c_int = 4;
+pub const GHOSTTY_PLATFORM_METAL_EXTERNAL_LEASED: c_int = 5;
+pub const GHOSTTY_PLATFORM_LINUX: c_int = 6;
 
 pub const GHOSTTY_CLIPBOARD_STANDARD: c_int = 0;
 pub const GHOSTTY_CLIPBOARD_SELECTION: c_int = 1;
@@ -75,16 +86,59 @@ pub const GHOSTTY_ACTION_SCROLLBAR: c_int = 26;
 pub const GHOSTTY_ACTION_RENDER: c_int = 27;
 pub const GHOSTTY_ACTION_DESKTOP_NOTIFICATION: c_int = 31;
 pub const GHOSTTY_ACTION_SET_TITLE: c_int = 32;
-pub const GHOSTTY_ACTION_PWD: c_int = 34;
-pub const GHOSTTY_ACTION_MOUSE_SHAPE: c_int = 35;
-pub const GHOSTTY_ACTION_MOUSE_OVER_LINK: c_int = 37;
-pub const GHOSTTY_ACTION_COLOR_CHANGE: c_int = 45;
-pub const GHOSTTY_ACTION_RELOAD_CONFIG: c_int = 46;
-pub const GHOSTTY_ACTION_CONFIG_CHANGE: c_int = 47;
-pub const GHOSTTY_ACTION_CLOSE_WINDOW: c_int = 48;
-pub const GHOSTTY_ACTION_RING_BELL: c_int = 49;
-pub const GHOSTTY_ACTION_OPEN_URL: c_int = 53;
-pub const GHOSTTY_ACTION_SHOW_CHILD_EXITED: c_int = 54;
+pub const GHOSTTY_ACTION_PWD: c_int = 35;
+pub const GHOSTTY_ACTION_MOUSE_SHAPE: c_int = 36;
+pub const GHOSTTY_ACTION_MOUSE_VISIBILITY: c_int = 37;
+pub const GHOSTTY_ACTION_MOUSE_OVER_LINK: c_int = 38;
+pub const GHOSTTY_ACTION_COLOR_CHANGE: c_int = 46;
+pub const GHOSTTY_ACTION_RELOAD_CONFIG: c_int = 47;
+pub const GHOSTTY_ACTION_CONFIG_CHANGE: c_int = 48;
+pub const GHOSTTY_ACTION_CLOSE_WINDOW: c_int = 49;
+pub const GHOSTTY_ACTION_RING_BELL: c_int = 50;
+pub const GHOSTTY_ACTION_OPEN_URL: c_int = 54;
+pub const GHOSTTY_ACTION_SHOW_CHILD_EXITED: c_int = 55;
+
+pub type ghostty_action_mouse_shape_e = c_int;
+
+pub const GHOSTTY_MOUSE_SHAPE_DEFAULT: ghostty_action_mouse_shape_e = 0;
+pub const GHOSTTY_MOUSE_SHAPE_CONTEXT_MENU: ghostty_action_mouse_shape_e = 1;
+pub const GHOSTTY_MOUSE_SHAPE_HELP: ghostty_action_mouse_shape_e = 2;
+pub const GHOSTTY_MOUSE_SHAPE_POINTER: ghostty_action_mouse_shape_e = 3;
+pub const GHOSTTY_MOUSE_SHAPE_PROGRESS: ghostty_action_mouse_shape_e = 4;
+pub const GHOSTTY_MOUSE_SHAPE_WAIT: ghostty_action_mouse_shape_e = 5;
+pub const GHOSTTY_MOUSE_SHAPE_CELL: ghostty_action_mouse_shape_e = 6;
+pub const GHOSTTY_MOUSE_SHAPE_CROSSHAIR: ghostty_action_mouse_shape_e = 7;
+pub const GHOSTTY_MOUSE_SHAPE_TEXT: ghostty_action_mouse_shape_e = 8;
+pub const GHOSTTY_MOUSE_SHAPE_VERTICAL_TEXT: ghostty_action_mouse_shape_e = 9;
+pub const GHOSTTY_MOUSE_SHAPE_ALIAS: ghostty_action_mouse_shape_e = 10;
+pub const GHOSTTY_MOUSE_SHAPE_COPY: ghostty_action_mouse_shape_e = 11;
+pub const GHOSTTY_MOUSE_SHAPE_MOVE: ghostty_action_mouse_shape_e = 12;
+pub const GHOSTTY_MOUSE_SHAPE_NO_DROP: ghostty_action_mouse_shape_e = 13;
+pub const GHOSTTY_MOUSE_SHAPE_NOT_ALLOWED: ghostty_action_mouse_shape_e = 14;
+pub const GHOSTTY_MOUSE_SHAPE_GRAB: ghostty_action_mouse_shape_e = 15;
+pub const GHOSTTY_MOUSE_SHAPE_GRABBING: ghostty_action_mouse_shape_e = 16;
+pub const GHOSTTY_MOUSE_SHAPE_ALL_SCROLL: ghostty_action_mouse_shape_e = 17;
+pub const GHOSTTY_MOUSE_SHAPE_COL_RESIZE: ghostty_action_mouse_shape_e = 18;
+pub const GHOSTTY_MOUSE_SHAPE_ROW_RESIZE: ghostty_action_mouse_shape_e = 19;
+pub const GHOSTTY_MOUSE_SHAPE_N_RESIZE: ghostty_action_mouse_shape_e = 20;
+pub const GHOSTTY_MOUSE_SHAPE_E_RESIZE: ghostty_action_mouse_shape_e = 21;
+pub const GHOSTTY_MOUSE_SHAPE_S_RESIZE: ghostty_action_mouse_shape_e = 22;
+pub const GHOSTTY_MOUSE_SHAPE_W_RESIZE: ghostty_action_mouse_shape_e = 23;
+pub const GHOSTTY_MOUSE_SHAPE_NE_RESIZE: ghostty_action_mouse_shape_e = 24;
+pub const GHOSTTY_MOUSE_SHAPE_NW_RESIZE: ghostty_action_mouse_shape_e = 25;
+pub const GHOSTTY_MOUSE_SHAPE_SE_RESIZE: ghostty_action_mouse_shape_e = 26;
+pub const GHOSTTY_MOUSE_SHAPE_SW_RESIZE: ghostty_action_mouse_shape_e = 27;
+pub const GHOSTTY_MOUSE_SHAPE_EW_RESIZE: ghostty_action_mouse_shape_e = 28;
+pub const GHOSTTY_MOUSE_SHAPE_NS_RESIZE: ghostty_action_mouse_shape_e = 29;
+pub const GHOSTTY_MOUSE_SHAPE_NESW_RESIZE: ghostty_action_mouse_shape_e = 30;
+pub const GHOSTTY_MOUSE_SHAPE_NWSE_RESIZE: ghostty_action_mouse_shape_e = 31;
+pub const GHOSTTY_MOUSE_SHAPE_ZOOM_IN: ghostty_action_mouse_shape_e = 32;
+pub const GHOSTTY_MOUSE_SHAPE_ZOOM_OUT: ghostty_action_mouse_shape_e = 33;
+
+pub type ghostty_action_mouse_visibility_e = c_int;
+
+pub const GHOSTTY_MOUSE_VISIBLE: ghostty_action_mouse_visibility_e = 0;
+pub const GHOSTTY_MOUSE_HIDDEN: ghostty_action_mouse_visibility_e = 1;
 
 // Key codes (W3C UIEvents, subset)
 pub const GHOSTTY_KEY_UNIDENTIFIED: c_int = 0;
@@ -195,11 +249,28 @@ pub struct ghostty_platform_linux_s {
     pub reserved: *mut c_void,
 }
 
+pub type ghostty_opengl_make_current_cb = unsafe extern "C" fn(*mut c_void) -> bool;
+pub type ghostty_opengl_clear_current_cb = unsafe extern "C" fn(*mut c_void);
+pub type ghostty_opengl_get_proc_address_cb =
+    unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_void;
+pub type ghostty_opengl_swap_buffers_cb = unsafe extern "C" fn(*mut c_void);
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ghostty_platform_opengl_s {
+    pub userdata: *mut c_void,
+    pub make_current: ghostty_opengl_make_current_cb,
+    pub clear_current: ghostty_opengl_clear_current_cb,
+    pub get_proc_address: ghostty_opengl_get_proc_address_cb,
+    pub swap_buffers: ghostty_opengl_swap_buffers_cb,
+}
+
 #[repr(C)]
 pub union ghostty_platform_u {
     pub macos: ghostty_platform_macos_s,
     pub ios: ghostty_platform_ios_s,
-    pub linux: ghostty_platform_linux_s,
+    pub opengl: ghostty_platform_opengl_s,
+    pub linux_platform: ghostty_platform_linux_s,
 }
 
 #[repr(C)]
@@ -226,6 +297,8 @@ pub struct ghostty_input_key_s {
 }
 
 pub type ghostty_io_write_cb = unsafe extern "C" fn(*mut c_void, *const c_char, usize);
+pub type ghostty_renderer_event_cb = unsafe extern "C" fn(*mut c_void, c_int);
+pub type ghostty_pty_tee_cb = unsafe extern "C" fn(*mut c_void, *const c_char, usize);
 
 #[repr(C)]
 pub struct ghostty_surface_config_s {
@@ -244,6 +317,9 @@ pub struct ghostty_surface_config_s {
     pub io_mode: c_int, // ghostty_surface_io_mode_e (0 = exec)
     pub io_write_cb: Option<ghostty_io_write_cb>,
     pub io_write_userdata: *mut c_void,
+    pub renderer_event_cb: Option<ghostty_renderer_event_cb>,
+    pub pty_tee_cb: Option<ghostty_pty_tee_cb>,
+    pub pty_tee_userdata: *mut c_void,
 }
 
 #[repr(C)]
@@ -327,6 +403,8 @@ pub union ghostty_action_u {
     pub set_title: ghostty_action_set_title_s,
     pub pwd: ghostty_action_pwd_s,
     pub open_url: ghostty_action_open_url_s,
+    pub mouse_shape: ghostty_action_mouse_shape_e,
+    pub mouse_visibility: ghostty_action_mouse_visibility_e,
     pub mouse_over_link: ghostty_action_mouse_over_link_s,
     pub child_exited: ghostty_surface_message_childexited_s,
     _padding: [u8; 24],
@@ -357,6 +435,8 @@ pub struct ghostty_action_set_title_s {
 #[derive(Clone, Copy)]
 pub struct ghostty_action_pwd_s {
     pub pwd: *const c_char,
+    pub scrollbar: *const ghostty_action_scrollbar_s,
+    pub scrollbar_revision: u64,
 }
 
 #[repr(C)]
@@ -385,13 +465,15 @@ pub struct ghostty_surface_message_childexited_s {
 pub type ghostty_runtime_wakeup_cb = unsafe extern "C" fn(*mut c_void);
 pub type ghostty_runtime_action_cb =
     unsafe extern "C" fn(ghostty_app_t, ghostty_target_s, ghostty_action_s) -> bool;
-pub type ghostty_runtime_clipboard_has_text_cb = unsafe extern "C" fn(*mut c_void, c_int) -> bool;
-pub type ghostty_runtime_read_clipboard_cb = unsafe extern "C" fn(*mut c_void, c_int, *mut c_void);
+pub type ghostty_runtime_read_clipboard_cb =
+    unsafe extern "C" fn(*mut c_void, c_int, *mut c_void) -> bool;
 pub type ghostty_runtime_confirm_read_clipboard_cb =
     unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_void, c_int);
 pub type ghostty_runtime_write_clipboard_cb =
     unsafe extern "C" fn(*mut c_void, c_int, *const ghostty_clipboard_content_s, usize, bool);
 pub type ghostty_runtime_close_surface_cb = unsafe extern "C" fn(*mut c_void, bool);
+pub type ghostty_runtime_tmux_control_cb =
+    unsafe extern "C" fn(*mut c_void, c_int, u32, *const u8, usize);
 
 #[repr(C)]
 pub struct ghostty_runtime_config_s {
@@ -399,11 +481,11 @@ pub struct ghostty_runtime_config_s {
     pub supports_selection_clipboard: bool,
     pub wakeup_cb: ghostty_runtime_wakeup_cb,
     pub action_cb: ghostty_runtime_action_cb,
-    pub clipboard_has_text_cb: ghostty_runtime_clipboard_has_text_cb,
     pub read_clipboard_cb: ghostty_runtime_read_clipboard_cb,
     pub confirm_read_clipboard_cb: ghostty_runtime_confirm_read_clipboard_cb,
     pub write_clipboard_cb: ghostty_runtime_write_clipboard_cb,
     pub close_surface_cb: ghostty_runtime_close_surface_cb,
+    pub tmux_control_cb: Option<ghostty_runtime_tmux_control_cb>,
 }
 
 // -------------------------------------------------------------------
@@ -414,6 +496,20 @@ pub struct ghostty_runtime_config_s {
 extern "C" {
     #[link_name = "epoxy_glViewport"]
     pub fn glViewport(x: c_int, y: c_int, width: c_int, height: c_int);
+}
+
+extern "C" {
+    #[link_name = "gladLoaderLoadGLContext"]
+    fn glad_loader_load_gl_context(context: *mut c_void) -> c_int;
+    #[link_name = "gladLoaderUnloadGLContext"]
+    fn glad_loader_unload_gl_context(context: *mut c_void);
+}
+
+/// Retain GLAD loader symbols in the final host executable for `libghostty.so`.
+#[inline(never)]
+pub fn ensure_glad_symbols_linked() {
+    std::hint::black_box(glad_loader_load_gl_context as unsafe extern "C" fn(*mut c_void) -> c_int);
+    std::hint::black_box(glad_loader_unload_gl_context as unsafe extern "C" fn(*mut c_void));
 }
 
 extern "C" {
@@ -432,6 +528,8 @@ extern "C" {
     pub fn ghostty_config_load_default_files(config: ghostty_config_t);
     pub fn ghostty_config_load_recursive_files(config: ghostty_config_t);
     pub fn ghostty_config_finalize(config: ghostty_config_t);
+    pub fn ghostty_config_serialize(config: ghostty_config_t) -> ghostty_string_s;
+    pub fn ghostty_string_free(value: ghostty_string_s);
 
     // App
     pub fn ghostty_app_new(
@@ -471,6 +569,7 @@ extern "C" {
         button: c_int,
         mods: c_int,
     ) -> bool;
+    pub fn ghostty_surface_mouse_captured(surface: ghostty_surface_t) -> bool;
     pub fn ghostty_surface_mouse_pos(surface: ghostty_surface_t, x: f64, y: f64, mods: c_int);
     pub fn ghostty_surface_mouse_scroll(surface: ghostty_surface_t, x: f64, y: f64, mods: c_int);
     pub fn ghostty_surface_ime_point(
@@ -509,4 +608,33 @@ extern "C" {
         state: *mut c_void,
         confirmed: bool,
     );
+}
+
+#[cfg(all(test, target_pointer_width = "64"))]
+mod tests {
+    use super::*;
+    use std::mem::{align_of, offset_of, size_of};
+
+    #[test]
+    fn embedding_struct_layouts_match_ghostty_header() {
+        assert_eq!(size_of::<ghostty_platform_u>(), 40);
+        assert_eq!(align_of::<ghostty_platform_u>(), 8);
+
+        assert_eq!(size_of::<ghostty_surface_config_s>(), 168);
+        assert_eq!(align_of::<ghostty_surface_config_s>(), 8);
+        assert_eq!(offset_of!(ghostty_surface_config_s, renderer_event_cb), 144);
+        assert_eq!(offset_of!(ghostty_surface_config_s, pty_tee_cb), 152);
+        assert_eq!(offset_of!(ghostty_surface_config_s, pty_tee_userdata), 160);
+
+        assert_eq!(size_of::<ghostty_runtime_config_s>(), 72);
+        assert_eq!(align_of::<ghostty_runtime_config_s>(), 8);
+        assert_eq!(offset_of!(ghostty_runtime_config_s, read_clipboard_cb), 32);
+        assert_eq!(offset_of!(ghostty_runtime_config_s, tmux_control_cb), 64);
+
+        assert_eq!(size_of::<ghostty_action_u>(), 24);
+        assert_eq!(size_of::<ghostty_action_s>(), 32);
+        assert_eq!(offset_of!(ghostty_action_s, action), 8);
+        assert_eq!(size_of::<ghostty_action_pwd_s>(), 24);
+        assert_eq!(size_of::<ghostty_surface_message_childexited_s>(), 16);
+    }
 }

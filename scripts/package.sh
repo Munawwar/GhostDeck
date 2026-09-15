@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Read version from workspace Cargo.toml (single source of truth)
 VERSION="${1:-$(grep '^version' "$ROOT_DIR/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/\1/')}"
+"$ROOT_DIR/scripts/validate-release-version.sh" "$VERSION" >/dev/null
 ARCH="$(uname -m)"
 DEB_ARCH="amd64"
 [ "$ARCH" = "aarch64" ] && DEB_ARCH="arm64"
@@ -14,7 +15,8 @@ RPM_ARCH="x86_64"
 PKG_BASE="limux-${VERSION}-linux-${ARCH}"
 STAGE="/tmp/limux-staging"
 GHOSTTY_INSTALL_ROOT="/tmp/limux-ghostty-install"
-GHOSTTY_SO="${ROOT_DIR}/ghostty/zig-out/lib/libghostty.so"
+GHOSTTY_LIBRARY_NAME="libghostty-internal.so"
+GHOSTTY_SO="${ROOT_DIR}/ghostty/zig-out/lib/${GHOSTTY_LIBRARY_NAME}"
 MAX_GLIBC_VERSION="${LIMUX_MAX_GLIBC:-2.39}"
 GHOSTTY_SHARE_DIR=""
 GHOSTTY_TERMINFO_DIR=""
@@ -85,8 +87,9 @@ assert_glibc_compatibility() {
 assert_cli_entrypoint() {
     local path="$1"
     local label="$2"
+    local help
 
-    if ! "$path" --help 2>&1 | grep -q "limux CLI"; then
+    if ! help="$("$path" --help 2>&1)" || ! grep -q "limux CLI" <<< "$help"; then
         echo "ERROR: ${label} is not the limux CLI entrypoint: ${path}"
         exit 1
     fi
@@ -212,6 +215,7 @@ build_ghostty_resources() {
         DESTDIR="$GHOSTTY_INSTALL_ROOT" \
             zig build \
             --prefix /usr \
+            -Dapp-runtime=none \
             "${GHOSTTY_ZIG_ARGS[@]}" \
             -Demit-docs=false
     )
@@ -249,7 +253,7 @@ echo "Building libghostty (ReleaseFast, cpu=baseline)..."
 build_ghostty_resources
 
 if [ ! -f "$GHOSTTY_SO" ]; then
-    echo "ERROR: libghostty.so not found at ${GHOSTTY_SO} after build"
+    echo "ERROR: ${GHOSTTY_LIBRARY_NAME} not found at ${GHOSTTY_SO} after build"
     exit 1
 fi
 
@@ -287,7 +291,7 @@ fi
 
 # Build release binary
 echo "Building release binary..."
-cargo build --release --manifest-path "${ROOT_DIR}/Cargo.toml"
+cargo build --release --locked --manifest-path "${ROOT_DIR}/Cargo.toml"
 
 CLI_BINARY="${ROOT_DIR}/target/release/limux-cli"
 HOST_BINARY="${ROOT_DIR}/target/release/limux"
@@ -300,7 +304,7 @@ if [ ! -f "$HOST_BINARY" ]; then
     exit 1
 fi
 
-assert_glibc_compatibility "$GHOSTTY_SO" "libghostty.so"
+assert_glibc_compatibility "$GHOSTTY_SO" "$GHOSTTY_LIBRARY_NAME"
 assert_glibc_compatibility "$CLI_BINARY" "limux CLI"
 assert_glibc_compatibility "$HOST_BINARY" "limux host"
 assert_cli_entrypoint "$CLI_BINARY" "target/release/limux-cli"
@@ -341,9 +345,9 @@ populate_tree() {
     assert_no_legacy_host_entrypoint "$libexecdir/limux" "packaged $prefix libexec tree"
 
     # Shared library
-    cp "$GHOSTTY_SO" "$libdir/libghostty.so"
+    cp "$GHOSTTY_SO" "$libdir/$GHOSTTY_LIBRARY_NAME"
     if [ "$strip_files" = "true" ]; then
-        strip --strip-debug "$libdir/libghostty.so"
+        strip --strip-debug "$libdir/$GHOSTTY_LIBRARY_NAME"
     fi
 
     # Ghostty resources required for named themes and shell integration
@@ -438,8 +442,8 @@ strip "$TARBALL_STAGE/limux"
 strip "$TARBALL_STAGE/libexec/limux/limux-host"
 chmod 755 "$TARBALL_STAGE/limux" "$TARBALL_STAGE/libexec/limux/limux-host"
 assert_cli_entrypoint "$TARBALL_STAGE/limux" "tarball limux"
-cp "$GHOSTTY_SO" "$TARBALL_STAGE/lib/libghostty.so"
-strip --strip-debug "$TARBALL_STAGE/lib/libghostty.so"
+cp "$GHOSTTY_SO" "$TARBALL_STAGE/lib/$GHOSTTY_LIBRARY_NAME"
+strip --strip-debug "$TARBALL_STAGE/lib/$GHOSTTY_LIBRARY_NAME"
 cp -r "$GHOSTTY_SHARE_DIR"/. "$TARBALL_STAGE/share/limux/ghostty"
 copy_ghostty_terminfo_entries "$GHOSTTY_TERMINFO_DIR" "$TARBALL_STAGE/share/limux/terminfo"
 cp "$DESKTOP_FILE" "$TARBALL_STAGE/share/applications/dev.limux.linux.desktop"
@@ -467,6 +471,8 @@ cat > "$TARBALL_STAGE/install.sh" << 'INSTALL_EOF'
 set -euo pipefail
 
 PREFIX="/usr/local"
+GHOSTTY_LIBRARY_NAME="libghostty-internal.so"
+LEGACY_GHOSTTY_LIBRARY_NAME="libghostty.so"
 UNINSTALL=false
 
 for arg in "$@"; do
@@ -528,8 +534,8 @@ is_legacy_limux_host() {
 
     [ -x "$path" ] || return 1
     help="$("$path" --help 2>&1 || true)"
-    printf '%s\n' "$help" | grep -q "limux CLI" && return 1
-    printf '%s\n' "$help" | grep -q "GApplication" && return 0
+    grep -q "limux CLI" <<< "$help" && return 1
+    grep -q "GApplication" <<< "$help" && return 0
     "$path" --json identify >/tmp/limux-installer-probe.log 2>&1 && return 1
     grep -q "Unknown option --json" /tmp/limux-installer-probe.log
 }
@@ -557,6 +563,7 @@ EOF_PATHS
 warn_if_limux_is_shadowed() {
     local expected="$PREFIX/bin/limux"
     local first
+    local help
 
     first="$(PATH="$PREFIX/bin:$PATH" command -v limux 2>/dev/null || true)"
     if [ "$first" != "$expected" ]; then
@@ -564,7 +571,7 @@ warn_if_limux_is_shadowed() {
         echo "         Agent/CLI commands require the Limux CLI entrypoint."
     fi
 
-    if ! "$expected" --help 2>&1 | grep -q "limux CLI"; then
+    if ! help="$("$expected" --help 2>&1)" || ! grep -q "limux CLI" <<< "$help"; then
         echo "ERROR: installed limux entrypoint is not the CLI: $expected" >&2
         exit 1
     fi
@@ -613,7 +620,8 @@ echo "Installing Limux to ${PREFIX}..."
 install -Dm755 "$SCRIPT_DIR/limux" "$PREFIX/bin/limux"
 clean_legacy_limux_entrypoints
 install -Dm755 "$SCRIPT_DIR/libexec/limux/limux-host" "$PREFIX/libexec/limux/limux-host"
-install -Dm644 "$SCRIPT_DIR/lib/libghostty.so" "$PREFIX/lib/limux/libghostty.so"
+rm -f "$PREFIX/lib/limux/$LEGACY_GHOSTTY_LIBRARY_NAME"
+install -Dm644 "$SCRIPT_DIR/lib/$GHOSTTY_LIBRARY_NAME" "$PREFIX/lib/limux/$GHOSTTY_LIBRARY_NAME"
 if [ -d "$SCRIPT_DIR/share/limux" ]; then
     cp -r "$SCRIPT_DIR/share/limux" "$PREFIX/share/"
 fi
@@ -635,7 +643,7 @@ echo ""
 echo "Limux installed successfully!"
 echo "  CLI:     $PREFIX/bin/limux"
 echo "  Host:    $PREFIX/libexec/limux/limux-host"
-echo "  Library: $PREFIX/lib/limux/libghostty.so"
+echo "  Library: $PREFIX/lib/limux/$GHOSTTY_LIBRARY_NAME"
 echo "  App:     limux"
 echo ""
 echo "System dependencies (install if missing):"
@@ -751,8 +759,8 @@ chmod 755 "$APPDIR/usr/bin/limux" "$APPDIR/usr/libexec/limux/limux-host"
 assert_cli_entrypoint "$APPDIR/usr/bin/limux" "AppImage usr/bin/limux"
 
 # Shared library
-cp "$GHOSTTY_SO" "$APPDIR/usr/lib/libghostty.so"
-strip --strip-debug "$APPDIR/usr/lib/libghostty.so"
+cp "$GHOSTTY_SO" "$APPDIR/usr/lib/$GHOSTTY_LIBRARY_NAME"
+strip --strip-debug "$APPDIR/usr/lib/$GHOSTTY_LIBRARY_NAME"
 
 # WebKitGTK runtime, helper processes, and non-glibc library dependencies.
 copy_appimage_webkit_runtime "$APPDIR"
@@ -925,9 +933,43 @@ else
     export LIMUX_ORIGINAL_WEBKIT_INJECTED_BUNDLE_PATH_SET=0
     export LIMUX_ORIGINAL_WEBKIT_INJECTED_BUNDLE_PATH=""
 fi
+if [ "${GBM_BACKENDS_PATH+x}" = x ]; then
+    export LIMUX_ORIGINAL_GBM_BACKENDS_PATH_SET=1
+    export LIMUX_ORIGINAL_GBM_BACKENDS_PATH="${GBM_BACKENDS_PATH}"
+else
+    export LIMUX_ORIGINAL_GBM_BACKENDS_PATH_SET=0
+    export LIMUX_ORIGINAL_GBM_BACKENDS_PATH=""
+fi
+if [ "${LIBGL_DRIVERS_PATH+x}" = x ]; then
+    export LIMUX_ORIGINAL_LIBGL_DRIVERS_PATH_SET=1
+    export LIMUX_ORIGINAL_LIBGL_DRIVERS_PATH="${LIBGL_DRIVERS_PATH}"
+else
+    export LIMUX_ORIGINAL_LIBGL_DRIVERS_PATH_SET=0
+    export LIMUX_ORIGINAL_LIBGL_DRIVERS_PATH=""
+fi
 
 export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH:-}"
 export XDG_DATA_DIRS="${HERE}/usr/share:${XDG_DATA_DIRS:-/usr/share}"
+
+# Host Mesa loaders use distro-specific GBM and DRI module paths. Discover
+# common locations without overriding an explicit user choice. Terminals
+# restore the original values via the markers above.
+if [ -z "${GBM_BACKENDS_PATH:-}" ]; then
+    for candidate in /usr/lib/gbm /usr/lib64/gbm /usr/lib/*-linux-gnu/gbm; do
+        if [ -d "$candidate" ] && compgen -G "${candidate}/*_gbm.so" >/dev/null; then
+            export GBM_BACKENDS_PATH="$candidate"
+            break
+        fi
+    done
+fi
+if [ -z "${LIBGL_DRIVERS_PATH:-}" ]; then
+    for candidate in /usr/lib/dri /usr/lib64/dri /usr/lib/*-linux-gnu/dri; do
+        if [ -d "$candidate" ] && compgen -G "${candidate}/*_dri.so" >/dev/null; then
+            export LIBGL_DRIVERS_PATH="$candidate"
+            break
+        fi
+    done
+fi
 
 # Activate bundled gdk-pixbuf SVG loader by materializing loaders.cache with
 # the current mount path. Written to $XDG_CACHE_HOME so it works on a
@@ -968,7 +1010,17 @@ else
 fi
 
 if [ -n "$APPIMAGETOOL" ]; then
-    ARCH="$ARCH" "$APPIMAGETOOL" "$APPDIR" "$APPIMAGE_FILE" 2>&1 | tail -3
+    APPIMAGETOOL_ARGS=()
+    if [ -n "${APPIMAGETOOL_RUNTIME_FILE:-}" ]; then
+        if [ ! -f "$APPIMAGETOOL_RUNTIME_FILE" ]; then
+            echo "ERROR: APPIMAGETOOL_RUNTIME_FILE does not exist: $APPIMAGETOOL_RUNTIME_FILE"
+            exit 1
+        fi
+        APPIMAGETOOL_ARGS+=(--runtime-file "$APPIMAGETOOL_RUNTIME_FILE")
+    fi
+
+    ARCH="$ARCH" "$APPIMAGETOOL" "${APPIMAGETOOL_ARGS[@]}" "$APPDIR" "$APPIMAGE_FILE" 2>&1 | tail -3
+    "$ROOT_DIR/scripts/verify-appimage-runtime.sh" "$APPIMAGE_FILE"
     echo "  -> dist/Limux-${VERSION}-${ARCH}.AppImage"
 fi
 

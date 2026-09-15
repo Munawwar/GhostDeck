@@ -54,9 +54,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.102"
+version = "1.0.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "autocfg"
@@ -363,9 +363,9 @@ dependencies = [
 
 [[package]]
 name = "gdk4-wayland"
-version = "0.11.0"
+version = "0.11.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7027433b8f19075ab22f01d0e0ba4373e303ffdb4ce4f846a2763cb020ea9bdc"
+checksum = "32d95828dadc0357dee236cc6a5712808bd894d3217159982592ce24f2b8aaf7"
 dependencies = [
  "gdk4",
  "gdk4-wayland-sys",
@@ -737,7 +737,7 @@ dependencies = [
 
 [[package]]
 name = "limux-cli"
-version = "0.1.21"
+version = "0.1.29"
 dependencies = [
  "anyhow",
  "clap",
@@ -752,7 +752,7 @@ dependencies = [
 
 [[package]]
 name = "limux-control"
-version = "0.1.21"
+version = "0.1.29"
 dependencies = [
  "anyhow",
  "clap",
@@ -767,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "limux-core"
-version = "0.1.21"
+version = "0.1.29"
 dependencies = [
  "anyhow",
  "limux-protocol",
@@ -779,15 +779,13 @@ dependencies = [
 
 [[package]]
 name = "limux-ghostty-sys"
-version = "0.1.21"
-dependencies = [
- "cc",
-]
+version = "0.1.29"
 
 [[package]]
 name = "limux-host-linux"
-version = "0.1.21"
+version = "0.1.29"
 dependencies = [
+ "cc",
  "dirs",
  "gdk4-wayland",
  "gtk4",
@@ -805,7 +803,7 @@ dependencies = [
 
 [[package]]
 name = "limux-protocol"
-version = "0.1.21"
+version = "0.1.29"
 dependencies = [
  "serde",
  "serde_json",

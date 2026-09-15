@@ -15,6 +15,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 mod agent_hooks;
+mod agent_team_file;
 
 const CLI_STATE_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const CLI_STATE_LOCK_RETRY: Duration = Duration::from_millis(25);
@@ -198,9 +199,52 @@ fn parse_global_args() -> Result<GlobalOptions> {
 }
 
 fn print_help() {
-    println!(
-        "limux CLI\n\nUsage: limux [--socket <path>] [--json] [--id-format refs|both|uuids] <command> [args...]\n       limux\n\nRunning `limux` with no arguments launches the GTK app.\n\nCommon commands:\n  identify [--workspace <id|ref>] [--surface <id|ref>]\n  list-panels [--workspace <id|ref>]\n  list-panes [--workspace <id|ref>]\n  list-workspaces\n  surface-health [--workspace <id|ref>]\n  send [--workspace <id|ref>] [--surface <id|ref>] <text>\n  send-key [--workspace <id|ref>] [--surface <id|ref>] <key>\n  new-workspace [--cwd <path>] [--command <text>]\n  select-workspace --workspace <id|ref>\n  close-workspace --workspace <id|ref>\n  sidebar-state --workspace <id|ref>\n  new-surface [--workspace <id|ref>] [--pane <id|ref>] [--type <terminal|browser>] [--url <url>]\n  close-surface [--workspace <id|ref>] [--surface <id|ref>]\n  focus-surface [--workspace <id|ref>] [--surface <id|ref>]\n  focus-pane [--workspace <id|ref>] [--pane <id|ref>]\n  new-pane [--workspace <id|ref>] [--pane <id|ref>] [--surface <id|ref>] [--direction <left|right|up|down>] [--type <terminal|browser>] [--command <text>] [--url <url>]\n      Live GTK self-spawn currently supports terminal panes only; browser panes remain deferred.\n  rename-workspace [--workspace <id|ref>] <title>\n  rename-window [--workspace <id|ref>] <title>\n  rename-tab [--workspace <id|ref>] [--tab <id|ref>] <title>\n  read-screen [--workspace <id|ref>] [--surface <id|ref>] [--scrollback] [--lines <n>]\n  capture-pane (alias of read-screen)\n  tab-action --action <name> [--workspace <id|ref>] [--tab <id|ref>] [--title <text>] [--url <url>]\n  browser [--surface <id|ref>|<surface>] <subcommand> ...\n\nAgent integrations:\n  notify [--workspace <id|ref>] [--subtitle <text>] [--body <text>] <title>\n  hooks setup [agent] | hooks uninstall [agent] | hooks <agent> <event>\n  claude-hook | opencode-hook | gemini-hook --event <name> [--subtitle <text>] [--body <text>] [--title <text>]\n  agent-team [--agents codex,claude[,opencode,gemini]] [--cwd <path>] [--no-launch] [--dry-run]\n      Splits the active workspace into one pane per agent (caller's pane stays\n      as the orchestrator on the left, peers stack down the right), launches\n      each CLI in its pane, and writes AGENTS.md describing the <agent-msg>\n      XML protocol so peers can talk via\n      `limux send --surface <peer-surface-id> <envelope>`.\n"
-    );
+    const HELP: &str = r#"limux CLI
+
+Usage: limux [--socket <path>] [--json] [--id-format refs|both|uuids] <command> [args...]
+       limux --version
+       limux
+
+Running `limux` with no arguments launches the GTK app.
+
+Common commands:
+  identify [--workspace <id|ref>] [--surface <id|ref>]
+  list-panels [--workspace <id|ref>]
+  list-panes [--workspace <id|ref>]
+  list-workspaces
+  surface-health [--workspace <id|ref>]
+  send [--workspace <id|ref>] [--surface <id|ref>] <text>
+  send-key [--workspace <id|ref>] [--surface <id|ref>] <key>
+  new-workspace [--cwd <path>] [--command <text>]
+  select-workspace --workspace <id|ref>
+  close-workspace --workspace <id|ref>
+  sidebar-state --workspace <id|ref>
+  new-surface [--workspace <id|ref>] [--pane <id|ref>] [--type terminal|browser] [--url <url>]
+  close-surface [--workspace <id|ref>] [--surface <id|ref>]
+  focus-surface [--workspace <id|ref>] [--surface <id|ref>]
+  focus-pane [--workspace <id|ref>] [--pane <id|ref>]
+  new-pane [--workspace <id|ref>] [--pane <id|ref>] [--surface <id|ref>] [--direction <left|right|up|down>] [--type <terminal|browser>] [--command <text>] [--url <url>]
+      Live GTK self-spawn currently supports terminal panes only; browser panes remain deferred.
+  rename-workspace [--workspace <id|ref>] <title>
+  rename-window [--workspace <id|ref>] <title>
+  rename-tab [--workspace <id|ref>] [--tab <id|ref>] <title>
+  read-screen [--workspace <id|ref>] [--surface <id|ref>] [--scrollback] [--lines <n>]
+  capture-pane (alias of read-screen)
+  tab-action --action <name> [--workspace <id|ref>] [--tab <id|ref>] [--title <text>] [--url <url>]
+  browser [--surface <id|ref>|<surface>] <subcommand> ...
+
+Agent integrations:
+  notify [--workspace <id|ref>] [--surface <id|ref>] [--subtitle <text>] [--body <text>] <title>
+  hooks setup [agent] | hooks uninstall [agent] | hooks <agent> <event>
+  claude-hook | opencode-hook | gemini-hook --event <name> [--subtitle <text>] [--body <text>] [--title <text>]
+  agent-team [--agents codex,claude[,opencode,gemini]] [--cwd <path>] [--no-launch] [--dry-run]
+      Splits the active workspace into one pane per agent (caller's pane stays
+      as the orchestrator on the left, peers stack down the right), launches
+      each CLI in its pane, and writes AGENTS.md describing the <agent-msg>
+      XML protocol so peers can talk via
+      `limux send --surface <peer-surface-id> <envelope>`."#;
+
+    println!("{HELP}\n");
 }
 
 fn should_launch_host(opts: &GlobalOptions) -> bool {
@@ -349,6 +393,21 @@ fn parse_opt(args: &[String], name: &str) -> Option<String> {
             None
         }
     })
+}
+
+fn parse_terminal_surface(args: &[String]) -> Result<Option<String>> {
+    let Some(surface) = parse_opt(args, "--surface") else {
+        if parse_flag(args, "--surface") {
+            bail!("--surface requires a non-empty target");
+        }
+        return Ok(None);
+    };
+    let normalized = surface.trim();
+    let normalized = normalized.strip_prefix("surface:").unwrap_or(normalized);
+    if normalized.trim().is_empty() {
+        bail!("--surface requires a non-empty target");
+    }
+    Ok(Some(surface))
 }
 
 fn parse_flag(args: &[String], name: &str) -> bool {
@@ -764,7 +823,7 @@ async fn run_send(client: &mut Client, args: &[String]) -> Result<Value> {
     let workspace = parse_opt(args, "--workspace")
         .or_else(|| env::var("LIMUX_WORKSPACE_ID").ok())
         .filter(|s| !s.is_empty());
-    let surface = parse_opt(args, "--surface").filter(|s| !s.is_empty());
+    let surface = parse_terminal_surface(args)?;
 
     let text = trailing_title(args).ok_or_else(|| anyhow!("send requires text"))?;
 
@@ -787,7 +846,7 @@ async fn run_send_key(client: &mut Client, args: &[String]) -> Result<Value> {
     let workspace = parse_opt(args, "--workspace")
         .or_else(|| env::var("LIMUX_WORKSPACE_ID").ok())
         .filter(|s| !s.is_empty());
-    let surface = parse_opt(args, "--surface").filter(|s| !s.is_empty());
+    let surface = parse_terminal_surface(args)?;
     let key = trailing_title(args).ok_or_else(|| anyhow!("send-key requires key"))?;
 
     let mut params = Map::new();
@@ -802,16 +861,27 @@ async fn run_send_key(client: &mut Client, args: &[String]) -> Result<Value> {
 /// `limux notify` — post a notification into the sidebar + toast overlay.
 ///
 /// Usage:
-///   limux notify [--workspace <id|ref>] [--subtitle <text>] [--body <text>] <title>
+///   limux notify [--workspace <id|ref>] [--surface <id|ref>] [--subtitle <text>] [--body <text>] <title>
 ///   limux notify --title "..." --subtitle "..." --body "..."
 ///
 /// Mirrors the `cmux notify` shape (title / subtitle / body). Title is
 /// required; subtitle and body are optional. Falls back to the current
 /// workspace via LIMUX_WORKSPACE_ID when --workspace isn't given.
+fn notification_surface_target(
+    args: &[String],
+    mut env_value: impl FnMut(&str) -> Option<String>,
+) -> Option<String> {
+    parse_opt(args, "--surface")
+        .or_else(|| env_value("LIMUX_TAB_ID"))
+        .or_else(|| env_value("LIMUX_SURFACE_ID"))
+        .filter(|value| !value.is_empty())
+}
+
 async fn run_notify(client: &mut Client, args: &[String]) -> Result<Value> {
     let workspace = parse_opt(args, "--workspace")
         .or_else(|| env::var("LIMUX_WORKSPACE_ID").ok())
         .filter(|s| !s.is_empty());
+    let surface = notification_surface_target(args, |key| env::var(key).ok());
 
     // Title can be provided either via --title or as the trailing positional
     // (matching `limux send`'s ergonomics).
@@ -831,6 +901,9 @@ async fn run_notify(client: &mut Client, args: &[String]) -> Result<Value> {
     }
     if !body.is_empty() {
         params.insert("body".to_string(), Value::String(body));
+    }
+    if let Some(surface) = surface {
+        params.insert("surface_id".to_string(), Value::String(surface));
     }
 
     call_in_workspace_scope(
@@ -968,6 +1041,7 @@ async fn run_agent_hook(
     let workspace = parse_opt(args, "--workspace")
         .or_else(|| env::var("LIMUX_WORKSPACE_ID").ok())
         .filter(|s| !s.is_empty());
+    let surface = notification_surface_target(args, |key| env::var(key).ok());
 
     let mut params = Map::new();
     params.insert("title".to_string(), Value::String(title));
@@ -976,6 +1050,9 @@ async fn run_agent_hook(
     }
     if !body.is_empty() {
         params.insert("body".to_string(), Value::String(body));
+    }
+    if let Some(surface) = surface {
+        params.insert("surface_id".to_string(), Value::String(surface));
     }
 
     let _ = call_in_workspace_scope(
@@ -1121,30 +1198,27 @@ fn persist_agent_hook_session(
         return Ok(());
     };
 
-    let existing = store.lookup(&session_id)?;
-    let cwd = hook_str(payload, &["cwd", "working_directory", "directory"])
-        .map(str::to_string)
-        .or_else(|| existing.as_ref().and_then(|record| record.cwd.clone()));
-    let pid = hook_str(payload, &["pid"])
-        .and_then(|value| value.parse::<u32>().ok())
-        .or_else(|| agent_ancestor_pid(agent))
-        .or_else(|| existing.as_ref().and_then(|record| record.pid));
-    let launch_command = agent_hooks::launch_record_from_env(agent, cwd.as_deref()).or_else(|| {
-        existing
-            .as_ref()
-            .and_then(|record| record.launch_command.clone())
-    });
+    let result = store.update(&session_id, |existing| {
+        let cwd = hook_str(payload, &["cwd", "working_directory", "directory"])
+            .map(str::to_string)
+            .or_else(|| existing.and_then(|record| record.cwd.clone()));
+        let pid = hook_str(payload, &["pid"])
+            .and_then(|value| value.parse::<u32>().ok())
+            .or_else(|| agent_ancestor_pid(agent))
+            .or_else(|| existing.and_then(|record| record.pid));
+        let launch_command = agent_hooks::launch_record_from_env(agent, cwd.as_deref())
+            .or_else(|| existing.and_then(|record| record.launch_command.clone()));
 
-    let record = agent_hooks::AgentHookSessionRecord {
-        session_id,
-        workspace_id,
-        surface_id,
-        cwd,
-        pid,
-        launch_command,
-        updated_at: agent_hooks::now_seconds(),
-    };
-    let result = store.upsert(record);
+        agent_hooks::AgentHookSessionRecord {
+            session_id: session_id.clone(),
+            workspace_id,
+            surface_id,
+            cwd,
+            pid,
+            launch_command,
+            updated_at: agent_hooks::now_seconds(),
+        }
+    });
     if result.is_ok() {
         write_agent_hook_debug(
             agent,
@@ -1960,7 +2034,7 @@ async fn run_agent_team(client: &mut Client, args: &[String]) -> Result<Value> {
         bail!("agent-team: --agents is empty");
     }
 
-    let cwd = parse_opt(args, "--cwd")
+    let requested_cwd = parse_opt(args, "--cwd")
         .or_else(|| {
             env::current_dir()
                 .ok()
@@ -1972,6 +2046,16 @@ async fn run_agent_team(client: &mut Client, args: &[String]) -> Result<Value> {
     // the agents manually) — still splits the panes + writes AGENTS.md.
     let no_launch = args.iter().any(|a| a == "--no-launch");
     let dry_run = args.iter().any(|a| a == "--dry-run");
+    let cwd = if dry_run {
+        std::path::absolute(&requested_cwd)
+    } else {
+        fs::canonicalize(&requested_cwd)
+    }
+    .context("agent-team: could not resolve cwd")?;
+    if !dry_run && !cwd.is_dir() {
+        bail!("agent-team: cwd must be a directory");
+    }
+    let cwd = cwd.to_string_lossy().into_owned();
 
     // Resolve the agent list up front so --dry-run can build a deterministic
     // peer table without touching the host.
@@ -2012,12 +2096,6 @@ async fn run_agent_team(client: &mut Client, args: &[String]) -> Result<Value> {
             "<dry-run-workspace>",
             "<dry-run-orchestrator>",
         );
-        if let Err(err) = std::fs::write(&agents_md_path, body) {
-            eprintln!(
-                "agent-team: failed to write {}: {err}",
-                agents_md_path.display()
-            );
-        }
         return Ok(json!({
             "ok": true,
             "cwd": cwd,
@@ -2025,6 +2103,7 @@ async fn run_agent_team(client: &mut Client, args: &[String]) -> Result<Value> {
             "workspace_id": Value::Null,
             "orchestrator_surface_id": Value::Null,
             "agents_md": agents_md_path.to_string_lossy(),
+            "agents_md_preview": body,
             "dry_run": true,
             "no_launch": no_launch,
             "peers": peers
@@ -2040,6 +2119,9 @@ async fn run_agent_team(client: &mut Client, args: &[String]) -> Result<Value> {
                 .collect::<Vec<_>>(),
         }));
     }
+
+    // Reject existing instructions and check the destination before creating panes.
+    let instructions = agent_team_file::PendingInstructions::new(&agents_md_path)?;
 
     // 1. Resolve the orchestrator's workspace + pane. Prefer LIMUX_* env (set
     //    in every limux-spawned terminal) and fall back to the host's active
@@ -2132,9 +2214,10 @@ async fn run_agent_team(client: &mut Client, args: &[String]) -> Result<Value> {
             Value::String(direction.to_string()),
         );
         params.insert("type".to_string(), Value::String("terminal".to_string()));
-        if !no_launch {
-            params.insert("command".to_string(), Value::String(launch.clone()));
-        }
+        params.insert(
+            "command".to_string(),
+            Value::String(instructions.pane_command((!no_launch).then_some(launch.as_str()))),
+        );
 
         let created = client
             .call("pane.create", Value::Object(params))
@@ -2150,7 +2233,8 @@ async fn run_agent_team(client: &mut Client, args: &[String]) -> Result<Value> {
         peers.push((name.to_string(), pane_id, surface_id, launch.clone()));
     }
 
-    // 5. Write AGENTS.md into the shared cwd, clobbering any existing file.
+    // 5. Publish all peer IDs before releasing the gated startup commands.
+    // Dropping the stage on any earlier error prevents every agent from launching.
     let body = build_agents_md(
         &peers,
         &cwd,
@@ -2158,12 +2242,7 @@ async fn run_agent_team(client: &mut Client, args: &[String]) -> Result<Value> {
         &workspace_id,
         &orchestrator_surface,
     );
-    if let Err(err) = std::fs::write(&agents_md_path, body) {
-        eprintln!(
-            "agent-team: failed to write {}: {err}",
-            agents_md_path.display()
-        );
-    }
+    instructions.publish(&body)?;
 
     Ok(json!({
         "ok": true,
@@ -2315,7 +2394,7 @@ fn build_agents_md(
     out.push_str("---\n");
     out.push_str(
         "_Generated by `limux agent-team`. Safe to edit the Policies\n\
-         section; regenerating will overwrite everything above it._\n",
+         section; keep or move this file before creating another team._\n",
     );
 
     out
@@ -2330,71 +2409,68 @@ async fn run_close_workspace(client: &mut Client, args: &[String]) -> Result<Val
         .await
 }
 
-/// `limux close-surface [--workspace <id|ref>] [--surface <id|ref>]`
-///
-/// Closes a single tab. Until now `close-workspace` was the only teardown verb
-/// limux had, so an orchestrator could not reclaim one pane without destroying
-/// the whole workspace.
 async fn run_close_surface(client: &mut Client, args: &[String]) -> Result<Value> {
-    let mut params = Map::new();
-    insert_surface_scope(&mut params, args);
+    let params = lifecycle_scope(args, Some(("--surface", "surface_id", "LIMUX_SURFACE_ID")))?;
     client.call("surface.close", Value::Object(params)).await
 }
 
-/// `limux focus-surface [--workspace <id|ref>] [--surface <id|ref>]`
 async fn run_focus_surface(client: &mut Client, args: &[String]) -> Result<Value> {
-    let mut params = Map::new();
-    insert_surface_scope(&mut params, args);
+    let params = lifecycle_scope(args, Some(("--surface", "surface_id", "LIMUX_SURFACE_ID")))?;
     client.call("surface.focus", Value::Object(params)).await
 }
 
-/// `limux focus-pane [--workspace <id|ref>] [--pane <id|ref>]`
 async fn run_focus_pane(client: &mut Client, args: &[String]) -> Result<Value> {
-    let mut params = Map::new();
-    if let Some(workspace) = workspace_scope(args) {
-        params.insert("workspace_id".to_string(), Value::String(workspace));
-    }
-    if let Some(pane) = parse_opt(args, "--pane").filter(|s| !s.is_empty()) {
-        params.insert("pane_id".to_string(), Value::String(pane));
-    }
+    let params = lifecycle_scope(args, Some(("--pane", "pane_id", "LIMUX_PANE_ID")))?;
     client.call("pane.focus", Value::Object(params)).await
 }
 
-/// `limux new-surface [--workspace <id|ref>] [--pane <id|ref>] [--type terminal|browser] [--url <url>]`
-///
-/// Opens a new tab inside an existing pane. Previously this returned
-/// `-32601: unknown method: surface.create` — the CLI verb existed with no
-/// backend behind it.
 async fn run_new_surface(client: &mut Client, args: &[String]) -> Result<Value> {
-    let mut params = Map::new();
-    if let Some(workspace) = workspace_scope(args) {
-        params.insert("workspace_id".to_string(), Value::String(workspace));
-    }
-    if let Some(pane) = parse_opt(args, "--pane").filter(|s| !s.is_empty()) {
-        params.insert("pane_id".to_string(), Value::String(pane));
-    }
-    if let Some(kind) = parse_opt(args, "--type").filter(|s| !s.is_empty()) {
-        params.insert("type".to_string(), Value::String(kind));
-    }
-    if let Some(url) = parse_opt(args, "--url").filter(|s| !s.is_empty()) {
-        params.insert("url".to_string(), Value::String(url));
+    let mut params = lifecycle_scope(args, Some(("--pane", "pane_id", "LIMUX_PANE_ID")))?;
+    for (flag, key) in [("--type", "type"), ("--url", "url")] {
+        if let Some(value) = lifecycle_option(args, flag)? {
+            params.insert(key.to_string(), Value::String(value));
+        }
     }
     client.call("surface.create", Value::Object(params)).await
 }
 
-fn workspace_scope(args: &[String]) -> Option<String> {
-    parse_opt(args, "--workspace")
-        .or_else(|| env::var("LIMUX_WORKSPACE_ID").ok())
-        .filter(|s| !s.is_empty())
+fn lifecycle_option(args: &[String], flag: &str) -> Result<Option<String>> {
+    let value = parse_opt(args, flag);
+    if parse_flag(args, flag)
+        && value
+            .as_ref()
+            .is_none_or(|value| value.trim().is_empty() || value.starts_with("--"))
+    {
+        bail!("{flag} requires a non-empty value");
+    }
+    Ok(value)
 }
 
-fn insert_surface_scope(params: &mut Map<String, Value>, args: &[String]) {
-    if let Some(workspace) = workspace_scope(args) {
+fn lifecycle_scope(
+    args: &[String],
+    target: Option<(&str, &str, &str)>,
+) -> Result<Map<String, Value>> {
+    let mut params = Map::new();
+    let workspace = lifecycle_option(args, "--workspace")?.or_else(|| {
+        env::var("LIMUX_WORKSPACE_ID")
+            .ok()
+            .filter(|value| !value.is_empty())
+    });
+    if let Some(workspace) = workspace {
         params.insert("workspace_id".to_string(), Value::String(workspace));
     }
-    if let Some(surface) = parse_opt(args, "--surface").filter(|s| !s.is_empty()) {
-        params.insert("surface_id".to_string(), Value::String(surface));
+    if let Some((flag, key, env_key)) = target {
+        // An explicit workspace must not inherit the caller's target from another workspace.
+        let target = lifecycle_option(args, flag)?.or_else(|| {
+            (!parse_flag(args, "--workspace"))
+                .then(|| env::var(env_key).ok().filter(|value| !value.is_empty()))
+                .flatten()
+        });
+        if let Some(target) = target {
+            params.insert(key.to_string(), Value::String(target));
+        }
     }
+    Ok(params)
 }
 
 /// `limux select-workspace --workspace <id|ref>` — bring a workspace to the front.
@@ -2522,7 +2598,7 @@ async fn run_read_screen(client: &mut Client, args: &[String]) -> Result<Value> 
     }
 
     let workspace = parse_opt(args, "--workspace");
-    let surface = parse_opt(args, "--surface");
+    let surface = parse_terminal_surface(args)?;
     let mut params = Map::new();
     if let Some(workspace) = workspace {
         params.insert("workspace_id".to_string(), Value::String(workspace));
@@ -2560,23 +2636,11 @@ async fn run_rename_workspace_like(
 }
 
 async fn run_rename_tab(client: &mut Client, args: &[String]) -> Result<Value> {
-    let workspace = parse_opt(args, "--workspace")
-        .or_else(|| env::var("LIMUX_WORKSPACE_ID").ok())
-        .unwrap_or_default();
-    let tab = parse_opt(args, "--tab")
-        .or_else(|| env::var("LIMUX_TAB_ID").ok())
-        .unwrap_or_default();
+    let mut params = lifecycle_scope(args, Some(("--tab", "surface_id", "LIMUX_TAB_ID")))?;
     let title = trailing_title(args).ok_or_else(|| anyhow!("rename-tab requires a title"))?;
 
-    let mut params = Map::new();
     params.insert("action".to_string(), Value::String("rename".to_string()));
     params.insert("title".to_string(), Value::String(title));
-    if !workspace.is_empty() {
-        params.insert("workspace_id".to_string(), Value::String(workspace));
-    }
-    if !tab.is_empty() {
-        params.insert("surface_id".to_string(), Value::String(tab));
-    }
 
     client.call("tab.action", Value::Object(params)).await
 }
@@ -2584,14 +2648,21 @@ async fn run_rename_tab(client: &mut Client, args: &[String]) -> Result<Value> {
 async fn run_tab_action(client: &mut Client, args: &[String]) -> Result<Value> {
     if parse_flag(args, "--help") {
         return Ok(json!({
-            "help": "Usage: limux tab-action --action <name> [--workspace <id|ref>] [--tab <id|ref>] [--title <text>] [--url <url>]\nTarget tab:\n  --tab tab:<n>       Stable tab reference alias\n  --tab surface:<n>   Surface alias (legacy-compatible)\nExamples:\n  limux tab-action --workspace workspace:2 --tab tab:1 --action pin\n  limux tab-action --tab tab:3 --action mark-unread"
+            "help": "Usage: limux tab-action --action <name> [--workspace <id|ref>] [--tab <id|ref>] [--title <text>] [--url <url>]\nLive GTK actions: rename, set-title, pin, unpin, select, activate, focus, close.\nTargets accept a raw tab ID, tab:<tab-id>, or surface:<pane-id>:<tab-id>. Omitted targets use the caller's tab or the selected workspace's focused tab.\nPass --title '' with rename to clear a custom name."
         }));
     }
 
     let action = parse_opt(args, "--action")
         .ok_or_else(|| anyhow!("tab-action requires --action <name>"))?;
-    let workspace = parse_opt(args, "--workspace").or_else(|| env::var("LIMUX_WORKSPACE_ID").ok());
-    let tab = parse_opt(args, "--tab").or_else(|| env::var("LIMUX_TAB_ID").ok());
+    let mut params = lifecycle_scope(args, Some(("--tab", "surface_id", "LIMUX_TAB_ID")))?;
+    let workspace = params
+        .get("workspace_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let tab = params
+        .get("surface_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let title = parse_opt(args, "--title").or_else(|| trailing_title(args));
     let url = parse_opt(args, "--url");
 
@@ -2624,14 +2695,7 @@ async fn run_tab_action(client: &mut Client, args: &[String]) -> Result<Value> {
         }));
     }
 
-    let mut params = Map::new();
     params.insert("action".to_string(), Value::String(action.clone()));
-    if let Some(workspace) = workspace {
-        params.insert("workspace_id".to_string(), Value::String(workspace));
-    }
-    if let Some(tab) = tab.clone() {
-        params.insert("surface_id".to_string(), Value::String(tab));
-    }
     if let Some(title) = title {
         params.insert("title".to_string(), Value::String(title));
     }
@@ -3469,6 +3533,7 @@ async fn execute_command(client: &mut Client, opts: &GlobalOptions) -> Result<Co
     }
 
     let mut out = match command {
+        "--version" | "-V" => CommandOutput::Text(format!("limux {}", env!("CARGO_PKG_VERSION"))),
         "identify" => CommandOutput::Json(run_identify(client, args).await?),
         "list-panels" | "list-panes" | "list-workspaces" | "surface-health" => {
             let payload = run_list(client, command, args).await?;
@@ -3786,6 +3851,106 @@ mod cli_arg_tests {
         ]))));
     }
 
+    #[tokio::test]
+    async fn version_does_not_require_a_control_socket() {
+        let mut client = Client::new(PathBuf::from("/does/not/exist.sock"));
+
+        for flag in ["--version", "-V"] {
+            let output = execute_command(&mut client, &default_opts(args(&[flag])))
+                .await
+                .expect("version output");
+            match output {
+                CommandOutput::Text(text) => {
+                    assert_eq!(text, format!("limux {}", env!("CARGO_PKG_VERSION")));
+                }
+                CommandOutput::Json(_) => panic!("version should be plain text"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_commands_reject_empty_explicit_surface_before_connecting() {
+        for command in ["send", "send-key", "read-screen"] {
+            for target in ["", "   ", "surface:", " surface:   "] {
+                let mut client = Client::new(PathBuf::from("/does/not/exist.sock"));
+                let mut command_args = args(&[command, "--surface", target]);
+                if command == "send" {
+                    command_args.push("must not be sent".into());
+                }
+                if command == "send-key" {
+                    command_args.push("Enter".into());
+                }
+                let error = execute_command(&mut client, &default_opts(command_args))
+                    .await
+                    .expect_err("invalid target must fail locally");
+                assert_eq!(
+                    error.to_string(),
+                    "--surface requires a non-empty target",
+                    "{command} {target:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_surface_option_preserves_omission_and_valid_handles() {
+        assert_eq!(parse_terminal_surface(&args(&["payload"])).unwrap(), None);
+        assert!(parse_terminal_surface(&args(&["--surface"])).is_err());
+        for target in ["tab-id", "4:tab-id", "surface:4:tab-id"] {
+            assert_eq!(
+                parse_terminal_surface(&args(&["--surface", target])).unwrap(),
+                Some(target.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn lifecycle_options_reject_explicit_empty_or_missing_values() {
+        for flag in ["--workspace", "--pane", "--surface", "--type", "--url"] {
+            for values in [
+                vec![flag],
+                vec![flag, ""],
+                vec![flag, " "],
+                vec![flag, "--other"],
+            ] {
+                assert!(
+                    lifecycle_option(&args(&values), flag).is_err(),
+                    "{values:?}"
+                );
+            }
+            assert_eq!(lifecycle_option(&args(&[]), flag).unwrap(), None);
+            assert_eq!(
+                lifecycle_option(&args(&[flag, "value"]), flag).unwrap(),
+                Some("value".to_string())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_commands_reject_empty_targets_before_connecting() {
+        for (command, target_flag) in [
+            ("new-surface", "--pane"),
+            ("focus-pane", "--pane"),
+            ("focus-surface", "--surface"),
+            ("close-surface", "--surface"),
+            ("rename-tab", "--tab"),
+            ("tab-action", "--tab"),
+        ] {
+            for flag in [target_flag, "--workspace"] {
+                let mut client = Client::new(PathBuf::from("/does/not/exist.sock"));
+                let command_args = args(&[command, flag, "", "--action", "focus", "title"]);
+                let error = execute_command(&mut client, &default_opts(command_args))
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    format!("{flag} requires a non-empty value"),
+                    "{command}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn host_binary_candidates_cover_installed_and_dev_layouts() {
         let installed = Path::new("/usr/bin/limux");
@@ -3809,6 +3974,24 @@ mod cli_arg_tests {
         ]);
 
         assert_eq!(trailing_title(&args).as_deref(), Some("Input needed"));
+    }
+
+    #[test]
+    fn notification_target_prefers_explicit_surface_then_stable_tab_id() {
+        let env_value = |key: &str| match key {
+            "LIMUX_TAB_ID" => Some("tab-stable".to_string()),
+            "LIMUX_SURFACE_ID" => Some("1:tab-stable".to_string()),
+            _ => None,
+        };
+
+        assert_eq!(
+            notification_surface_target(&args(&["--surface", "2:explicit"]), env_value),
+            Some("2:explicit".to_string())
+        );
+        assert_eq!(
+            notification_surface_target(&[], env_value),
+            Some("tab-stable".to_string())
+        );
     }
 
     #[test]
@@ -4024,6 +4207,62 @@ mod cli_arg_tests {
 #[cfg(test)]
 mod agent_team_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn dry_run_previews_instructions_without_creating_or_overwriting_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        let args = vec![
+            "--dry-run".to_string(),
+            "--cwd".to_string(),
+            dir.path().to_string_lossy().into_owned(),
+        ];
+        let mut client = Client::new(dir.path().join("absent.sock"));
+        let preview = run_agent_team(&mut client, &args).await.unwrap();
+        assert!(preview["agents_md_preview"]
+            .as_str()
+            .unwrap()
+            .contains("<agent-msg"));
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+
+        let original = "# Existing project instructions\nNever discard these.\n";
+        fs::write(&path, original).unwrap();
+        run_agent_team(&mut client, &args).await.unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn existing_instructions_fail_before_contacting_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        fs::write(&path, "User policies").unwrap();
+        let args = vec![
+            "--cwd".to_string(),
+            dir.path().to_string_lossy().into_owned(),
+        ];
+        let mut client = Client::new(dir.path().join("absent.sock"));
+        let error = run_agent_team(&mut client, &args).await.unwrap_err();
+        assert!(error.to_string().contains("refusing to replace"));
+        assert_eq!(client.seq, 0);
+        assert_eq!(fs::read_to_string(path).unwrap(), "User policies");
+    }
+
+    #[tokio::test]
+    async fn invalid_destination_fails_before_contacting_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = vec![
+            "--cwd".to_string(),
+            dir.path()
+                .join("missing-directory")
+                .to_string_lossy()
+                .into_owned(),
+        ];
+        let mut client = Client::new(dir.path().join("absent.sock"));
+        let error = run_agent_team(&mut client, &args).await.unwrap_err();
+        assert!(error.to_string().contains("could not resolve cwd"));
+        assert_eq!(client.seq, 0);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
 
     #[test]
     fn agent_launch_known() {

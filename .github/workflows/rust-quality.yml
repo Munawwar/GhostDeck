@@ -5,21 +5,57 @@ on:
     branches:
       - main
   pull_request:
+  schedule:
+    - cron: "17 9 * * *"
+
+permissions:
+  contents: read
 
 jobs:
-  quality:
+  audit:
+    name: Dependency audit
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+
+      - name: Install pinned cargo-audit
+        env:
+          CARGO_AUDIT_VERSION: 0.22.2
+          CARGO_AUDIT_SHA256: 7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428
+        run: |
+          set -euo pipefail
+          asset="cargo-audit-x86_64-unknown-linux-musl-v${CARGO_AUDIT_VERSION}.tgz"
+          archive="$RUNNER_TEMP/$asset"
+          install_dir="$RUNNER_TEMP/cargo-audit"
+          bin_dir="$RUNNER_TEMP/bin"
+          curl --fail --location --retry 5 --retry-delay 5 \
+            "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v${CARGO_AUDIT_VERSION}/${asset}" \
+            -o "$archive"
+          printf '%s  %s\n' "$CARGO_AUDIT_SHA256" "$archive" | sha256sum --check
+          mkdir -p "$install_dir" "$bin_dir"
+          tar -xzf "$archive" -C "$install_dir" --strip-components=1
+          install -m755 "$install_dir/cargo-audit" "$bin_dir/cargo-audit"
+          echo "$bin_dir" >> "$GITHUB_PATH"
+
+      - name: Audit locked dependencies
+        run: cargo audit --deny warnings
+
+  quality:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
         with:
           submodules: recursive
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
 
       - name: Install stable Rust with required components
         run: |
@@ -32,6 +68,7 @@ jobs:
           sudo apt-get install -y \
             blueprint-compiler \
             build-essential \
+            gettext \
             libadwaita-1-dev \
             libepoxy-dev \
             libgtk-4-dev \
@@ -45,3 +82,60 @@ jobs:
 
       - name: Run repository quality checks
         run: ./scripts/check.sh
+
+  gtk-host-smoke:
+    name: GTK host smoke
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            blueprint-compiler \
+            build-essential \
+            gettext \
+            jq \
+            libadwaita-1-dev \
+            libepoxy-dev \
+            libgl1-mesa-dri \
+            libgtk-4-dev \
+            libwebkitgtk-6.0-dev \
+            pkg-config \
+            util-linux \
+            weston \
+            xauth \
+            xdotool \
+            xvfb
+
+      - name: Build libghostty for embedding
+        run: |
+          cd ghostty
+          zig build -Dapp-runtime=none -Doptimize=ReleaseFast -Dcpu=baseline
+
+      - name: Run live GTK host smoke test
+        env:
+          LIMUX_SMOKE_PROFILE: debug
+        run: ./scripts/xvfb-smoke-test.sh
+
+      - name: Check terminal directory inheritance
+        run: ./scripts/tests/test-terminal-cwd.sh
+
+      - name: Check tab double-click rename
+        run: ./scripts/tests/test-tab-rename.sh

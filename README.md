@@ -10,6 +10,7 @@ https://github.com/user-attachments/assets/6f3047c2-e2b6-49f2-b536-570a1570d0f8
 
 - **GPU-rendered terminals** via embedded Ghostty (OpenGL)
 - **Workspaces** with folder-based naming, persistence across restarts, and sidebar management
+- **Workspace autostart** commands configured directly from the workspace menu
 - **Split panes** (horizontal/vertical) with keyboard navigation
 - **Tabbed terminals** within each pane
 - **Built-in browser** (WebKitGTK)
@@ -23,13 +24,13 @@ Download the latest release from [GitHub Releases](https://github.com/am-will/li
 
 **Debian/Ubuntu (.deb)** — recommended:
 ```bash
-sudo dpkg -i ./limux_0.1.20_amd64.deb
+sudo dpkg -i ./limux_*_amd64.deb
 ```
 
 **AppImage** — portable across Ubuntu 24.04-era desktops and newer, no install needed:
 ```bash
-chmod +x Limux-0.1.20-x86_64.AppImage
-./Limux-0.1.20-x86_64.AppImage
+chmod +x Limux-*-x86_64.AppImage
+./Limux-*-x86_64.AppImage
 ```
 
 Release AppImages are built and checked on the Ubuntu 24.04 `GLIBC_2.39`
@@ -37,6 +38,13 @@ floor. They bundle Limux, Ghostty resources, WebKitGTK helper processes, and
 AppImage-only loader modules such as the gdk-pixbuf SVG loader. They still use
 the host GTK4 and libadwaita runtime, so older distributions may need the
 `.deb`, tarball, or a source build with matching system packages instead.
+
+The embedded [AppImage type-2 runtime](https://github.com/AppImage/type2-runtime)
+statically includes FUSE 3, so the AppImage does not require a host
+`libfuse.so.2` or `libfuse.so.3`. It works with versioned FUSE 3 helpers such as
+`fusermount3` while retaining support for the traditional `fusermount` helper.
+The launcher also discovers host GBM and DRI driver directories, allowing the
+Ubuntu-built bundle to use Mesa correctly on Fedora- and Arch-family systems.
 
 AppImage runtime library paths are scoped to the Limux app process. Terminals
 spawned inside Limux restore the user's original library/loader environment so
@@ -49,12 +57,16 @@ cd limux-*-linux-x86_64
 sudo ./install.sh
 ```
 
-**Arch Linux (unofficial AUR package)** — community-maintained by [antonbarchukov](https://github.com/antonbarchukov):
+**Arch Linux (AUR):**
 ```bash
+# Prebuilt release package
 yay -S limux-bin
+
+# Build Limux and Ghostty from source
+yay -S limux
 ```
 
-The AUR package is available at [`limux-bin`](https://aur.archlinux.org/packages/limux-bin). Thanks to [antonbarchukov](https://github.com/antonbarchukov) for packaging Limux for Arch users. Arch packaging is not currently maintained by upstream; please report AUR packaging issues to the package maintainer first. See [issue #5](https://github.com/am-will/limux/issues/5).
+Both [`limux-bin`](https://aur.archlinux.org/packages/limux-bin) and the source-built [`limux`](https://aur.archlinux.org/packages/limux) package are published from this repository. Thanks to [Anton Barchukov](https://github.com/antonbarchukov) for creating the original Arch packaging in [PR #50](https://github.com/am-will/limux/pull/50).
 
 To uninstall:
 ```bash
@@ -77,7 +89,7 @@ sudo apt install libgtk-4-1 libadwaita-1-0 libwebkitgtk-6.0-4
 ### Prerequisites
 
 - Rust toolchain (stable)
-- Zig
+- Zig 0.16.0
 - GTK4, libadwaita, WebKitGTK dev packages
 - Initialized Ghostty submodule
 
@@ -92,7 +104,7 @@ git submodule update --init --recursive
 # Build limux
 cargo build --release
 
-# Run (point to libghostty.so location)
+# Run (point to libghostty-internal.so location)
 LD_LIBRARY_PATH=../ghostty/zig-out/lib:$LD_LIBRARY_PATH ./target/release/limux
 ```
 
@@ -102,8 +114,8 @@ LD_LIBRARY_PATH=../ghostty/zig-out/lib:$LD_LIBRARY_PATH ./target/release/limux
 ./scripts/package.sh
 ```
 
-This builds the binary, bundles `libghostty.so`, icons, and an install script into a tarball.
-`package.sh` also rebuilds `libghostty.so` with `ReleaseFast` and `-Dcpu=baseline`, so Zig and the initialized Ghostty submodule must be present.
+This builds the binary, bundles `libghostty-internal.so`, icons, and an install script into a tarball.
+`package.sh` also rebuilds `libghostty-internal.so` with `ReleaseFast` and `-Dcpu=baseline`, so Zig 0.16.0 and initialized Ghostty submodule must be present.
 
 ## Development
 
@@ -114,6 +126,26 @@ Run the canonical local quality gate before committing:
 ```
 
 Repository maintainability rules live in [`docs/maintainability.md`](docs/maintainability.md).
+The [contributing guide](CONTRIBUTING.md) documents the CPU-only Rust formatting workflow.
+Release procedure lives in [`docs/releasing.md`](docs/releasing.md).
+
+## Workspace autostart
+
+Right-click a workspace in the sidebar and select **Set Autostart…** to run a
+command whenever Limux creates a terminal in that workspace. The command is
+stored as part of the workspace session and runs inside the terminal, so
+interactive commands such as `ssh user@server` work without modifying `.bashrc`.
+Open **Edit Autostart…** and save an empty command to disable it.
+
+Limux writes the command to a private, self-deleting `/bin/sh` script and asks
+the interactive terminal shell to source it, so changes such as `cd` and
+`export` remain in that shell. Autostart is enabled only when both `command` and
+`initial-command` in Ghostty's finalized configuration launch a recognized
+POSIX-compatible shell with no arguments other than interactive/login flags.
+Non-shell commands such as
+`command = direct:/usr/bin/vim` and non-interactive wrappers such as
+`command = direct:/bin/bash -lc "exec /usr/bin/vim"` skip autostart, so Limux
+does not inject keystrokes into the launched program.
 
 ## Agent integrations
 
@@ -124,7 +156,7 @@ Gemini CLI). Every terminal limux spawns auto-exports
 with no flags needed from inside the agent's own terminal.
 
 ```bash
-# Fire a libadwaita toast + sidebar unread badge from any agent
+# Fire a libadwaita toast + tab/workspace unread badges from any agent
 limux notify --subtitle "needs review" --body "blocked on auth choice" "Input needed"
 
 # Install Limux session-restore hooks for supported agents
@@ -159,6 +191,11 @@ limux send --workspace "$LIMUX_WORKSPACE_ID" --surface "<peer-surface-id>" \
 
 See the auto-generated `AGENTS.md` (written into the shared cwd) for
 the full protocol spec, peer table, and editable Policies section.
+`agent-team` refuses to replace an existing `AGENTS.md`, including one from a
+previous team, before creating any panes. Preserve or move existing instructions
+before running it again, then merge any project policies you want to keep.
+`limux --json agent-team --dry-run` previews the protocol in `agents_md_preview`
+without writing files or contacting the host.
 
 Checked-in hook templates live in [`hooks/`](hooks/). They mirror
 `limux hooks setup` for Codex, Claude Code, and Gemini CLI; OpenCode is
@@ -246,7 +283,7 @@ rust/
   limux-cli/           # CLI client
 ```
 
-The terminal rendering is handled entirely by Ghostty's embedded library (`libghostty.so`), which provides GPU-accelerated OpenGL rendering. The UI layer is native GTK4 with libadwaita.
+The terminal rendering is handled entirely by Ghostty's embedded library (`libghostty-internal.so`), which provides GPU-accelerated OpenGL rendering. The UI layer is native GTK4 with libadwaita.
 
 ## License
 
