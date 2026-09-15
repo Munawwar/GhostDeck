@@ -220,7 +220,10 @@ Common commands:
   select-workspace --workspace <id|ref>
   close-workspace --workspace <id|ref>
   sidebar-state --workspace <id|ref>
-  new-surface [--workspace <id|ref>]
+  new-surface [--workspace <id|ref>] [--pane <id|ref>] [--type terminal|browser] [--url <url>]
+  close-surface [--workspace <id|ref>] [--surface <id|ref>]
+  focus-surface [--workspace <id|ref>] [--surface <id|ref>]
+  focus-pane [--workspace <id|ref>] [--pane <id|ref>]
   new-pane [--workspace <id|ref>] [--pane <id|ref>] [--surface <id|ref>] [--direction <left|right|up|down>] [--type <terminal|browser>] [--command <text>] [--url <url>]
       Live GTK self-spawn currently supports terminal panes only; browser panes remain deferred.
   rename-workspace [--workspace <id|ref>] <title>
@@ -2431,6 +2434,70 @@ async fn run_close_workspace(client: &mut Client, args: &[String]) -> Result<Val
         .await
 }
 
+async fn run_close_surface(client: &mut Client, args: &[String]) -> Result<Value> {
+    let params = lifecycle_scope(args, Some(("--surface", "surface_id", "LIMUX_SURFACE_ID")))?;
+    client.call("surface.close", Value::Object(params)).await
+}
+
+async fn run_focus_surface(client: &mut Client, args: &[String]) -> Result<Value> {
+    let params = lifecycle_scope(args, Some(("--surface", "surface_id", "LIMUX_SURFACE_ID")))?;
+    client.call("surface.focus", Value::Object(params)).await
+}
+
+async fn run_focus_pane(client: &mut Client, args: &[String]) -> Result<Value> {
+    let params = lifecycle_scope(args, Some(("--pane", "pane_id", "LIMUX_PANE_ID")))?;
+    client.call("pane.focus", Value::Object(params)).await
+}
+
+async fn run_new_surface(client: &mut Client, args: &[String]) -> Result<Value> {
+    let mut params = lifecycle_scope(args, Some(("--pane", "pane_id", "LIMUX_PANE_ID")))?;
+    for (flag, key) in [("--type", "type"), ("--url", "url")] {
+        if let Some(value) = lifecycle_option(args, flag)? {
+            params.insert(key.to_string(), Value::String(value));
+        }
+    }
+    client.call("surface.create", Value::Object(params)).await
+}
+
+fn lifecycle_option(args: &[String], flag: &str) -> Result<Option<String>> {
+    let value = parse_opt(args, flag);
+    if parse_flag(args, flag)
+        && value
+            .as_ref()
+            .is_none_or(|value| value.trim().is_empty() || value.starts_with("--"))
+    {
+        bail!("{flag} requires a non-empty value");
+    }
+    Ok(value)
+}
+
+fn lifecycle_scope(
+    args: &[String],
+    target: Option<(&str, &str, &str)>,
+) -> Result<Map<String, Value>> {
+    let mut params = Map::new();
+    let workspace = lifecycle_option(args, "--workspace")?.or_else(|| {
+        env::var("LIMUX_WORKSPACE_ID")
+            .ok()
+            .filter(|value| !value.is_empty())
+    });
+    if let Some(workspace) = workspace {
+        params.insert("workspace_id".to_string(), Value::String(workspace));
+    }
+    if let Some((flag, key, env_key)) = target {
+        // An explicit workspace must not inherit the caller's target from another workspace.
+        let target = lifecycle_option(args, flag)?.or_else(|| {
+            (!parse_flag(args, "--workspace"))
+                .then(|| env::var(env_key).ok().filter(|value| !value.is_empty()))
+                .flatten()
+        });
+        if let Some(target) = target {
+            params.insert(key.to_string(), Value::String(target));
+        }
+    }
+    Ok(params)
+}
+
 /// `limux select-workspace --workspace <id|ref>` — bring a workspace to the front.
 ///
 /// The host has always implemented `workspace.select`; it just wasn't reachable
@@ -2495,11 +2562,6 @@ async fn run_sidebar_state(client: &mut Client, args: &[String]) -> Result<Value
         "cwd": cwd,
         "git_branch": git_branch,
     }))
-}
-
-async fn run_new_surface(client: &mut Client, args: &[String]) -> Result<Value> {
-    let workspace = parse_opt(args, "--workspace");
-    call_in_workspace_scope(client, workspace, "surface.create", json!({})).await
 }
 
 fn env_opt(name: &str) -> Option<String> {
@@ -2599,23 +2661,11 @@ async fn run_rename_workspace_like(
 }
 
 async fn run_rename_tab(client: &mut Client, args: &[String]) -> Result<Value> {
-    let workspace = parse_opt(args, "--workspace")
-        .or_else(|| env::var("LIMUX_WORKSPACE_ID").ok())
-        .unwrap_or_default();
-    let tab = parse_opt(args, "--tab")
-        .or_else(|| env::var("LIMUX_TAB_ID").ok())
-        .unwrap_or_default();
+    let mut params = lifecycle_scope(args, Some(("--tab", "surface_id", "LIMUX_TAB_ID")))?;
     let title = trailing_title(args).ok_or_else(|| anyhow!("rename-tab requires a title"))?;
 
-    let mut params = Map::new();
     params.insert("action".to_string(), Value::String("rename".to_string()));
     params.insert("title".to_string(), Value::String(title));
-    if !workspace.is_empty() {
-        params.insert("workspace_id".to_string(), Value::String(workspace));
-    }
-    if !tab.is_empty() {
-        params.insert("surface_id".to_string(), Value::String(tab));
-    }
 
     client.call("tab.action", Value::Object(params)).await
 }
@@ -2623,14 +2673,21 @@ async fn run_rename_tab(client: &mut Client, args: &[String]) -> Result<Value> {
 async fn run_tab_action(client: &mut Client, args: &[String]) -> Result<Value> {
     if parse_flag(args, "--help") {
         return Ok(json!({
-            "help": "Usage: limux tab-action --action <name> [--workspace <id|ref>] [--tab <id|ref>] [--title <text>] [--url <url>]\nTarget tab:\n  --tab tab:<n>       Stable tab reference alias\n  --tab surface:<n>   Surface alias (legacy-compatible)\nExamples:\n  limux tab-action --workspace workspace:2 --tab tab:1 --action pin\n  limux tab-action --tab tab:3 --action mark-unread"
+            "help": "Usage: limux tab-action --action <name> [--workspace <id|ref>] [--tab <id|ref>] [--title <text>] [--url <url>]\nLive GTK actions: rename, set-title, pin, unpin, select, activate, focus, close.\nTargets accept a raw tab ID, tab:<tab-id>, or surface:<pane-id>:<tab-id>. Omitted targets use the caller's tab or the selected workspace's focused tab.\nPass --title '' with rename to clear a custom name."
         }));
     }
 
     let action = parse_opt(args, "--action")
         .ok_or_else(|| anyhow!("tab-action requires --action <name>"))?;
-    let workspace = parse_opt(args, "--workspace").or_else(|| env::var("LIMUX_WORKSPACE_ID").ok());
-    let tab = parse_opt(args, "--tab").or_else(|| env::var("LIMUX_TAB_ID").ok());
+    let mut params = lifecycle_scope(args, Some(("--tab", "surface_id", "LIMUX_TAB_ID")))?;
+    let workspace = params
+        .get("workspace_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let tab = params
+        .get("surface_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let title = parse_opt(args, "--title").or_else(|| trailing_title(args));
     let url = parse_opt(args, "--url");
 
@@ -2663,14 +2720,7 @@ async fn run_tab_action(client: &mut Client, args: &[String]) -> Result<Value> {
         }));
     }
 
-    let mut params = Map::new();
     params.insert("action".to_string(), Value::String(action.clone()));
-    if let Some(workspace) = workspace {
-        params.insert("workspace_id".to_string(), Value::String(workspace));
-    }
-    if let Some(tab) = tab.clone() {
-        params.insert("surface_id".to_string(), Value::String(tab));
-    }
     if let Some(title) = title {
         params.insert("title".to_string(), Value::String(title));
     }
@@ -3576,6 +3626,30 @@ async fn execute_command(client: &mut Client, opts: &GlobalOptions) -> Result<Co
                 CommandOutput::Text(format!("OK {}", handle))
             }
         }
+        "close-surface" => {
+            let payload = run_close_surface(client, args).await?;
+            if opts.json_output {
+                CommandOutput::Json(payload)
+            } else {
+                CommandOutput::Text("OK".to_string())
+            }
+        }
+        "focus-surface" => {
+            let payload = run_focus_surface(client, args).await?;
+            if opts.json_output {
+                CommandOutput::Json(payload)
+            } else {
+                CommandOutput::Text("OK".to_string())
+            }
+        }
+        "focus-pane" => {
+            let payload = run_focus_pane(client, args).await?;
+            if opts.json_output {
+                CommandOutput::Json(payload)
+            } else {
+                CommandOutput::Text("OK".to_string())
+            }
+        }
         "select-workspace" => {
             let payload = run_select_workspace(client, args).await?;
             if opts.json_output {
@@ -3900,6 +3974,53 @@ mod cli_arg_tests {
                 parse_terminal_surface(&args(&["--surface", target])).unwrap(),
                 Some(target.to_string())
             );
+        }
+    }
+
+    #[test]
+    fn lifecycle_options_reject_explicit_empty_or_missing_values() {
+        for flag in ["--workspace", "--pane", "--surface", "--type", "--url"] {
+            for values in [
+                vec![flag],
+                vec![flag, ""],
+                vec![flag, " "],
+                vec![flag, "--other"],
+            ] {
+                assert!(
+                    lifecycle_option(&args(&values), flag).is_err(),
+                    "{values:?}"
+                );
+            }
+            assert_eq!(lifecycle_option(&args(&[]), flag).unwrap(), None);
+            assert_eq!(
+                lifecycle_option(&args(&[flag, "value"]), flag).unwrap(),
+                Some("value".to_string())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_commands_reject_empty_targets_before_connecting() {
+        for (command, target_flag) in [
+            ("new-surface", "--pane"),
+            ("focus-pane", "--pane"),
+            ("focus-surface", "--surface"),
+            ("close-surface", "--surface"),
+            ("rename-tab", "--tab"),
+            ("tab-action", "--tab"),
+        ] {
+            for flag in [target_flag, "--workspace"] {
+                let mut client = Client::new(PathBuf::from("/does/not/exist.sock"));
+                let command_args = args(&[command, flag, "", "--action", "focus", "title"]);
+                let error = execute_command(&mut client, &default_opts(command_args))
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    format!("{flag} requires a non-empty value"),
+                    "{command}"
+                );
+            }
         }
     }
 

@@ -14,8 +14,14 @@ if [ "${1:-}" != --inside ]; then
   export XDG_CACHE_HOME="$LIMUX_RENAME_TEST_DIR/cache"
   mkdir -p "$XDG_DATA_HOME/limux" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME/ghostty" "$XDG_RUNTIME_DIR" "$XDG_CACHE_HOME"
   chmod 700 "$XDG_RUNTIME_DIR"
+  export GTK_USE_PORTAL=0 GIO_USE_VFS=local GTK_A11Y=none
+  unset DBUS_SESSION_BUS_ADDRESS DBUS_STARTER_ADDRESS DBUS_STARTER_BUS_TYPE WAYLAND_DISPLAY
+  unset GNOME_KEYRING_CONTROL SSH_AUTH_SOCK GPG_AGENT_INFO
+  # Do not activate desktop services that can escape the private XDG paths.
+  printf '%s\n' '<busconfig><type>session</type><listen>unix:tmpdir=/tmp</listen><auth>EXTERNAL</auth><policy context="default"><allow send_destination="*" eavesdrop="true"/><allow eavesdrop="true"/><allow own="*"/></policy></busconfig>' \
+    >"$LIMUX_RENAME_TEST_DIR/dbus.conf"
   exec xvfb-run -a -s '-screen 0 1440x1000x24 -nolisten tcp' \
-    dbus-run-session -- bash "$0" --inside
+    dbus-run-session --config-file="$LIMUX_RENAME_TEST_DIR/dbus.conf" -- bash "$0" --inside
 fi
 
 HOST="${LIMUX_TEST_HOST:-$ROOT_DIR/target/debug/limux}"
@@ -122,6 +128,7 @@ xdotool mousemove --window "$WINDOW" 500 350 click 1
 assert_title terminal 'Terminal renamed'
 echo 'PASS: terminal double-click rename and click-away commit'
 
+saved=false
 for _ in $(seq 1 50); do
   if jq -e '.workspaces[0].layout.tabs |
     any(.id == "terminal" and .custom_name == "Terminal renamed") and
@@ -129,9 +136,57 @@ for _ in $(seq 1 50); do
     "$XDG_DATA_HOME/limux/session.json" >/dev/null; then
     echo 'PASS: both custom names persisted'
     if command -v import >/dev/null; then import -window root "$RUN_DIR/renamed-tabs.png" || true; fi
-    exit 0
+    saved=true
+    break
   fi
   sleep 0.1
 done
-echo 'FAIL: renamed tabs were not persisted'
-exit 1
+[ "$saved" = true ] || { echo 'FAIL: renamed tabs were not persisted'; exit 1; }
+
+# Zoom detaches the other pane from the visible GTK tree, but its tabs still
+# belong to the workspace and remain valid explicit control targets.
+"$CLI" --json --id-format both new-pane --workspace rename --direction right >"$RUN_DIR/zoom-pane.json"
+ZOOM_SURFACE="$(jq -r '.surface_id' "$RUN_DIR/zoom-pane.json")"
+wait_visible_panes() {
+  for _ in $(seq 1 60); do
+    "$CLI" --json list-panes --workspace rename >"$RUN_DIR/zoom-panes.json"
+    jq -e --argjson count "$1" '.panes | length == $count' "$RUN_DIR/zoom-panes.json" >/dev/null && return
+    sleep 0.1
+  done
+  echo "FAIL: expected $1 visible panes"
+  exit 1
+}
+wait_focused_surface() {
+  local stable=0
+  for _ in $(seq 1 60); do
+    "$CLI" --json --id-format both list-panels --workspace rename >"$RUN_DIR/zoom-surfaces.json"
+    if jq -e --arg surface "$1" '.surfaces | any(.surface_id == $surface and .focused)' "$RUN_DIR/zoom-surfaces.json" >/dev/null; then
+      stable=$((stable + 1))
+      [ "$stable" -ge 3 ] && return
+    else
+      stable=0
+    fi
+    sleep 0.1
+  done
+  echo "FAIL: expected stable focus on $1"
+  exit 1
+}
+for operation in surface pane; do
+  wait_visible_panes 2
+  "$CLI" focus-surface --workspace rename --surface "$ZOOM_SURFACE"
+  wait_focused_surface "$ZOOM_SURFACE"
+  xdotool key --clearmodifiers ctrl+shift+z
+  wait_visible_panes 1
+  "$CLI" rename-tab --workspace rename --tab tab:terminal 'Hidden renamed'
+  "$CLI" tab-action --workspace rename --tab tab:terminal --action pin
+  "$CLI" tab-action --workspace rename --tab tab:terminal --action unpin
+  if [ "$operation" = surface ]; then
+    "$CLI" focus-surface --workspace rename --surface 1:terminal
+  else
+    "$CLI" focus-pane --workspace rename --pane 1
+  fi
+  wait_visible_panes 2
+  wait_focused_surface 1:terminal
+  assert_title terminal 'Hidden renamed'
+done
+echo 'PASS: hidden tabs support scoped rename/pin and surface/pane focus restores zoom'

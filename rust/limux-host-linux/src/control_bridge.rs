@@ -34,6 +34,11 @@ const METHODS: &[&str] = &[
     "surface.read_text",
     "surface.send_text",
     "surface.send_key",
+    "surface.create",
+    "surface.close",
+    "surface.focus",
+    "pane.focus",
+    "tab.action",
     "notification.create",
 ];
 
@@ -172,6 +177,40 @@ pub enum ControlCommand {
         key: String,
         reply: mpsc::Sender<BridgeResult>,
     },
+    /// Open a new tab (surface) inside an existing pane.
+    CreateSurface {
+        target: WorkspaceTarget,
+        pane_hint: Option<String>,
+        browser: bool,
+        url: Option<String>,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    /// Close a single surface (tab). The only sub-workspace teardown there is.
+    CloseSurface {
+        target: WorkspaceTarget,
+        surface_hint: Option<String>,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    /// Make a surface the active tab of its pane.
+    FocusSurface {
+        target: WorkspaceTarget,
+        surface_hint: Option<String>,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    /// Move keyboard focus to a pane.
+    FocusPane {
+        target: WorkspaceTarget,
+        pane_hint: Option<String>,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    /// Act on a tab: `rename`, `pin`, `unpin`, `close`, `select`.
+    TabAction {
+        target: WorkspaceTarget,
+        surface_hint: Option<String>,
+        action: String,
+        title: Option<String>,
+        reply: mpsc::Sender<BridgeResult>,
+    },
     /// Post a desktop-style notification into the sidebar + toast overlay.
     /// `target` chooses the workspace; `surface_hint` identifies the tab when available.
     CreateNotification {
@@ -203,6 +242,11 @@ impl ControlCommand {
             | Self::CloseWorkspace { reply, .. }
             | Self::SendText { reply, .. }
             | Self::SendKey { reply, .. }
+            | Self::CreateSurface { reply, .. }
+            | Self::CloseSurface { reply, .. }
+            | Self::FocusSurface { reply, .. }
+            | Self::FocusPane { reply, .. }
+            | Self::TabAction { reply, .. }
             | Self::CreateNotification { reply, .. } => {
                 let _ = reply.send(result);
             }
@@ -360,6 +404,114 @@ fn optional_index(params: &Map<String, Value>, key: &str) -> Result<Option<usize
     Err(BridgeError::invalid_params(format!(
         "{key} must be a non-negative integer"
     )))
+}
+
+fn optional_explicit_handle(
+    params: &Map<String, Value>,
+    keys: &[&str],
+    prefix: &str,
+) -> Result<Option<String>, BridgeError> {
+    let mut selected = None;
+    for key in keys {
+        if !params.contains_key(*key) {
+            continue;
+        }
+        let handle = optional_ref_handle(params, &[*key], prefix)?
+            .filter(|handle| !handle.trim().is_empty())
+            .ok_or_else(|| {
+                BridgeError::invalid_params(format!("{key} must not be empty or null"))
+            })?;
+        if selected.is_none() {
+            selected = Some(handle);
+        }
+    }
+    Ok(selected)
+}
+
+fn parse_lifecycle_workspace_target(
+    params: &Map<String, Value>,
+) -> Result<WorkspaceTarget, BridgeError> {
+    optional_explicit_handle(params, &["workspace_id", "id"], "workspace:")?;
+    if let Some(name) = params.get("name") {
+        if name.as_str().is_none_or(|name| name.trim().is_empty()) {
+            return Err(BridgeError::invalid_params(
+                "name must be a non-empty string",
+            ));
+        }
+    }
+    optional_index(params, "index")?;
+    parse_optional_workspace_target(params, true)
+}
+
+fn optional_tab_handle(params: &Map<String, Value>) -> Result<Option<String>, BridgeError> {
+    let mut selected = None;
+    for key in ["surface_id", "tab_id"] {
+        if let Some(handle) = optional_explicit_handle(params, &[key], "surface:")? {
+            let handle = handle.strip_prefix("tab:").unwrap_or(&handle).trim();
+            if handle.is_empty() {
+                return Err(BridgeError::invalid_params(format!(
+                    "{key} must not be empty"
+                )));
+            }
+            if selected.is_none() {
+                selected = Some(handle.to_string());
+            }
+        }
+    }
+    Ok(selected)
+}
+
+fn parse_surface_kind(params: &Map<String, Value>) -> Result<(bool, Option<String>), BridgeError> {
+    let mut browser = None;
+    for key in ["type", "kind"] {
+        let Some(value) = params.get(key) else {
+            continue;
+        };
+        let parsed = match value.as_str().map(str::to_ascii_lowercase).as_deref() {
+            Some("terminal") => false,
+            Some("browser") => true,
+            _ => {
+                return Err(BridgeError::invalid_params(format!(
+                    "{key} must be terminal or browser"
+                )))
+            }
+        };
+        if browser.is_some_and(|previous| previous != parsed) {
+            return Err(BridgeError::invalid_params("type and kind must agree"));
+        }
+        browser = Some(parsed);
+    }
+    let url = params
+        .get("url")
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::trim)
+                .filter(|url| !url.is_empty())
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| BridgeError::invalid_params("url must be a non-empty string"))
+        })
+        .transpose()?;
+    if browser == Some(false) && url.is_some() {
+        return Err(BridgeError::invalid_params(
+            "url requires a browser surface",
+        ));
+    }
+    if let Some(url) = &url {
+        if url.chars().any(|ch| ch.is_whitespace() || ch.is_control()) {
+            return Err(BridgeError::invalid_params(
+                "url must be an absolute URI without control characters",
+            ));
+        }
+        let uri = glib::Uri::parse(url, glib::UriFlags::NONE)
+            .map_err(|_| BridgeError::invalid_params("url must be an absolute URI"))?;
+        if matches!(uri.scheme().as_str(), "http" | "https")
+            && uri.host().is_none_or(|host| host.is_empty())
+        {
+            return Err(BridgeError::invalid_params("url must be an absolute URI"));
+        }
+    }
+    Ok((browser.unwrap_or(url.is_some()), url))
 }
 
 fn looks_like_workspace_handle(raw: &str) -> bool {
@@ -673,6 +825,127 @@ fn handle_method(
                     target,
                     surface_hint,
                     text,
+                    reply,
+                },
+                rx,
+            )
+        }
+        "surface.create" | "new-surface" => {
+            let target = match parse_lifecycle_workspace_target(params) {
+                Ok(target) => target,
+                Err(error) => return error_response(id, error),
+            };
+            let (browser, url) = match parse_surface_kind(params) {
+                Ok(kind) => kind,
+                Err(error) => return error_response(id, error),
+            };
+            let pane_hint = match optional_explicit_handle(params, &["pane_id"], "pane:") {
+                Ok(handle) => handle,
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::CreateSurface {
+                    target,
+                    pane_hint,
+                    browser,
+                    url,
+                    reply,
+                },
+                rx,
+            )
+        }
+        "surface.close" | "close-surface" => {
+            let target = match parse_lifecycle_workspace_target(params) {
+                Ok(target) => target,
+                Err(error) => return error_response(id, error),
+            };
+            let surface_hint = match optional_explicit_handle(params, &["surface_id"], "surface:") {
+                Ok(handle) => handle,
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::CloseSurface {
+                    target,
+                    surface_hint,
+                    reply,
+                },
+                rx,
+            )
+        }
+        "surface.focus" | "focus-surface" => {
+            let target = match parse_lifecycle_workspace_target(params) {
+                Ok(target) => target,
+                Err(error) => return error_response(id, error),
+            };
+            let surface_hint = match optional_explicit_handle(params, &["surface_id"], "surface:") {
+                Ok(handle) => handle,
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::FocusSurface {
+                    target,
+                    surface_hint,
+                    reply,
+                },
+                rx,
+            )
+        }
+        "pane.focus" | "focus-pane" => {
+            let target = match parse_lifecycle_workspace_target(params) {
+                Ok(target) => target,
+                Err(error) => return error_response(id, error),
+            };
+            let pane_hint = match optional_explicit_handle(params, &["pane_id"], "pane:") {
+                Ok(handle) => handle,
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::FocusPane {
+                    target,
+                    pane_hint,
+                    reply,
+                },
+                rx,
+            )
+        }
+        "tab.action" | "tab-action" => {
+            let Some(action) = optional_string(params, &["action"]) else {
+                return error_response(
+                    id,
+                    BridgeError::invalid_params("tab.action requires action"),
+                );
+            };
+            let target = match parse_lifecycle_workspace_target(params) {
+                Ok(target) => target,
+                Err(error) => return error_response(id, error),
+            };
+            let surface_hint = match optional_tab_handle(params) {
+                Ok(handle) => handle,
+                Err(error) => return error_response(id, error),
+            };
+            let title = match params.get("title") {
+                None => None,
+                Some(Value::String(title)) if !title.contains('\0') => Some(title.clone()),
+                Some(_) => {
+                    return error_response(
+                        id,
+                        BridgeError::invalid_params(
+                            "title must be a string without NUL characters",
+                        ),
+                    )
+                }
+            };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::TabAction {
+                    target,
+                    surface_hint,
+                    action,
+                    title,
                     reply,
                 },
                 rx,
@@ -1077,6 +1350,232 @@ mod tests {
             parse_optional_workspace_target(params.as_object().expect("object params"), true)
                 .expect("target should parse");
         assert_eq!(target, WorkspaceTarget::Handle(workspace_id.to_string()));
+    }
+
+    #[test]
+    fn lifecycle_targets_preserve_numeric_and_prefixed_handles() {
+        for (method, field) in [
+            ("surface.create", "pane_id"),
+            ("new-surface", "pane_id"),
+            ("pane.focus", "pane_id"),
+            ("focus-pane", "pane_id"),
+            ("surface.close", "surface_id"),
+            ("close-surface", "surface_id"),
+            ("surface.focus", "surface_id"),
+            ("focus-surface", "surface_id"),
+            ("tab.action", "tab_id"),
+            ("tab-action", "surface_id"),
+        ] {
+            for handle in [
+                json!(12),
+                json!(if field == "pane_id" {
+                    "pane:12"
+                } else {
+                    "surface:12"
+                }),
+            ] {
+                let mut params = json!({"workspace_id": 7, "action": "focus"});
+                params[field] = handle;
+                let response = dispatch_request(
+                    &json!({"method": method, "params": params}).to_string(),
+                    &|command| {
+                        let (target, handle, reply) = match command {
+                            ControlCommand::CreateSurface {
+                                target,
+                                pane_hint,
+                                reply,
+                                ..
+                            }
+                            | ControlCommand::FocusPane {
+                                target,
+                                pane_hint,
+                                reply,
+                            } => (target, pane_hint, reply),
+                            ControlCommand::CloseSurface {
+                                target,
+                                surface_hint,
+                                reply,
+                            }
+                            | ControlCommand::FocusSurface {
+                                target,
+                                surface_hint,
+                                reply,
+                            }
+                            | ControlCommand::TabAction {
+                                target,
+                                surface_hint,
+                                reply,
+                                ..
+                            } => (target, surface_hint, reply),
+                            other => panic!("unexpected command: {other:?}"),
+                        };
+                        assert_eq!(target, WorkspaceTarget::Handle("7".to_string()));
+                        assert_eq!(handle.as_deref(), Some("12"));
+                        reply.send(Ok(json!({}))).unwrap();
+                    },
+                );
+                assert_eq!(response.error, None, "{method}");
+            }
+        }
+    }
+
+    #[test]
+    fn lifecycle_rejects_malformed_explicit_targets_before_dispatch() {
+        for (method, field) in [
+            ("surface.create", "pane_id"),
+            ("pane.focus", "pane_id"),
+            ("surface.close", "surface_id"),
+            ("surface.focus", "surface_id"),
+            ("tab.action", "surface_id"),
+            ("tab.action", "tab_id"),
+        ] {
+            for key in [field, "workspace_id", "name"] {
+                for invalid in [
+                    Value::Null,
+                    json!(""),
+                    json!(" "),
+                    json!([]),
+                    json!({}),
+                    json!(false),
+                    json!(-1),
+                    json!(1.5),
+                ] {
+                    let mut params = json!({"action": "close"});
+                    params[key] = invalid;
+                    let response = dispatch_request(
+                        &json!({"method": method, "params": params}).to_string(),
+                        &|command| panic!("invalid target reached GTK: {command:?}"),
+                    );
+                    assert_eq!(
+                        response.error.map(|error| error.code),
+                        Some(INVALID_PARAMS_CODE),
+                        "{method}: {params}"
+                    );
+                }
+            }
+        }
+        for params in [
+            json!({"surface_id": "surface:", "tab_id": "valid"}),
+            json!({"surface_id": "valid", "tab_id": []}),
+            json!({"surface_id": "valid", "tab_id": "tab:"}),
+        ] {
+            let mut params = params;
+            params["action"] = json!("close");
+            let response = dispatch_request(
+                &json!({"method": "tab.action", "params": params}).to_string(),
+                &|command| panic!("invalid alias reached GTK: {command:?}"),
+            );
+            assert_eq!(
+                response.error.map(|error| error.code),
+                Some(INVALID_PARAMS_CODE)
+            );
+        }
+    }
+
+    #[test]
+    fn tab_action_preserves_tab_refs_and_empty_titles_but_rejects_nul() {
+        for title in [
+            json!(""),
+            json!("custom"),
+            json!("bad\u{0}title"),
+            json!([]),
+            Value::Null,
+        ] {
+            let valid = title.as_str().is_some_and(|title| !title.contains('\0'));
+            let response = dispatch_request(
+                &json!({"method": "tab.action", "params": {"action": "rename", "tab_id": "tab:tab-uuid", "title": title}}).to_string(),
+                &|command| {
+                    assert!(valid, "invalid title reached GTK");
+                    match command {
+                        ControlCommand::TabAction { surface_hint, title: actual, reply, .. } => {
+                            assert_eq!(surface_hint.as_deref(), Some("tab-uuid"));
+                            assert_eq!(actual.as_deref(), title.as_str());
+                            reply.send(Ok(json!({}))).unwrap();
+                        }
+                        other => panic!("unexpected command: {other:?}"),
+                    }
+                },
+            );
+            assert_eq!(
+                response.error.map(|error| error.code),
+                (!valid).then_some(INVALID_PARAMS_CODE)
+            );
+        }
+    }
+
+    #[test]
+    fn surface_create_validates_kind_and_url_before_dispatch() {
+        for params in [
+            json!({"type": "unknown"}),
+            json!({"kind": []}),
+            json!({"type": null}),
+            json!({"type": "terminal", "kind": "browser"}),
+            json!({"url": []}),
+            json!({"url": ""}),
+            json!({"url": "not a URL"}),
+            json!({"url": "https://"}),
+            json!({"url": "https://example.com/\u{0}"}),
+            json!({"url": "https://example.com/a\nb"}),
+            json!({"type": "terminal", "url": "about:blank"}),
+        ] {
+            let response = dispatch_request(
+                &json!({"method": "surface.create", "params": params}).to_string(),
+                &|command| panic!("invalid surface creation reached GTK: {command:?}"),
+            );
+            assert_eq!(
+                response.error.map(|error| error.code),
+                Some(INVALID_PARAMS_CODE),
+                "{params}"
+            );
+        }
+        for (params, expected_browser, expected_url) in [
+            (json!({}), false, None),
+            (json!({"type": "browser"}), true, None),
+            (json!({"url": "about:blank"}), true, Some("about:blank")),
+            (
+                json!({"kind": "browser", "url": "https://example.com/"}),
+                true,
+                Some("https://example.com/"),
+            ),
+        ] {
+            let response = dispatch_request(
+                &json!({"method": "surface.create", "params": params}).to_string(),
+                &|command| match command {
+                    ControlCommand::CreateSurface {
+                        browser,
+                        url,
+                        reply,
+                        ..
+                    } => {
+                        assert_eq!(browser, expected_browser);
+                        assert_eq!(url.as_deref(), expected_url);
+                        reply.send(Ok(json!({}))).unwrap();
+                    }
+                    other => panic!("unexpected command: {other:?}"),
+                },
+            );
+            assert_eq!(response.error, None);
+        }
+    }
+
+    #[test]
+    fn tab_action_requires_an_action() {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tab.action",
+            "params": { "surface_id": "3:terminal-0" },
+        })
+        .to_string();
+
+        let response = dispatch_request(&request, &|_command| {
+            panic!("tab.action must be rejected before it reaches the GTK loop");
+        });
+
+        let error = response
+            .error
+            .expect("tab.action without --action must error");
+        assert_eq!(error.code, INVALID_PARAMS_CODE);
     }
 
     #[test]
