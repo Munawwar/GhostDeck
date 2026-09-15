@@ -308,6 +308,25 @@ fn optional_handle(
     Ok(None)
 }
 
+/// A supplied terminal target must remain explicit, including malformed empty
+/// handles. Dropping it would redirect input to the active or first terminal.
+fn optional_surface_handle(
+    params: &Map<String, Value>,
+    keys: &[&str],
+) -> Result<Option<String>, BridgeError> {
+    for key in keys {
+        if params.get(*key).is_none_or(Value::is_null) {
+            continue;
+        }
+        let handle = optional_ref_handle(params, &[*key], "surface:")?;
+        return handle
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| Some(value.trim().to_string()))
+            .ok_or_else(|| BridgeError::invalid_params(format!("{key} must not be empty")));
+    }
+    Ok(None)
+}
+
 fn optional_ref_handle(
     params: &Map<String, Value>,
     keys: &[&str],
@@ -533,8 +552,7 @@ fn handle_method(
                 Ok(target) => target,
                 Err(error) => return error_response(id, error),
             };
-            let surface_hint = match optional_ref_handle(params, &["surface_id", "id"], "surface:")
-            {
+            let surface_hint = match optional_surface_handle(params, &["surface_id", "id"]) {
                 Ok(surface_hint) => surface_hint,
                 Err(error) => return error_response(id, error),
             };
@@ -598,7 +616,12 @@ fn handle_method(
             (ControlCommand::CloseWorkspace { target, reply }, rx)
         }
         "surface.send_text" | "send-text" | "send" => {
-            let Some(text) = optional_string(params, &["text"]) else {
+            let Some(text) = params
+                .get("text")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+                .map(str::to_owned)
+            else {
                 return error_response(
                     id,
                     BridgeError::invalid_params("surface.send_text requires text"),
@@ -610,11 +633,15 @@ fn handle_method(
                 Ok(target) => target,
                 Err(error) => return error_response(id, error),
             };
+            let surface_hint = match optional_surface_handle(params, &["surface_id"]) {
+                Ok(surface_hint) => surface_hint,
+                Err(error) => return error_response(id, error),
+            };
             let (reply, rx) = mpsc::channel();
             (
                 ControlCommand::SendText {
                     target,
-                    surface_hint: optional_string(params, &["surface_id"]),
+                    surface_hint,
                     text,
                     reply,
                 },
@@ -632,11 +659,15 @@ fn handle_method(
                 Ok(target) => target,
                 Err(error) => return error_response(id, error),
             };
+            let surface_hint = match optional_surface_handle(params, &["surface_id"]) {
+                Ok(surface_hint) => surface_hint,
+                Err(error) => return error_response(id, error),
+            };
             let (reply, rx) = mpsc::channel();
             (
                 ControlCommand::SendKey {
                     target,
-                    surface_hint: optional_string(params, &["surface_id"]),
+                    surface_hint,
                     key,
                     reply,
                 },
@@ -719,14 +750,22 @@ fn handle_client(
             return Ok(());
         }
 
-        let input = std::str::from_utf8(&line_buf)
-            .map(|line| line.trim_end_matches(['\n', '\r']))
-            .unwrap_or("");
-        if input.is_empty() {
-            continue;
-        }
-
-        let response = dispatch_request(input, dispatch);
+        let response = match std::str::from_utf8(&line_buf) {
+            Ok(input) => {
+                let input = input.trim_end_matches(['\n', '\r']);
+                if input.is_empty() {
+                    continue;
+                }
+                dispatch_request(input, dispatch)
+            }
+            Err(error) => error_response(
+                None,
+                BridgeError::new(
+                    PARSE_ERROR_CODE,
+                    format!("invalid request payload: {error}"),
+                ),
+            ),
+        };
         let mut payload = serde_json::to_string(&response)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
         payload.push('\n');
@@ -827,6 +866,7 @@ pub fn start(dispatch: fn(ControlCommand)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::BufRead;
 
     #[test]
     fn parses_v2_request_directly() {
@@ -842,6 +882,90 @@ mod tests {
             .expect("v1 request should parse");
         assert_eq!(request.method, "workspace.create");
         assert_eq!(request.params["cwd"], "/tmp");
+    }
+
+    #[test]
+    fn send_text_preserves_whitespace_for_every_alias() {
+        for method in ["surface.send_text", "send-text", "send"] {
+            for text in ["  alpha\nbeta\t \n", "\n\t  ", "  λ 🦀 \n"] {
+                let response = dispatch_request(
+                    &json!({ "id": 1, "method": method, "params": { "text": text } }).to_string(),
+                    &|command| match command {
+                        ControlCommand::SendText {
+                            text: actual,
+                            reply,
+                            ..
+                        } => {
+                            assert_eq!(actual, text);
+                            reply.send(Ok(json!({}))).unwrap();
+                        }
+                        other => panic!("unexpected command: {other:?}"),
+                    },
+                );
+                assert_eq!(response.error, None);
+            }
+        }
+    }
+
+    #[test]
+    fn send_text_rejects_missing_empty_and_non_string_text() {
+        for params in [json!({}), json!({ "text": "" }), json!({ "text": 1 })] {
+            let response = dispatch_request(
+                &json!({ "method": "surface.send_text", "params": params }).to_string(),
+                &|command| panic!("invalid text should not dispatch: {command:?}"),
+            );
+            assert_eq!(
+                response.error.as_ref().map(|error| error.code),
+                Some(INVALID_PARAMS_CODE)
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_utf8_returns_parse_error_and_keeps_connection_open() {
+        let (client, server) = UnixStream::pair().expect("socket pair should open");
+        let server_task = std::thread::spawn(move || {
+            handle_client(server, &|command| {
+                panic!("ping should not dispatch a GTK command: {command:?}")
+            })
+        });
+
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("read timeout should set");
+        let reader_stream = client.try_clone().expect("client should clone");
+        let mut reader = io::BufReader::new(reader_stream);
+        let mut writer = client;
+
+        writer
+            .write_all(b"\xff\n{\"id\":\"after-error\",\"method\":\"system.ping\",\"params\":{}}\n")
+            .expect("requests should write");
+        writer.flush().expect("requests should flush");
+
+        let mut response_line = String::new();
+        reader
+            .read_line(&mut response_line)
+            .expect("parse error should read");
+        let response: Value =
+            serde_json::from_str(response_line.trim()).expect("response should be valid json");
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], PARSE_ERROR_CODE);
+
+        response_line.clear();
+        reader
+            .read_line(&mut response_line)
+            .expect("ping response should read");
+        let response: Value =
+            serde_json::from_str(response_line.trim()).expect("response should be valid json");
+        assert_eq!(response["id"], "after-error");
+        assert_eq!(response["result"]["pong"], true);
+
+        drop(reader);
+        drop(writer);
+        server_task
+            .join()
+            .expect("server thread should join")
+            .expect("server should stop at EOF");
     }
 
     #[test]
@@ -995,6 +1119,80 @@ mod tests {
 
         assert_eq!(response.error, None);
         assert!(response.result.is_some());
+    }
+
+    #[test]
+    fn terminal_routes_reject_empty_explicit_targets_before_dispatch() {
+        for method in [
+            "surface.send_text",
+            "send-text",
+            "send",
+            "surface.send_key",
+            "send-key",
+            "surface.read_text",
+            "read-screen",
+            "capture-pane",
+        ] {
+            for target in ["", "   ", "surface:", " surface:   "] {
+                let request = json!({ "id": 1, "method": method, "params": { "surface_id": target, "text": "must not be sent", "key": "Enter" } });
+                let response = dispatch_request(&request.to_string(), &|command| {
+                    panic!("invalid target dispatched: {command:?}")
+                });
+                assert_eq!(
+                    response.error.as_ref().map(|error| error.code),
+                    Some(INVALID_PARAMS_CODE),
+                    "{method} target {target:?}"
+                );
+            }
+        }
+        let response = dispatch_request(
+            r#"{"id":1,"method":"capture-pane","params":{"id":"surface:"}}"#,
+            &|command| panic!("empty alias dispatched: {command:?}"),
+        );
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code),
+            Some(INVALID_PARAMS_CODE)
+        );
+    }
+
+    #[test]
+    fn terminal_routes_preserve_omitted_and_nonempty_explicit_targets() {
+        for method in ["surface.send_text", "surface.send_key", "surface.read_text"] {
+            for (target, expected) in [
+                (None, None),
+                (Some("surface:4:target"), Some("4:target")),
+                (Some("missing-surface"), Some("missing-surface")),
+            ] {
+                let mut params = json!({ "text": "test", "key": "Enter" });
+                if let Some(target) = target {
+                    params["surface_id"] = json!(target);
+                }
+                let request = json!({ "id": 1, "method": method, "params": params });
+                let response = dispatch_request(&request.to_string(), &|command| {
+                    let (surface_hint, reply) = match command {
+                        ControlCommand::SendText {
+                            surface_hint,
+                            reply,
+                            ..
+                        }
+                        | ControlCommand::SendKey {
+                            surface_hint,
+                            reply,
+                            ..
+                        }
+                        | ControlCommand::ReadSurfaceText {
+                            surface_hint,
+                            reply,
+                            ..
+                        } => (surface_hint, reply),
+                        other => panic!("unexpected command: {other:?}"),
+                    };
+                    assert_eq!(surface_hint.as_deref(), expected, "{method}");
+                    let _ = reply.send(Ok(json!({})));
+                });
+                assert_eq!(response.error, None);
+            }
+        }
     }
 
     #[test]

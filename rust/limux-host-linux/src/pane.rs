@@ -5,6 +5,10 @@
 //! All on one line. Tabs left-justified, icons right-justified.
 
 use std::cell::{Cell, RefCell};
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -15,13 +19,14 @@ use gtk4 as gtk;
 #[cfg(feature = "webkit")]
 use webkit6::prelude::*;
 
-use crate::app_config::AppConfig;
+use crate::app_config::{AppConfig, LinkOpenDestination};
 use crate::keybind_editor;
 use crate::layout_state::{
     PaneState, RestorableAgentState, TabContentState, TabState as SavedTabState,
 };
+use crate::link_uri;
 use crate::shortcut_config::{NormalizedShortcut, ResolvedShortcutConfig, ShortcutId};
-use crate::terminal::{self, TerminalCallbacks};
+use crate::terminal::{self, LinkOpenRequest, TerminalCallbacks};
 
 static NEXT_PANE_ID: AtomicU32 = AtomicU32::new(1);
 
@@ -180,8 +185,16 @@ pub fn retire_pane(pane_widget: &gtk::Widget) {
     };
     let internals = unsafe { outer.steal_data::<Rc<PaneInternals>>("limux-pane-internals") };
     if let Some(internals) = internals {
-        for entry in &internals.tab_state.borrow().tabs {
+        let entries = {
+            let mut tab_state = internals.tab_state.borrow_mut();
+            tab_state.active_tab = None;
+            tab_state.active_rename_tab = None;
+            std::mem::take(&mut tab_state.tabs)
+        };
+        for entry in entries {
             entry.prepare_for_removal();
+            internals.tab_strip.remove(&entry.tab_button);
+            internals.content_stack.remove(&entry.content);
         }
         unregister_pane(internals.pane_id);
     }
@@ -209,6 +222,7 @@ type PanePathCallback = dyn Fn(&str);
 type PaneDesktopNotificationCallback = dyn Fn(&str, &str, bool, u32, &str);
 type PaneEmptyCallback = dyn Fn(&gtk::Widget, PaneEmptyReason);
 type PaneOpenBrowserHereCallback = dyn Fn(&gtk::Widget);
+type PaneOpenUrlInBrowserCallback = dyn Fn(&gtk::Widget, &str);
 type PaneVisibilityCallback = dyn Fn(&gtk::Widget) -> bool;
 type PaneShortcutStateCallback = dyn Fn() -> Rc<ResolvedShortcutConfig>;
 type PaneShortcutCaptureCallback =
@@ -222,11 +236,14 @@ type PaneWorkspaceLookupCallback = dyn Fn(&gtk::Widget) -> Option<String>;
 
 pub struct PaneCallbacks {
     pub workspace_id: String,
+    pub autostart_command: Rc<RefCell<Option<String>>>,
+    pub suppress_next_autostart: Cell<bool>,
     pub on_split: Box<PaneSplitCallback>,
     pub on_close_pane: Box<PaneWidgetCallback>,
     pub on_bell: Box<PaneBellCallback>,
     pub on_desktop_notification: Box<PaneDesktopNotificationCallback>,
     pub on_open_browser_here: Box<PaneOpenBrowserHereCallback>,
+    pub on_open_url_in_browser: Box<PaneOpenUrlInBrowserCallback>,
     pub on_open_keybinds: Box<PaneWidgetCallback>,
     pub current_shortcuts: Box<PaneShortcutStateCallback>,
     pub on_capture_shortcut: Rc<PaneShortcutCaptureCallback>,
@@ -605,11 +622,11 @@ pub fn create_pane(
     }
 
     {
-        let internals = internals.clone();
-        let wd = ws_wd.clone();
+        let pane_widget = outer.downgrade();
         new_term_btn.connect_clicked(move |_| {
-            let dir = wd.borrow().clone();
-            add_terminal_tab_inner(&internals, dir.as_deref(), None);
+            if let Some(pane_widget) = pane_widget.upgrade() {
+                add_terminal_tab_to_pane(&pane_widget.upcast());
+            }
         });
     }
     {
@@ -851,62 +868,59 @@ fn surface_hint_matches(surface_id: &str, tab_id: &str, surface_hint: &str) -> b
     !requested.is_empty() && (requested == tab_id || requested == surface_id)
 }
 
+fn select_terminal_tab<'a>(
+    pane_id: u32,
+    terminal_tab_ids: impl IntoIterator<Item = &'a str>,
+    active_tab: Option<&str>,
+    surface_hint: Option<&str>,
+) -> Option<&'a str> {
+    let mut fallback = None;
+    for tab_id in terminal_tab_ids {
+        if let Some(surface_hint) = surface_hint {
+            if surface_hint_matches(&composite_surface_id(pane_id, tab_id), tab_id, surface_hint) {
+                return Some(tab_id);
+            }
+            // An explicit target must not fall back to the active tab.
+            continue;
+        }
+        if active_tab == Some(tab_id) {
+            return Some(tab_id);
+        }
+        fallback.get_or_insert(tab_id);
+    }
+    fallback
+}
+
 pub fn terminal_handle_for_surface(
     pane_widget: &gtk::Widget,
     surface_hint: Option<&str>,
 ) -> Option<(String, terminal::TerminalHandle)> {
     let internals = find_pane_internals(pane_widget)?;
-    let pane_id = internals.pane_id;
     let tab_state = internals.tab_state.borrow();
-    let requested = surface_hint
-        .map(normalize_surface_hint)
-        .filter(|value| !value.is_empty());
-    let active_tab = tab_state.active_tab.as_deref();
-    let mut fallback = None;
-
-    for entry in &tab_state.tabs {
-        let TabKind::Terminal { state } = &entry.kind else {
-            continue;
-        };
-
-        let full_surface_id = composite_surface_id(pane_id, &entry.id);
-
-        if requested.is_some_and(|value| value == entry.id || value == full_surface_id) {
-            return Some((full_surface_id, state.handle.clone()));
-        }
-
-        if active_tab == Some(entry.id.as_str()) {
-            return Some((full_surface_id, state.handle.clone()));
-        }
-
-        if fallback.is_none() {
-            fallback = Some((full_surface_id, state.handle.clone()));
-        }
-    }
-
-    fallback
+    let terminal_tab_ids = tab_state.tabs.iter().filter_map(|entry| {
+        matches!(entry.kind, TabKind::Terminal { .. }).then_some(entry.id.as_str())
+    });
+    let tab_id = select_terminal_tab(
+        internals.pane_id,
+        terminal_tab_ids,
+        tab_state.active_tab.as_deref(),
+        surface_hint,
+    )?;
+    let entry = tab_state.tabs.iter().find(|entry| entry.id == tab_id)?;
+    let TabKind::Terminal { state } = &entry.kind else {
+        return None;
+    };
+    Some((
+        composite_surface_id(internals.pane_id, tab_id),
+        state.handle.clone(),
+    ))
 }
 
 pub fn exact_terminal_handle_for_surface(
     pane_widget: &gtk::Widget,
     surface_hint: &str,
 ) -> Option<(String, terminal::TerminalHandle)> {
-    let internals = find_pane_internals(pane_widget)?;
-    let pane_id = internals.pane_id;
-    let tab_state = internals.tab_state.borrow();
-
-    for entry in &tab_state.tabs {
-        let TabKind::Terminal { state } = &entry.kind else {
-            continue;
-        };
-
-        let full_surface_id = composite_surface_id(pane_id, &entry.id);
-        if surface_hint_matches(&full_surface_id, &entry.id, surface_hint) {
-            return Some((full_surface_id, state.handle.clone()));
-        }
-    }
-
-    None
+    terminal_handle_for_surface(pane_widget, Some(surface_hint))
 }
 
 // ---------------------------------------------------------------------------
@@ -968,8 +982,10 @@ struct TabEntry {
 
 impl TabEntry {
     fn prepare_for_removal(&self) {
-        if let TabKind::Browser { state } = &self.kind {
-            state.handles.prepare_for_removal();
+        match &self.kind {
+            TabKind::Terminal { state } => state.handle.shutdown(),
+            TabKind::Browser { state } => state.handles.prepare_for_removal(),
+            TabKind::Keybinds => {}
         }
     }
 }
@@ -1189,6 +1205,7 @@ fn make_terminal_callbacks(
     let callbacks_for_pwd = internals.callbacks.clone();
     let callbacks_for_close = internals.callbacks.clone();
     let callbacks_for_browser_here = internals.callbacks.clone();
+    let callbacks_for_open_url = internals.callbacks.clone();
     let callbacks_for_split_right = internals.callbacks.clone();
     let callbacks_for_split_down = internals.callbacks.clone();
     let callbacks_for_keybinds = internals.callbacks.clone();
@@ -1254,14 +1271,23 @@ fn make_terminal_callbacks(
         }),
         on_open_url: Box::new({
             let pane_outer = internals.pane_outer.clone();
-            move |url, external| {
-                if external {
-                    open_url_in_external_browser(url);
+            move |url, request| {
+                let configured_destination = (callbacks_for_open_url.current_config)()
+                    .borrow()
+                    .links
+                    .open_destination;
+                let Some(destination) =
+                    resolved_link_destination(configured_destination, request, url)
+                else {
+                    eprintln!("limux: refusing to open URL with unrecognized scheme: {url}");
                     return;
-                }
-
+                };
                 let pane_widget: gtk::Widget = pane_outer.clone().upcast();
-                add_browser_tab_to_pane_with_uri(&pane_widget, Some(url));
+                if destination == LinkOpenDestination::BrowserTab {
+                    (callbacks_for_open_url.on_open_url_in_browser)(&pane_widget, url);
+                } else {
+                    open_url_in_external_browser(url);
+                }
             }
         }),
         on_open_browser_here: Box::new({
@@ -1317,39 +1343,28 @@ fn display_terminal_title(title: &str) -> String {
     format!("{}…", &title[..truncate_at])
 }
 
-fn is_safe_browser_url(url: &str) -> bool {
-    // Minimal allow-list of URI schemes that may be handed to the system
-    // browser on Ctrl+click. The threat model is hostile terminal output:
-    // anything that ends up in a pane's scrollback can craft an OSC 8
-    // hyperlink, and clicking it must not lead to code execution.
-    //
-    // Why only http/https/mailto?
-    // - `javascript:`, `vbscript:`, `data:` are classic XSS sinks (Gitea
-    //   blocks these unconditionally — github.com/go-gitea/gitea#25960).
-    // - `file://` directly opens local files via the registered handler;
-    //   a hostile `cat` of a crafted .desktop file would be RCE.
-    // - `ftp://`, `ftps://`, `smb://`, `nfs://`, `dav://`, `sftp://` all
-    //   auto-mount via gvfs and can execute binaries on the mounted share
-    //   (positive.security/blog/url-open-rce).
-    // - Custom schemes (`vscode://`, `slack://`, `obsidian://`, ...) have
-    //   historically had RCE CVEs in their handlers; we don't second-guess
-    //   that surface area here.
-    //
-    // RFC 3986 §3.1: scheme matching is case-insensitive.
-    let Some(colon) = url.find(':') else {
-        return false;
-    };
-    let scheme = url[..colon].to_ascii_lowercase();
-    let rest = &url[colon..];
-    match scheme.as_str() {
-        "https" | "http" => rest.starts_with("://"),
-        "mailto" => rest.starts_with(':'),
-        _ => false,
+fn resolved_link_destination(
+    configured: LinkOpenDestination,
+    request: LinkOpenRequest,
+    url: &str,
+) -> Option<LinkOpenDestination> {
+    if !link_uri::is_safe_external_url(url) {
+        return None;
     }
+
+    let destination = match request {
+        LinkOpenRequest::Configured => configured,
+        LinkOpenRequest::Destination(destination) => destination,
+    }
+    .effective(cfg!(feature = "webkit"));
+    if destination == LinkOpenDestination::BrowserTab && !link_uri::is_embedded_browser_url(url) {
+        return Some(LinkOpenDestination::DefaultBrowser);
+    }
+    Some(destination)
 }
 
 fn open_url_in_external_browser(url: &str) {
-    if !is_safe_browser_url(url) {
+    if !link_uri::is_safe_external_url(url) {
         eprintln!("limux: refusing to open URL with unrecognized scheme: {url}");
         return;
     }
@@ -1449,15 +1464,36 @@ fn add_terminal_tab_inner(
     {
         extra_env.push(("LIMUX_SOCKET".to_string(), sock.to_string()));
     }
-    let startup_command = options
+    let restored_agent_command = options
         .as_ref()
         .and_then(|value| value.agent.as_ref())
         .and_then(|agent| agent.resume_command());
-    if let Some(command) = startup_command.as_deref() {
+    if let Some(command) = restored_agent_command.as_deref() {
         eprintln!(
             "limux: restoring agent terminal surface={}:{} command={}",
             internals.pane_id, tab_id, command
         );
+    }
+    let suppress_autostart = internals.callbacks.suppress_next_autostart.replace(false);
+    let (startup_command, workspace_autostart_command) = select_terminal_commands(
+        restored_agent_command,
+        internals.callbacks.autostart_command.borrow().clone(),
+        suppress_autostart,
+    );
+    let mut initial_input = None;
+    if let Some(command) = workspace_autostart_command.as_deref() {
+        if terminal::terminal_command_accepts_shell_input() {
+            eprintln!(
+                "limux: running workspace autostart workspace={} surface={}:{}",
+                internals.callbacks.workspace_id, internals.pane_id, tab_id
+            );
+            initial_input = prepare_workspace_autostart(command);
+        } else {
+            eprintln!(
+                "limux: skipping workspace autostart for non-shell terminal command workspace={} surface={}:{}",
+                internals.callbacks.workspace_id, internals.pane_id, tab_id
+            );
+        }
     }
 
     let term = terminal::create_terminal(
@@ -1467,6 +1503,7 @@ fn add_terminal_tab_inner(
             copy_selection_to_clipboard,
             saved_font_size: (internals.callbacks.current_config)().borrow().font_size,
             startup_command,
+            initial_input,
             extra_env,
         },
         term_callbacks,
@@ -1530,6 +1567,105 @@ fn add_terminal_tab_inner(
     term.handle.focus_surface();
     if options.is_none() {
         (internals.callbacks.on_state_changed)();
+    }
+}
+
+fn select_terminal_commands(
+    restored_agent_command: Option<String>,
+    autostart_command: Option<String>,
+    suppress_autostart: bool,
+) -> (Option<String>, Option<String>) {
+    if restored_agent_command.is_some() {
+        return (restored_agent_command, None);
+    }
+    if suppress_autostart {
+        return (None, None);
+    }
+    (None, autostart_command)
+}
+
+fn prepare_workspace_autostart(command: &str) -> Option<String> {
+    if command.contains('\0') {
+        eprintln!("limux: workspace autostart contains a NUL byte; refusing to run it");
+        return None;
+    }
+
+    let script_path = create_workspace_autostart_script(command)?;
+    workspace_autostart_initial_input(&script_path)
+}
+
+fn create_workspace_autostart_script(command: &str) -> Option<PathBuf> {
+    let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")?;
+    if runtime_dir.is_empty() {
+        eprintln!("limux: XDG_RUNTIME_DIR is unset; workspace autostart was not started");
+        return None;
+    }
+
+    let dir = PathBuf::from(runtime_dir).join("limux");
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        eprintln!("limux: failed to create autostart runtime directory: {error}");
+        return None;
+    }
+
+    for suffix in 0..100_u8 {
+        let path = dir.join(format!(
+            "workspace-autostart-{}-{suffix}.sh",
+            std::process::id()
+        ));
+        let Some(script) = workspace_autostart_script(command, &path) else {
+            eprintln!("limux: workspace autostart path is not valid UTF-8");
+            return None;
+        };
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .open(&path);
+        match file {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(script.as_bytes()) {
+                    let _ = std::fs::remove_file(&path);
+                    eprintln!("limux: failed to write workspace autostart script: {error}");
+                    return None;
+                }
+                return Some(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                eprintln!("limux: failed to create workspace autostart script: {error}");
+                return None;
+            }
+        }
+    }
+
+    eprintln!("limux: failed to allocate a unique workspace autostart script path");
+    None
+}
+
+fn workspace_autostart_script(command: &str, script_path: &Path) -> Option<String> {
+    let script_path = script_path.to_str()?;
+    Some(format!(
+        "#!/bin/sh\nrm -f -- {}\n{command}\n",
+        shell_quote(script_path)
+    ))
+}
+
+fn workspace_autostart_initial_input(script_path: &Path) -> Option<String> {
+    let script_path = script_path.to_str()?;
+    // Only the private script path enters terminal input. The configured
+    // autostart text stays out of shell history and scrollback, while Ghostty's
+    // configured interactive shell remains untouched.
+    Some(format!(". {}\n", shell_quote(script_path)))
+}
+
+fn shell_quote(value: &str) -> String {
+    if value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&byte))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }
 
@@ -1690,8 +1826,15 @@ fn add_keybind_editor_tab_inner(internals: &Rc<PaneInternals>, input: KeybindsTa
 #[allow(dead_code)]
 pub fn add_terminal_tab_to_pane(pane_widget: &gtk::Widget) {
     if let Some(internals) = find_pane_internals(pane_widget) {
-        let dir = internals.working_directory.borrow().clone();
+        let dir = active_tab_working_directory(pane_widget)
+            .or_else(|| internals.working_directory.borrow().clone());
         add_terminal_tab_inner(&internals, dir.as_deref(), None);
+    }
+}
+
+pub fn add_terminal_tab_to_pane_in_directory(pane_widget: &gtk::Widget, directory: Option<&str>) {
+    if let Some(internals) = find_pane_internals(pane_widget) {
+        add_terminal_tab_inner(&internals, directory, None);
     }
 }
 
@@ -1710,6 +1853,9 @@ pub fn add_browser_tab_to_pane_with_uri(pane_widget: &gtk::Widget, uri: Option<&
             uri: Some(uri),
         });
         add_browser_tab_inner(&internals, options);
+        if uri.is_some() {
+            (internals.callbacks.on_state_changed)();
+        }
     }
 }
 
@@ -1871,6 +2017,11 @@ pub fn tab_working_directory(pane_widget: &gtk::Widget, tab_id: &str) -> Option<
         TabKind::Terminal { state } => state.cwd.borrow().clone(),
         TabKind::Browser { .. } | TabKind::Keybinds => None,
     }
+}
+
+pub fn active_tab_working_directory(pane_widget: &gtk::Widget) -> Option<String> {
+    let tab_id = active_tab_in_pane(pane_widget)?;
+    tab_working_directory(pane_widget, &tab_id)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2104,23 +2255,13 @@ pub fn terminal_handle_for_root(
     root: &gtk::Widget,
     surface_hint: Option<&str>,
 ) -> Option<(String, terminal::TerminalHandle)> {
-    let requested = surface_hint
-        .map(normalize_surface_hint)
-        .filter(|value| !value.is_empty());
+    let requested = surface_hint.map(normalize_surface_hint);
 
     if let Some(requested) = requested {
         for internals in pane_internals_for_root(root) {
             let pane_widget: gtk::Widget = internals.pane_outer.clone().upcast();
-            if let Some((surface_id, handle)) =
-                terminal_handle_for_surface(&pane_widget, Some(requested))
-            {
-                if surface_id == requested
-                    || surface_id
-                        .strip_prefix("surface:")
-                        .is_some_and(|value| value == requested)
-                {
-                    return Some((surface_id, handle));
-                }
+            if let Some(target) = exact_terminal_handle_for_surface(&pane_widget, requested) {
+                return Some(target);
             }
         }
         return None;
@@ -2276,7 +2417,8 @@ fn build_tab_button_from_label(
         let callbacks = internals.callbacks.clone();
         let pane_widget = internals.pane_outer.downgrade();
         let tab_button = tab_btn.clone();
-        click.connect_pressed(move |gesture, _, _, _| {
+        let label = label.clone();
+        click.connect_pressed(move |gesture, n_press, _, _| {
             if handle_tab_interaction_while_renaming(&tab_button, &tab_state) {
                 gesture.set_state(gtk::EventSequenceState::Denied);
                 return;
@@ -2291,6 +2433,17 @@ fn build_tab_button_from_label(
                 );
             }
             (callbacks.on_state_changed)();
+            if n_press == 2 {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                let tab_strip = tab_strip.clone();
+                let label = label.clone();
+                let tab_state = tab_state.clone();
+                let tab_id = tab_id.clone();
+                let callbacks = callbacks.clone();
+                glib::idle_add_local_once(move || {
+                    show_rename_dialog(&tab_strip, &label, &tab_state, &tab_id, &callbacks);
+                });
+            }
         });
     }
     tab_btn.add_controller(click);
@@ -2326,22 +2479,10 @@ fn build_tab_button_from_label(
     middle_click.set_button(2);
     {
         let tab_id = tab_id.to_string();
-        let tab_strip = internals.tab_strip.clone();
-        let content_stack = internals.content_stack.clone();
-        let tab_state = internals.tab_state.clone();
-        let callbacks = internals.callbacks.clone();
         let pane_outer = internals.pane_outer.clone();
         middle_click.connect_pressed(move |gesture, _, _, _| {
             gesture.set_state(gtk::EventSequenceState::Claimed);
-            remove_tab(
-                &tab_strip,
-                &content_stack,
-                &tab_state,
-                &tab_id,
-                &callbacks,
-                &pane_outer,
-                PaneEmptyReason::ClosedLastTab,
-            );
+            close_tab_in_pane(pane_outer.upcast_ref(), &tab_id);
         });
     }
     tab_btn.add_controller(middle_click);
@@ -3279,20 +3420,34 @@ fn remove_tab(
 ) {
     commit_active_tab_rename(tab_state);
 
-    let mut ts = tab_state.borrow_mut();
-    let Some(idx) = ts.tabs.iter().position(|e| e.id == tab_id) else {
-        return;
+    let (entry, removed_was_unread, closed_terminal, new_id, was_active) = {
+        let mut ts = tab_state.borrow_mut();
+        let Some(idx) = ts.tabs.iter().position(|e| e.id == tab_id) else {
+            return;
+        };
+        let entry = ts.tabs.remove(idx);
+        let removed_was_unread = entry.unread;
+        let closed_terminal = matches!(&entry.kind, TabKind::Terminal { .. });
+        let was_active = ts.active_tab.as_deref() == Some(tab_id);
+        let new_id = if ts.tabs.is_empty() {
+            None
+        } else {
+            Some(ts.tabs[idx.min(ts.tabs.len() - 1)].id.clone())
+        };
+        (
+            entry,
+            removed_was_unread,
+            closed_terminal,
+            new_id,
+            was_active,
+        )
     };
-    let entry = ts.tabs.remove(idx);
-    let removed_was_unread = entry.unread;
-    let closed_terminal = matches!(&entry.kind, TabKind::Terminal { .. });
 
     entry.prepare_for_removal();
     tab_strip.remove(&entry.tab_button);
     content_stack.remove(&entry.content);
 
-    if ts.tabs.is_empty() {
-        drop(ts);
+    let Some(new_id) = new_id else {
         if removed_was_unread {
             (callbacks.on_unread_changed)();
         }
@@ -3303,13 +3458,7 @@ fn remove_tab(
         };
         (callbacks.on_empty)(&pane_outer.clone().upcast(), empty_reason);
         return;
-    }
-
-    // Activate neighbor tab
-    let new_idx = idx.min(ts.tabs.len() - 1);
-    let new_id = ts.tabs[new_idx].id.clone();
-    let was_active = ts.active_tab.as_deref() == Some(tab_id);
-    drop(ts);
+    };
 
     if was_active {
         activate_tab(tab_strip, content_stack, tab_state, &new_id);
@@ -4013,18 +4162,95 @@ fn create_browser_widget(
 mod tests {
     use super::{
         classify_content_drop_zone, content_drop_preview_rect, display_terminal_title,
-        effective_drop_target_dimensions, is_localhost_input, is_safe_browser_url,
-        next_active_after_tab_removal, normalize_browser_entry_input,
-        normalize_reorder_insert_index, pane_action_tooltip, surface_hint_matches, ContentDropZone,
-        TabDragPayload, BROWSER_SEARCH_ENTRY_CSS_CLASS, BROWSER_SEARCH_ENTRY_CSS_CLASSES,
-        BROWSER_URL_ENTRY_CSS_CLASS, BROWSER_URL_ENTRY_CSS_CLASSES, HOST_ENTRY_CSS_CLASS, PANE_CSS,
-        TAB_RENAME_ENTRY_CSS_CLASS, TAB_RENAME_ENTRY_CSS_CLASSES,
+        effective_drop_target_dimensions, is_localhost_input, next_active_after_tab_removal,
+        normalize_browser_entry_input, normalize_reorder_insert_index, pane_action_tooltip,
+        resolved_link_destination, select_terminal_commands, select_terminal_tab,
+        surface_hint_matches, workspace_autostart_initial_input, workspace_autostart_script,
+        ContentDropZone, TabDragPayload, BROWSER_SEARCH_ENTRY_CSS_CLASS,
+        BROWSER_SEARCH_ENTRY_CSS_CLASSES, BROWSER_URL_ENTRY_CSS_CLASS,
+        BROWSER_URL_ENTRY_CSS_CLASSES, HOST_ENTRY_CSS_CLASS, PANE_CSS, TAB_RENAME_ENTRY_CSS_CLASS,
+        TAB_RENAME_ENTRY_CSS_CLASSES,
     };
     #[cfg(feature = "webkit")]
     use super::{
         env_value_contains_token, is_kde_wayland_session_from_env, BROWSER_WEB_VIEW_CSS_CLASS,
     };
     use crate::shortcut_config::{default_shortcuts, resolve_shortcuts_from_str, ShortcutId};
+    use crate::{app_config::LinkOpenDestination, terminal::LinkOpenRequest};
+
+    #[test]
+    fn explicit_terminal_target_can_follow_the_active_tab() {
+        for target in ["agent", "4:agent", "surface:4:agent"] {
+            assert_eq!(
+                select_terminal_tab(4, ["shell", "agent"], Some("shell"), Some(target)),
+                Some("agent"),
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_missing_terminal_does_not_fall_back_to_active_tab() {
+        for target in ["missing", "5:agent", "", "   ", "surface:", " surface:   "] {
+            assert_eq!(
+                select_terminal_tab(4, ["shell", "agent"], Some("shell"), Some(target)),
+                None,
+            );
+        }
+    }
+
+    #[test]
+    fn implicit_terminal_target_prefers_active_terminal_then_first_terminal() {
+        assert_eq!(
+            select_terminal_tab(4, ["shell", "agent"], Some("agent"), None),
+            Some("agent"),
+        );
+        assert_eq!(
+            select_terminal_tab(4, ["shell", "agent"], Some("browser"), None),
+            Some("shell"),
+        );
+        assert_eq!(select_terminal_tab(4, [], None, None), None);
+    }
+
+    #[test]
+    fn explicit_terminal_command_can_suppress_workspace_autostart() {
+        assert_eq!(
+            select_terminal_commands(None, Some("ssh user@server".to_string()), true),
+            (None, None)
+        );
+        assert_eq!(
+            select_terminal_commands(None, Some("ssh user@server".to_string()), false),
+            (None, Some("ssh user@server".to_string()))
+        );
+        assert_eq!(
+            select_terminal_commands(
+                Some("codex resume abc".to_string()),
+                Some("ssh user@server".to_string()),
+                true,
+            ),
+            (Some("codex resume abc".to_string()), None)
+        );
+    }
+
+    #[test]
+    fn workspace_autostart_uses_hidden_initial_input() {
+        assert_eq!(
+            workspace_autostart_initial_input(std::path::Path::new(
+                "/run/user/1000/limux/workspace-autostart-42-0.sh"
+            ))
+            .as_deref(),
+            Some(". /run/user/1000/limux/workspace-autostart-42-0.sh\n")
+        );
+        assert_eq!(
+            workspace_autostart_script(
+                "echo ready",
+                std::path::Path::new("/run/user/1000/limux/workspace-autostart-42-0.sh")
+            )
+            .as_deref(),
+            Some(
+                "#!/bin/sh\nrm -f -- /run/user/1000/limux/workspace-autostart-42-0.sh\necho ready\n"
+            )
+        );
+    }
 
     #[test]
     fn terminal_title_truncation_preserves_utf8_boundaries() {
@@ -4326,72 +4552,34 @@ mod tests {
     }
 
     #[test]
-    fn is_safe_browser_url_accepts_navigable_schemes() {
-        // Web + email only — see the rationale on `is_safe_browser_url`.
-        for url in [
-            "https://example.com",
-            "https://example.com/path?x=1&y=2",
-            "http://example.com",
-            "http://localhost:8080/foo",
-            "mailto:user@example.com",
-            "mailto:user@example.com?subject=hi",
-        ] {
-            assert!(is_safe_browser_url(url), "should accept {url}");
-        }
-    }
-
-    #[test]
-    fn is_safe_browser_url_is_scheme_case_insensitive() {
-        // RFC 3986 §3.1: scheme matching is case-insensitive. OSC 8 hyperlinks
-        // sometimes preserve the original case from upstream sources, so we
-        // must not reject syntactically valid uppercase/mixed-case schemes.
-        for url in [
-            "HTTPS://example.com",
-            "Https://example.com",
-            "HTTP://example.com",
-            "MAILTO:user@example.com",
-        ] {
-            assert!(is_safe_browser_url(url), "should accept {url}");
-        }
-    }
-
-    #[test]
-    fn is_safe_browser_url_rejects_unsupported_or_dangerous_schemes() {
-        // Threat model: hostile terminal output can craft any OSC 8 hyperlink.
-        // The schemes below are either classic XSS sinks (`javascript:`,
-        // `data:`, `vbscript:`), gvfs auto-mount + exec vectors
-        // (`smb:`, `nfs:`, `dav:`, `davs:`, `sftp:`, `ftp:`, `ftps:`), local
-        // RCE via the file handler (`file:`), or app-specific URIs whose
-        // handlers have a history of RCE CVEs (`vscode:`, `slack:`, etc.).
-        // Leading whitespace and bare paths are also rejected as malformed.
-        for url in [
-            "javascript:alert(1)",
-            "JavaScript:alert(1)",
-            "data:text/html,<script>alert(1)</script>",
-            "vbscript:msgbox(1)",
-            "file:///etc/passwd",
-            "File:///home/manu/notes.md",
-            "ftp://ftp.example.com/pub/file",
-            "ftps://ftp.example.com/pub/file",
-            "smb://server/share",
-            "nfs://server/export",
-            "dav://server/path",
-            "davs://server/path",
-            "sftp://user@host/path",
-            "ssh://user@host",
-            "magnet:?xt=urn:btih:abc",
-            "chrome://settings",
-            "about:blank",
-            "vscode://file/path",
-            "slack://open?team=T",
-            "  https://example.com",
-            "/etc/passwd",
-            "example.com",
-            "",
-            "https:",
-            "http:/example.com",
-        ] {
-            assert!(!is_safe_browser_url(url), "should reject {url:?}");
-        }
+    fn resolved_link_destination_honors_config_and_keeps_mailto_external() {
+        assert_eq!(
+            resolved_link_destination(
+                LinkOpenDestination::BrowserTab,
+                LinkOpenRequest::Configured,
+                "https://example.com",
+            ),
+            Some(if cfg!(feature = "webkit") {
+                LinkOpenDestination::BrowserTab
+            } else {
+                LinkOpenDestination::DefaultBrowser
+            })
+        );
+        assert_eq!(
+            resolved_link_destination(
+                LinkOpenDestination::DefaultBrowser,
+                LinkOpenRequest::Destination(LinkOpenDestination::BrowserTab),
+                "mailto:user@example.com",
+            ),
+            Some(LinkOpenDestination::DefaultBrowser)
+        );
+        assert_eq!(
+            resolved_link_destination(
+                LinkOpenDestination::DefaultBrowser,
+                LinkOpenRequest::Configured,
+                "file:///etc/passwd",
+            ),
+            None
+        );
     }
 }

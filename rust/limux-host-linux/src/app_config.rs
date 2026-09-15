@@ -78,6 +78,8 @@ pub struct AppConfig {
     #[serde(skip)]
     pub interface: InterfaceConfig,
     #[serde(skip)]
+    pub links: LinkConfig,
+    #[serde(skip)]
     pub font_size: Option<f32>,
 }
 
@@ -164,6 +166,57 @@ impl Default for ClipboardConfig {
             copy_selection_to_clipboard: true,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LinkOpenDestination {
+    #[default]
+    DefaultBrowser,
+    BrowserTab,
+}
+
+impl LinkOpenDestination {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DefaultBrowser => "default_browser",
+            Self::BrowserTab => "browser_tab",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "default_browser" => Some(Self::DefaultBrowser),
+            "browser_tab" => Some(Self::BrowserTab),
+            _ => None,
+        }
+    }
+
+    pub fn dropdown_index(self) -> u32 {
+        match self {
+            Self::DefaultBrowser => 0,
+            Self::BrowserTab => 1,
+        }
+    }
+
+    pub fn from_dropdown_index(index: u32) -> Self {
+        match index {
+            1 => Self::BrowserTab,
+            _ => Self::DefaultBrowser,
+        }
+    }
+
+    pub fn effective(self, embedded_browser_available: bool) -> Self {
+        if self == Self::BrowserTab && !embedded_browser_available {
+            Self::DefaultBrowser
+        } else {
+            self
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LinkConfig {
+    pub open_destination: LinkOpenDestination,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -381,6 +434,14 @@ fn parse_app_config_value(root: &Value) -> AppConfig {
         .and_then(Value::as_bool)
         .unwrap_or(clipboard_defaults.copy_selection_to_clipboard);
 
+    let open_destination = root
+        .get("links")
+        .and_then(Value::as_object)
+        .and_then(|links| links.get("open_destination"))
+        .and_then(Value::as_str)
+        .and_then(LinkOpenDestination::from_str)
+        .unwrap_or_default();
+
     let font_size = root
         .get("font_size")
         .and_then(Value::as_f64)
@@ -430,6 +491,7 @@ fn parse_app_config_value(root: &Value) -> AppConfig {
             show_top_bar,
             show_workspace_indicators,
         },
+        links: LinkConfig { open_destination },
         font_size,
     }
 }
@@ -498,6 +560,10 @@ fn save_to_path(path: &Path, config: &AppConfig) -> Result<(), String> {
             "show_top_bar": config.interface.show_top_bar,
             "show_workspace_indicators": config.interface.show_workspace_indicators,
         }),
+    );
+    root.insert(
+        "links".to_string(),
+        json!({ "open_destination": config.links.open_destination.as_str() }),
     );
 
     if let Some(size) = config.font_size {
@@ -623,6 +689,9 @@ fn ensure_default_config_file(path: &Path) -> std::io::Result<()> {
         },
         "clipboard": {
             "copy_selection_to_clipboard": true
+        },
+        "links": {
+            "open_destination": "default_browser"
         }
     });
     let serialized = serde_json::to_string_pretty(&default_root)
@@ -637,6 +706,47 @@ mod tests {
     use std::ffi::OsString;
 
     use tempfile::TempDir;
+
+    #[test]
+    fn interface_preferences_round_trip_without_losing_link_settings() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("settings.json");
+        for side in [WindowControlsSide::Left, WindowControlsSide::Right] {
+            let config = AppConfig {
+                interface: InterfaceConfig {
+                    window_controls_side: side,
+                    show_top_bar: false,
+                    show_workspace_indicators: false,
+                },
+                links: LinkConfig {
+                    open_destination: LinkOpenDestination::BrowserTab,
+                },
+                ..Default::default()
+            };
+
+            save_to_path(&path, &config).expect("save config");
+            let loaded = load_from_path(&path);
+            assert!(loaded.warnings.is_empty());
+            assert_eq!(loaded.config, config);
+        }
+    }
+
+    #[test]
+    fn missing_and_invalid_interface_preferences_use_defaults() {
+        for root in [
+            json!({}),
+            json!({"interface": {
+                "window_controls_side": "unknown",
+                "show_top_bar": "false",
+                "show_workspace_indicators": null
+            }}),
+        ] {
+            assert_eq!(
+                parse_app_config_value(&root).interface,
+                InterfaceConfig::default()
+            );
+        }
+    }
 
     struct EnvVarGuard {
         key: &'static str,
@@ -712,6 +822,10 @@ mod tests {
         assert_eq!(
             parsed["clipboard"]["copy_selection_to_clipboard"],
             Value::Bool(true)
+        );
+        assert_eq!(
+            parsed["links"]["open_destination"],
+            Value::String("default_browser".to_string())
         );
     }
 
@@ -850,6 +964,62 @@ mod tests {
 
         assert!(loaded.warnings.is_empty());
         assert!(!loaded.config.clipboard.copy_selection_to_clipboard);
+    }
+
+    #[test]
+    fn load_from_path_reads_link_destination_and_defaults_invalid_values() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = settings_path_in(dir.path());
+        fs::create_dir_all(path.parent().expect("config dir")).expect("create config dir");
+        fs::write(
+            &path,
+            r#"{
+  "links": {
+    "open_destination": "browser_tab"
+  }
+}
+"#,
+        )
+        .expect("write config");
+
+        let loaded = load_from_path(&path);
+        assert_eq!(
+            loaded.config.links.open_destination,
+            LinkOpenDestination::BrowserTab
+        );
+
+        fs::write(
+            &path,
+            r#"{
+  "links": {
+    "open_destination": "invalid"
+  }
+}
+"#,
+        )
+        .expect("write invalid destination");
+
+        let loaded = load_from_path(&path);
+        assert_eq!(
+            loaded.config.links.open_destination,
+            LinkOpenDestination::DefaultBrowser
+        );
+    }
+
+    #[test]
+    fn link_destination_matches_embedded_browser_availability() {
+        assert_eq!(
+            LinkOpenDestination::BrowserTab.effective(true),
+            LinkOpenDestination::BrowserTab
+        );
+        assert_eq!(
+            LinkOpenDestination::BrowserTab.effective(false),
+            LinkOpenDestination::DefaultBrowser
+        );
+        assert_eq!(
+            LinkOpenDestination::DefaultBrowser.effective(false),
+            LinkOpenDestination::DefaultBrowser
+        );
     }
 
     #[test]
@@ -1063,6 +1233,24 @@ mod tests {
         assert_eq!(
             parsed["clipboard"]["copy_selection_to_clipboard"],
             Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn save_to_path_writes_link_destination() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = settings_path_in(dir.path());
+        fs::create_dir_all(path.parent().expect("config dir")).expect("create config dir");
+
+        let mut config = AppConfig::default();
+        config.links.open_destination = LinkOpenDestination::BrowserTab;
+        save_to_path(&path, &config).expect("save link destination");
+
+        let raw = fs::read_to_string(&path).expect("read config");
+        let parsed: Value = serde_json::from_str(&raw).expect("parse config");
+        assert_eq!(
+            parsed["links"]["open_destination"],
+            Value::String("browser_tab".to_string())
         );
     }
 

@@ -1,8 +1,9 @@
 use std::collections::hash_map::Entry;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::fs;
-use std::io;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 pub const SESSION_VERSION: u32 = 1;
@@ -60,6 +61,8 @@ pub struct WorkspaceState {
     pub cwd: Option<String>,
     #[serde(default)]
     pub folder_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autostart_command: Option<String>,
     pub layout: LayoutNodeState,
 }
 
@@ -330,21 +333,32 @@ pub fn load_session_from_dir(dir: &Path) -> LoadedSession {
     }
 }
 
-pub fn save_session_atomic(state: &AppSessionState) -> io::Result<PathBuf> {
-    save_session_atomic_in(&persistence_dir(), state)
-}
-
 pub fn save_session_atomic_in(dir: &Path, state: &AppSessionState) -> io::Result<PathBuf> {
     fs::create_dir_all(dir)?;
     let path = canonical_session_path_in(dir);
+    save_session_atomic_to(&path, state)
+}
+
+pub(crate) fn save_session_atomic_to(path: &Path, state: &AppSessionState) -> io::Result<PathBuf> {
     // Write to a sibling temp file first so a crash never leaves a truncated canonical session.
-    let temp_path = temp_session_path(&path);
+    let temp_path = temp_session_path(path);
     let normalized = normalize_session(state.clone());
     let json = serde_json::to_vec_pretty(&normalized)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    fs::write(&temp_path, json)?;
-    fs::rename(&temp_path, &path)?;
-    Ok(path)
+    match fs::remove_file(&temp_path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+    let mut temp_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp_path)?;
+    temp_file.write_all(&json)?;
+    drop(temp_file);
+    fs::rename(&temp_path, path)?;
+    Ok(path.to_path_buf())
 }
 
 pub fn clamp_split_ratio(ratio: f64) -> f64 {
@@ -439,6 +453,7 @@ impl AppSessionState {
                     favorite: workspace.favorite,
                     cwd: workspace.cwd,
                     folder_path: workspace.folder_path,
+                    autostart_command: None,
                     // Legacy files only knew "workspace exists"; rehydrate a fresh terminal at the
                     // last known directory instead of pretending process state can be restored.
                     layout: LayoutNodeState::Pane(PaneState {
@@ -903,6 +918,8 @@ fn shell_single_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
     use tempfile::tempdir;
 
@@ -982,6 +999,7 @@ mod tests {
                 favorite: true,
                 cwd: Some("/canonical".to_string()),
                 folder_path: Some("/canonical".to_string()),
+                autostart_command: None,
                 layout: LayoutNodeState::Pane(PaneState::fallback(Some("/canonical"))),
             }],
             ..AppSessionState::default()
@@ -1076,6 +1094,12 @@ mod tests {
     #[test]
     fn save_session_atomic_writes_canonical_file() {
         let dir = tempdir().expect("tempdir");
+        let canonical_path = canonical_session_path_in(dir.path());
+        let temp_path = temp_session_path(&canonical_path);
+        fs::write(&temp_path, "stale session").expect("write stale session");
+        fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o644))
+            .expect("set stale session permissions");
+        let mut stale_reader = fs::File::open(&temp_path).expect("open stale session");
         let state = AppSessionState {
             workspaces: vec![WorkspaceState {
                 id: Some("22222222-2222-4222-8222-222222222222".to_string()),
@@ -1083,13 +1107,27 @@ mod tests {
                 favorite: false,
                 cwd: Some("/tmp".to_string()),
                 folder_path: Some("/tmp".to_string()),
+                autostart_command: Some("ssh user@server".to_string()),
                 layout: LayoutNodeState::Pane(PaneState::fallback(Some("/tmp"))),
             }],
             ..AppSessionState::default()
         };
 
         let path = save_session_atomic_in(dir.path(), &state).expect("save canonical session");
-        assert_eq!(path, canonical_session_path_in(dir.path()));
+        assert_eq!(path, canonical_path);
+        assert_eq!(
+            fs::metadata(&path)
+                .expect("session metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let mut stale_contents = String::new();
+        stale_reader
+            .read_to_string(&mut stale_contents)
+            .expect("read stale session inode");
+        assert_eq!(stale_contents, "stale session");
         let raw = fs::read_to_string(path).expect("read canonical session");
         let decoded: AppSessionState =
             serde_json::from_str(&raw).expect("decode canonical session");
@@ -1099,6 +1137,10 @@ mod tests {
             Some("22222222-2222-4222-8222-222222222222")
         );
         assert_eq!(decoded.workspaces[0].name, "workspace");
+        assert_eq!(
+            decoded.workspaces[0].autostart_command.as_deref(),
+            Some("ssh user@server")
+        );
     }
 
     #[test]
@@ -1602,6 +1644,7 @@ mod tests {
                 favorite: false,
                 cwd: None,
                 folder_path: None,
+                autostart_command: None,
                 layout: LayoutNodeState::Pane(PaneState {
                     pane_id: None,
                     active_tab_id: Some("keybinds-1".to_string()),

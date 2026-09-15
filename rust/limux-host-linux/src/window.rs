@@ -59,6 +59,8 @@ struct Workspace {
     cwd: Rc<RefCell<Option<String>>>,
     /// The folder path this workspace was opened with.
     folder_path: Option<String>,
+    /// Command launched directly in every new terminal for this workspace.
+    autostart_command: Rc<RefCell<Option<String>>>,
     /// Path label shown below workspace name in sidebar.
     path_label: gtk::Label,
     /// The workspace indicator pill in the top bar.
@@ -75,10 +77,9 @@ pub(crate) struct AppState {
     top_bar_minimize_btn: Option<gtk::Button>,
     top_bar_maximize_btn: Option<gtk::Button>,
     top_bar_close_btn: Option<gtk::Button>,
-    top_bar_sidebar_toggle: Option<gtk::Button>,
+    sidebar_toggle: Option<gtk::ToggleButton>,
     top_bar_new_ws_btn_ref: Option<gtk::Button>,
     top_bar_settings_btn: Option<gtk::Button>,
-    sidebar_box: gtk::Box,
     sidebar_header: gtk::Box,
     sidebar_header_handle: gtk::WindowHandle,
     sidebar_drag_area: gtk::Box,
@@ -95,11 +96,16 @@ pub(crate) struct AppState {
     sidebar_handle: gtk::Box,
     new_ws_btn: gtk::Button,
     indicator_box: gtk::Box,
+    indicator_scroll: gtk::ScrolledWindow,
     sidebar_animation: Option<adw::TimedAnimation>,
     sidebar_animation_epoch: u64,
     sidebar_expanded_width: i32,
     persistence_suspended: bool,
     save_queued: bool,
+    session_store: Result<crate::session_store::SessionStore, String>,
+    session_save_notice: Option<String>,
+    session_close_dialog_open: bool,
+    close_after_recovery: bool,
     workspace_dragging: Option<String>,
     desktop_notification_routes: HashMap<u32, DesktopNotificationRoute>,
     _theme_portal_signal: Option<gio::SignalSubscription>,
@@ -347,6 +353,31 @@ fn focused_ids_for_workspace(state: &State, workspace_id: &str) -> (Option<u32>,
         return (None, None);
     };
     (Some(surface.pane_id), Some(surface.surface_id))
+}
+
+/// Resolve all terminal control operations through the same workspace-local target.
+/// Explicit surfaces must resolve exactly. With no explicit surface, use the
+/// requested workspace's focused surface; a focused browser is not a terminal
+/// target. Fall back to the first terminal only when no surface has focus.
+fn control_terminal_target(
+    state: &State,
+    workspace_index: usize,
+    surface_hint: Option<&str>,
+) -> Option<(serde_json::Value, crate::terminal::TerminalHandle)> {
+    let app_state = state.borrow();
+    let workspace = &app_state.workspaces[workspace_index];
+    let (_, focused_surface_id) = focused_ids_for_workspace(state, &workspace.id);
+    let surface_hint = surface_hint.or(focused_surface_id.as_deref());
+    let (surface_id, handle) = pane::terminal_handle_for_root(&workspace.root, surface_hint)?;
+    Some((
+        serde_json::json!({
+            "workspace_id": workspace.id.as_str(),
+            "workspace_ref": workspace_ref(&workspace.id),
+            "surface_id": surface_id.as_str(),
+            "surface_ref": surface_ref(&surface_id),
+        }),
+        handle,
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -882,10 +913,111 @@ fn request_session_save(state: &State) {
     }
 }
 
-fn save_session_now(state: &State) {
+fn try_save_session(state: &State) -> Result<crate::session_store::SaveOutcome, String> {
     let session = snapshot_session_state(state);
-    if let Err(err) = layout_state::save_session_atomic(&session) {
-        eprintln!("limux: failed to save session state: {err}");
+    state
+        .borrow_mut()
+        .session_store
+        .as_mut()
+        .map_err(|error| {
+            format!("Session storage could not be opened: {error}. Resolve the storage error and restart before making session changes.")
+        })?
+        .save(&session)
+        .map_err(|error| error.to_string())
+}
+
+fn session_conflict_detail(recovery: &Path, workspaces: &[String]) -> String {
+    format!("Another Limux window changed the same workspace(s): {}. The shared session was not overwritten. This window's complete session was saved to {}.", workspaces.join(", "), recovery.display())
+}
+
+fn report_session_save_notice(state: &State, detail: String) {
+    if state.borrow().session_save_notice.as_ref() == Some(&detail) {
+        return;
+    }
+    state.borrow_mut().session_save_notice = Some(detail.clone());
+    eprintln!("limux: {detail}");
+    show_runtime_error(state, "Session could not be merged", &detail);
+}
+
+fn save_session_now(state: &State) {
+    match try_save_session(state) {
+        Ok(crate::session_store::SaveOutcome::Saved) => {
+            state.borrow_mut().session_save_notice = None
+        }
+        Ok(crate::session_store::SaveOutcome::Conflict {
+            recovery,
+            workspaces,
+        }) => {
+            report_session_save_notice(state, session_conflict_detail(&recovery, &workspaces));
+        }
+        Err(error) => report_session_save_notice(state, format!("Failed to save session: {error}")),
+    }
+}
+
+fn prepare_session_close(state: &State) -> bool {
+    if std::mem::take(&mut state.borrow_mut().close_after_recovery) {
+        return true;
+    }
+    if state.borrow().session_close_dialog_open {
+        return false;
+    }
+    match try_save_session(state) {
+        Ok(crate::session_store::SaveOutcome::Saved) => true,
+        Err(error) => {
+            let window = state.borrow().window.clone();
+            let dialog = gtk::AlertDialog::builder().modal(true)
+                .message("Close without saving this session?")
+                .detail(format!("The session could not be saved: {error}. Closing will discard this window's unsaved session changes."))
+                .buttons(["Cancel", "Close without Saving"]).cancel_button(0).default_button(0).build();
+            state.borrow_mut().session_close_dialog_open = true;
+            let state = state.clone();
+            dialog.choose(Some(&window), gio::Cancellable::NONE, move |answer| {
+                state.borrow_mut().session_close_dialog_open = false;
+                if answer == Ok(1) {
+                    state.borrow_mut().close_after_recovery = true;
+                    let window = state.borrow().window.clone();
+                    window.close();
+                }
+            });
+            false
+        }
+        Ok(crate::session_store::SaveOutcome::Conflict {
+            recovery,
+            workspaces,
+        }) => {
+            let detail = session_conflict_detail(&recovery, &workspaces);
+            let window = state.borrow().window.clone();
+            let dialog = gtk::AlertDialog::builder()
+                .modal(true)
+                .message("Close with a saved recovery session?")
+                .detail(&detail)
+                .buttons(["Cancel", "Close after Saving Recovery"])
+                .cancel_button(0)
+                .default_button(0)
+                .build();
+            state.borrow_mut().session_close_dialog_open = true;
+            let state = state.clone();
+            dialog.choose(Some(&window), gio::Cancellable::NONE, move |answer| {
+                state.borrow_mut().session_close_dialog_open = false;
+                if answer != Ok(1) {
+                    return;
+                }
+                // Control-socket commands can still change the session while the
+                // dialog is open. Capture the latest state before allowing close.
+                match try_save_session(&state) {
+                    Ok(_) => {
+                        state.borrow_mut().close_after_recovery = true;
+                        let window = state.borrow().window.clone();
+                        window.close();
+                    }
+                    Err(error) => report_session_save_notice(
+                        &state,
+                        format!("Failed to save recovery session: {error}"),
+                    ),
+                }
+            });
+            false
+        }
     }
 }
 
@@ -918,24 +1050,22 @@ fn apply_loaded_session(state: &State, mut loaded: LoadedSession) {
             add_workspace_from_state(state, workspace);
         }
         restore_active_workspace(state, loaded.state.active_workspace_index);
-        apply_sidebar_state_immediately(state, &loaded.state.sidebar);
+    } else {
+        let workspace = initial_workspace_state(
+            dirs::home_dir().as_deref(),
+            std::env::current_dir().ok().as_deref(),
+        );
+        add_workspace_from_state(state, &workspace);
     }
+    apply_sidebar_state_immediately(state, &loaded.state.sidebar);
 
+    let restored = snapshot_session_state(state);
+    if let Ok(store) = state.borrow_mut().session_store.as_mut() {
+        store.restored(restored);
+    }
     suspend_persistence(state, false);
 
-    if restored_any || matches!(loaded.source, layout_state::SessionLoadSource::Legacy) {
-        save_session_now(state);
-    }
-
-    // Defer one more apply until after the window is mapped, so the leading
-    // pane's widget tree is fully realized when we go to park the dock
-    // toggle on it.
-    {
-        let state = state.clone();
-        glib::idle_add_local_once(move || {
-            apply_top_bar_mode(&state);
-        });
-    }
+    save_session_now(state);
 }
 
 fn restore_active_workspace(state: &State, index: usize) {
@@ -978,9 +1108,8 @@ fn apply_sidebar_state_immediately(state: &State, sidebar_state: &layout_state::
         if sidebar_state.visible { width } else { 0 },
         sidebar_state.visible,
     );
-    // Re-run the top-bar mode now that sidebar visibility has been restored,
-    // so the dock toggle / controls land in the right place on startup.
     apply_top_bar_mode(state);
+    sync_sidebar_toggle(state);
 }
 
 fn apply_top_bar_state_immediately(state: &State, visible: bool) {
@@ -1021,6 +1150,7 @@ fn snapshot_session_state(state: &State) -> AppSessionState {
                 favorite: workspace.favorite,
                 cwd,
                 folder_path,
+                autostart_command: workspace.autostart_command.borrow().clone(),
                 layout,
             }
         })
@@ -1087,6 +1217,7 @@ fn build_workspace_root(
     shortcuts: &Rc<ResolvedShortcutConfig>,
     ws_id: &str,
     working_directory: Option<&str>,
+    autostart_command: &Rc<RefCell<Option<String>>>,
     layout: &LayoutNodeState,
 ) -> (gtk::Widget, Rc<SplitTreeContainer>) {
     let tree_node = split_tree::build_split_node_from_layout(
@@ -1094,6 +1225,7 @@ fn build_workspace_root(
         shortcuts,
         ws_id,
         working_directory,
+        autostart_command,
         layout,
     );
     let container = SplitTreeContainer::new_from_tree(state, tree_node);
@@ -1137,13 +1269,8 @@ pub(crate) fn apply_split_ratio_after_layout(
     // GTK doesn't expose a reliable "allocation done" signal on GtkWidget.
     // Poll via add_tick_callback until the paned actually has a non-zero
     // width, then apply the ratio once and stop.
-    let paned_tick = paned.clone();
     let applying_tick = applying.clone();
-    let applied = Rc::new(Cell::new(false));
     paned.add_tick_callback(move |paned, _clock| {
-        if applied.get() {
-            return glib::ControlFlow::Break;
-        }
         let size = if orientation == gtk::Orientation::Horizontal {
             paned.width()
         } else {
@@ -1152,21 +1279,19 @@ pub(crate) fn apply_split_ratio_after_layout(
         if size <= 0 {
             return glib::ControlFlow::Continue;
         }
-        let ok = apply_ratio_value(&paned_tick, orientation, initial_ratio, &applying_tick);
+        let ok = apply_ratio_value(paned, orientation, initial_ratio, &applying_tick);
         if ok {
-            applied.set(true);
             glib::ControlFlow::Break
         } else {
             glib::ControlFlow::Continue
         }
     });
 
-    let paned_for_map = paned.clone();
     // Re-apply the current data model ratio on every map event (workspace switches).
     // Reads from the cell so drag-adjusted ratios are restored correctly.
-    paned.connect_map(move |_| {
+    paned.connect_map(move |paned| {
         let ratio = *ratio_cell.borrow();
-        apply_ratio_value(&paned_for_map, orientation, ratio, &applying);
+        apply_ratio_value(paned, orientation, ratio, &applying);
     });
     // Note: width/height change handling (for sidebar toggles and window
     // resizes) lives on the paned in split_tree.rs, where it has direct
@@ -1516,14 +1641,44 @@ const BASE_CSS: &str = r#"
 
 const CONTENT_BACKGROUND_RGB: (u8, u8, u8) = (23, 23, 23);
 
+/// Squares off the CSD window corners and drops the client-side shadow
+/// when the compositor draws the window decorations (see
+/// `compositor_provides_decorations`), so the window fills the KWin frame
+/// without transparent gaps at the corners.
+const SSD_CSS: &str = r#"
+window.csd,
+window.csd:backdrop {
+    --window-radius: 0px;
+    border-radius: 0;
+    box-shadow: none;
+    outline: none;
+}
+"#;
+
+/// True when the compositor speaks the KDE server-decoration protocol
+/// (KWin). In that case build_window() requests server-side decorations
+/// from the compositor and skips the in-app header bar.
+fn compositor_provides_decorations() -> bool {
+    gtk::gdk::Display::default()
+        .and_then(|display| display.downcast::<gdk4_wayland::WaylandDisplay>().ok())
+        .map(|display| display.query_registry("org_kde_kwin_server_decoration_manager"))
+        .unwrap_or(false)
+}
+
 fn app_css(background_opacity: f64, config: &app_config::AppConfig) -> String {
+    let ssd_css = if compositor_provides_decorations() {
+        SSD_CSS
+    } else {
+        ""
+    };
     format!(
-        "{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}",
         build_window_css(background_opacity),
         pane::PANE_CSS,
         keybind_editor::KEYBIND_EDITOR_CSS,
         crate::settings_editor::SETTINGS_CSS,
         crate::settings_editor::ui_scale_css(config),
+        ssd_css,
     )
 }
 
@@ -1620,8 +1775,13 @@ pub fn build_window(app: &adw::Application) {
         .hexpand(true)
         .build();
     indicator_box.add_css_class("limux-indicator-box");
+    let indicator_scroll = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Automatic)
+        .vscrollbar_policy(gtk::PolicyType::Never)
+        .hexpand(true)
+        .child(&indicator_box)
+        .build();
 
-    let top_bar_sidebar_toggle: gtk::Button;
     let top_bar_new_ws_btn: gtk::Button;
     let top_bar_settings_btn: gtk::Button;
 
@@ -1634,14 +1794,15 @@ pub fn build_window(app: &adw::Application) {
     top_bar_content.add_css_class("limux-top-bar");
 
     // Sidebar toggle button (leftmost) — Adwaita sidebar icon
-    let sidebar_toggle = gtk::Button::from_icon_name("sidebar-show-symbolic");
+    let sidebar_toggle = gtk::ToggleButton::builder()
+        .icon_name("sidebar-show-symbolic")
+        .action_name("win.toggle-sidebar")
+        .focus_on_click(false)
+        .build();
     sidebar_toggle.add_css_class("flat");
     sidebar_toggle.add_css_class("limux-top-bar-btn");
-    sidebar_toggle.set_focus_on_click(false);
     sidebar_toggle.set_valign(gtk::Align::Center);
-    sidebar_toggle.set_tooltip_text(Some("Toggle sidebar"));
     top_bar_content.append(&sidebar_toggle);
-    top_bar_sidebar_toggle = sidebar_toggle;
 
     // Settings cog — between the dock toggle and the + button.
     let settings_button = gtk::Button::from_icon_name("emblem-system-symbolic");
@@ -1664,7 +1825,7 @@ pub fn build_window(app: &adw::Application) {
     top_bar_new_ws_btn = new_ws;
 
     // Workspace indicator pills (takes the rest of the space)
-    top_bar_content.append(&indicator_box);
+    top_bar_content.append(&indicator_scroll);
 
     // Window controls on the right — plain buttons styled the same as top-bar
     // action buttons so hover shape matches the pane bar exactly. We skip the
@@ -1714,18 +1875,10 @@ pub fn build_window(app: &adw::Application) {
         close_btn.connect_clicked(move |_| w.close());
     }
 
-    // On Wayland compositors that provide server-side decorations, the
-    // compositor already draws window controls, so hide our custom
-    // minimize/maximize/close to avoid stacking a duplicate set. This restores
-    // the intent of main's xdg-decoration guard, adapted to the always-on top
-    // bar (the rest of the bar — workspace pills, dock toggle, etc. — stays).
-    let server_side_decorations = display
-        .clone()
-        .downcast::<gdk4_wayland::WaylandDisplay>()
-        .ok()
-        .map(|wayland_display| wayland_display.query_registry("zxdg_decoration_manager_v1"))
-        .unwrap_or(false);
-    if server_side_decorations {
+    // KWin draws the window controls after we request server decorations below.
+    // Keep the app's workspace controls without duplicating compositor chrome.
+    let compositor_provides_decorations = compositor_provides_decorations();
+    if compositor_provides_decorations {
         minimize_btn.set_visible(false);
         maximize_btn.set_visible(false);
         close_btn.set_visible(false);
@@ -1772,14 +1925,7 @@ pub fn build_window(app: &adw::Application) {
         sidebar_drag_area.add_controller(drag);
     }
 
-    let new_ws_btn = gtk::Button::builder()
-        .label("+")
-        .hexpand(true)
-        .margin_start(6)
-        .margin_end(6)
-        .margin_bottom(6)
-        .build();
-    new_ws_btn.add_css_class("limux-sidebar-btn");
+    let new_ws_btn = top_bar_new_ws_btn.clone();
 
     // Drop target on the button: workspace drags delete, tab drags create a new workspace.
     let btn_drop = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::MOVE);
@@ -1803,12 +1949,6 @@ pub fn build_window(app: &adw::Application) {
         });
     }
     new_ws_btn.add_controller(btn_drop.clone());
-
-    // new_ws_btn is kept in state as the drop target for workspace/tab DnD,
-    // but we hide it from the sidebar — the "+" in the top bar creates
-    // workspaces, and closing/creating via drag lands on sidebar rows / the
-    // top bar add button.
-    new_ws_btn.set_visible(false);
 
     // Alternate header for the sidebar, used when the top bar is hidden.
     // Populated by apply_top_bar_mode() — stays empty + invisible otherwise.
@@ -1848,10 +1988,9 @@ pub fn build_window(app: &adw::Application) {
         top_bar_minimize_btn: Some(minimize_btn.clone()),
         top_bar_maximize_btn: Some(maximize_btn.clone()),
         top_bar_close_btn: Some(close_btn.clone()),
-        top_bar_sidebar_toggle: Some(top_bar_sidebar_toggle.clone()),
+        sidebar_toggle: Some(sidebar_toggle),
         top_bar_new_ws_btn_ref: Some(top_bar_new_ws_btn.clone()),
         top_bar_settings_btn: Some(top_bar_settings_btn.clone()),
-        sidebar_box: sidebar.clone(),
         sidebar_header: sidebar_header.clone(),
         sidebar_header_handle: sidebar_header_handle.clone(),
         sidebar_drag_area: sidebar_drag_area.clone(),
@@ -1864,6 +2003,7 @@ pub fn build_window(app: &adw::Application) {
         shortcuts,
         stack: stack.clone(),
         indicator_box: indicator_box.clone(),
+        indicator_scroll,
         sidebar_list: sidebar_list.clone(),
         sidebar_shell: sidebar_shell.clone(),
         sidebar_handle: sidebar_handle.clone(),
@@ -1873,6 +2013,10 @@ pub fn build_window(app: &adw::Application) {
         sidebar_expanded_width: SIDEBAR_WIDTH,
         persistence_suspended: false,
         save_queued: false,
+        session_store: Err("Session storage has not been initialized".to_string()),
+        session_save_notice: None,
+        session_close_dialog_open: false,
+        close_after_recovery: false,
         workspace_dragging: None,
         desktop_notification_routes: HashMap::new(),
         _theme_portal_signal: None,
@@ -1995,22 +2139,6 @@ pub fn build_window(app: &adw::Application) {
         });
     }
 
-    // Wire top bar sidebar toggle button
-    {
-        let state = state.clone();
-        top_bar_sidebar_toggle.connect_clicked(move |_| {
-            toggle_sidebar(&state);
-        });
-    }
-
-    // Wire top bar new workspace button
-    {
-        let state = state.clone();
-        top_bar_new_ws_btn.connect_clicked(move |_| {
-            add_workspace(&state, None);
-        });
-    }
-
     // Wire top bar settings button — opens the same settings dialog the
     // pane cog used to, parented on whatever widget makes sense.
     {
@@ -2036,8 +2164,7 @@ pub fn build_window(app: &adw::Application) {
         let state = state.clone();
         let btn = new_ws_btn.clone();
         btn_drop.connect_drop(move |_, value, _, _| {
-            btn.set_label("+");
-            btn.remove_css_class("limux-sidebar-btn-trash");
+            set_new_workspace_drop_mode(&btn, false);
             btn.remove_css_class("limux-sidebar-btn-trash-hover");
             btn.remove_css_class("limux-tab-drop-target");
             if let Ok(payload) = value.get::<String>() {
@@ -2051,21 +2178,23 @@ pub fn build_window(app: &adw::Application) {
         });
     }
 
-    // The workspace-DnD drop target (tab drag -> new workspace, workspace drag
-    // -> delete) also lives on the visible top-bar "+" button. The sidebar
-    // new_ws_btn that carries the original target is hidden when the top bar is
-    // shown, so without this the drop target would be unreachable.
-    let top_bar_new_ws_button = state.borrow().top_bar_new_ws_btn_ref.clone();
-    if let Some(button) = top_bar_new_ws_button {
-        install_workspace_dnd_target(&button, &state);
-    }
-
     // Save the full session on window close.
     {
         let state = state.clone();
         window.connect_close_request(move |_| {
-            save_session_now(&state);
+            if !prepare_session_close(&state) {
+                return glib::Propagation::Stop;
+            }
             stop_session_saves_for_shutdown(&state);
+            let split_containers: Vec<_> = state
+                .borrow()
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.split_container.clone())
+                .collect();
+            for split_container in split_containers {
+                split_container.retire_panes();
+            }
             CONTROL_STATE.with(|slot| {
                 slot.borrow_mut().take();
             });
@@ -2073,11 +2202,47 @@ pub fn build_window(app: &adw::Application) {
         });
     }
 
-    apply_loaded_session(&state, layout_state::load_session());
+    match crate::session_store::SessionStore::load() {
+        Ok((store, loaded)) => {
+            state.borrow_mut().session_store = Ok(store);
+            apply_loaded_session(&state, loaded);
+        }
+        Err(error) => {
+            eprintln!("limux: failed to open session storage: {error}");
+            match crate::session_store::SessionStore::load_for_retry() {
+                Ok((store, loaded)) => {
+                    // This is the snapshot we actually show, not a new disk
+                    // baseline adopted after the user has begun making edits.
+                    state.borrow_mut().session_store = Ok(store);
+                    apply_loaded_session(&state, loaded);
+                }
+                Err(retry_error) => {
+                    state.borrow_mut().session_store = Err(format!(
+                        "{error}. A safe startup snapshot could not be read: {retry_error}"
+                    ));
+                    apply_loaded_session(&state, layout_state::load_session());
+                }
+            }
+        }
+    }
 
     crate::control_bridge::start(dispatch_control_command);
 
     window.present();
+
+    // Ask the compositor for server-side decorations when it supports the
+    // KDE server-decoration protocol (see the header-bar decision above).
+    // libadwaita marks the window client-decorated, which makes GtkWindow
+    // compute decorated=false at realize time; forcing the GDK-level
+    // property after present() makes GDK request SERVER mode from KWin via
+    // org_kde_kwin_server_decoration.
+    if compositor_provides_decorations {
+        if let Some(surface) = window.surface() {
+            if let Ok(toplevel) = surface.downcast::<gtk::gdk::Toplevel>() {
+                toplevel.set_decorated(true);
+            }
+        }
+    }
 }
 
 fn build_window_css(background_opacity: f64) -> String {
@@ -2170,7 +2335,9 @@ fn install_sidebar_resize(
         let resizing_sidebar = resizing_sidebar.clone();
         let state = state.clone();
         drag.connect_drag_end(move |_, _, _| {
-            resizing_sidebar.set(false);
+            if !resizing_sidebar.replace(false) {
+                return;
+            }
             state.borrow_mut().sidebar_expanded_width = sidebar_width(&sidebar_shell);
             request_session_save(&state);
         });
@@ -2596,6 +2763,7 @@ fn apply_shortcut_config(state: &State, shortcuts: ResolvedShortcutConfig) {
     };
 
     apply_shortcuts_to_application(&app, &shortcuts_rc);
+    sync_sidebar_toggle(state);
     for root in workspace_roots {
         refresh_shortcut_tooltips_in_layout(&root, &shortcuts_rc);
     }
@@ -3281,19 +3449,19 @@ fn active_workspace_leading_pane(state: &State) -> Option<gtk::Widget> {
 struct TopBarWidgets {
     handle: gtk::WindowHandle,
     content: gtk::Box,
-    dock: gtk::Button,
+    dock: gtk::ToggleButton,
     settings: gtk::Button,
     new_ws: gtk::Button,
     minimize: gtk::Button,
     maximize: gtk::Button,
     close: gtk::Button,
-    indicator_box: gtk::Box,
+    indicator_scroll: gtk::ScrolledWindow,
     sidebar_header: gtk::Box,
     sidebar_header_handle: gtk::WindowHandle,
     sidebar_drag_area: gtk::Box,
 }
 
-fn apply_top_bar_mode(state: &State) {
+pub(crate) fn apply_top_bar_mode(state: &State) {
     apply_top_bar_mode_impl(state, true);
 }
 
@@ -3318,7 +3486,7 @@ fn apply_top_bar_mode_impl(state: &State, allow_retry: bool) {
         ) = (
             s.top_bar.clone(),
             s.top_bar_content.clone(),
-            s.top_bar_sidebar_toggle.clone(),
+            s.sidebar_toggle.clone(),
             s.top_bar_settings_btn.clone(),
             s.top_bar_new_ws_btn_ref.clone(),
             s.top_bar_minimize_btn.clone(),
@@ -3337,24 +3505,54 @@ fn apply_top_bar_mode_impl(state: &State, allow_retry: bool) {
             minimize,
             maximize,
             close,
-            indicator_box: s.indicator_box.clone(),
+            indicator_scroll: s.indicator_scroll.clone(),
             sidebar_header: s.sidebar_header.clone(),
             sidebar_header_handle: s.sidebar_header_handle.clone(),
             sidebar_drag_area: s.sidebar_drag_area.clone(),
         };
         (
-            // The persisted setting AND the transient keyboard toggle must
-            // both be on for the top bar layout to apply.
-            config.interface.show_top_bar && s.top_bar_visible,
+            top_bar_should_be_visible(
+                config.interface.show_top_bar,
+                s.top_bar_visible,
+                gtk::prelude::GtkWindowExt::is_fullscreen(&s.window),
+            ),
             config.interface.window_controls_side,
             config.interface.show_workspace_indicators,
             // Just the widget's visible property — the paned position can be
             // stale during animations or startup; we don't want to misclassify
             // a set_visible(true) sidebar as closed.
-            s.sidebar_box.is_visible(),
+            s.sidebar_shell.get_visible(),
             widgets,
         )
     };
+
+    {
+        let s = state.borrow();
+        for ws in &s.workspaces {
+            ws.indicator_button.set_visible(show_workspace_indicators);
+        }
+    }
+
+    widgets.handle.set_visible(show_top_bar);
+    widgets
+        .sidebar_header_handle
+        .set_visible(!show_top_bar && sidebar_visible_now);
+    widgets
+        .sidebar_drag_area
+        .set_visible(!show_top_bar && !sidebar_visible_now);
+
+    // Reparenting unmaps buttons and interrupts an in-flight pointer gesture.
+    // Sidebar animation updates must leave an unchanged toolbar in place.
+    let toolbar = if show_top_bar {
+        Some(&widgets.content)
+    } else if sidebar_visible_now {
+        Some(&widgets.sidebar_header)
+    } else {
+        None
+    };
+    if toolbar.is_some_and(|toolbar| toolbar_layout_matches(toolbar, &widgets, controls_side)) {
+        return;
+    }
 
     // Detach the mobile widgets from wherever they're parented now — this
     // covers the case where a widget lives in the top bar, the sidebar
@@ -3365,23 +3563,12 @@ fn apply_top_bar_mode_impl(state: &State, allow_retry: bool) {
     detach(&widgets.minimize);
     detach(&widgets.maximize);
     detach(&widgets.close);
-    detach(&widgets.indicator_box);
+    detach(&widgets.indicator_scroll);
 
     // Clear the alt sidebar header from previous arrangements (removes the
     // leftover hexpand spacer child).
     while let Some(child) = widgets.sidebar_header.first_child() {
         widgets.sidebar_header.remove(&child);
-    }
-
-    // Workspace indicator pills are only shown when the user opts in.
-    // Hide the individual pills (children) rather than the box itself so the
-    // box keeps its hexpand spacer role between the top bar's left group and
-    // the window controls on the right.
-    {
-        let s = state.borrow();
-        for ws in &s.workspaces {
-            ws.indicator_button.set_visible(show_workspace_indicators);
-        }
     }
 
     if show_top_bar {
@@ -3399,13 +3586,36 @@ fn apply_top_bar_mode_impl(state: &State, allow_retry: bool) {
     }
 }
 
+fn toolbar_layout_matches(
+    toolbar: &gtk::Box,
+    widgets: &TopBarWidgets,
+    controls_side: app_config::WindowControlsSide,
+) -> bool {
+    let first: &gtk::Widget = match controls_side {
+        app_config::WindowControlsSide::Left => widgets.close.upcast_ref(),
+        app_config::WindowControlsSide::Right => widgets.dock.upcast_ref(),
+    };
+    let parent: &gtk::Widget = toolbar.upcast_ref();
+    toolbar.first_child().as_ref() == Some(first)
+        && [
+            widgets.dock.upcast_ref::<gtk::Widget>(),
+            widgets.settings.upcast_ref(),
+            widgets.new_ws.upcast_ref(),
+            widgets.minimize.upcast_ref(),
+            widgets.maximize.upcast_ref(),
+            widgets.close.upcast_ref(),
+        ]
+        .iter()
+        .all(|widget| widget.parent().as_ref() == Some(parent))
+}
+
 /// Classic layout: everything back in the top bar, controls at the chosen side.
 fn layout_top_bar_visible(w: &TopBarWidgets, controls_side: app_config::WindowControlsSide) {
     // dock | settings | new_ws | indicator_box | [controls at side]
     w.content.append(&w.dock);
     w.content.append(&w.settings);
     w.content.append(&w.new_ws);
-    w.content.append(&w.indicator_box);
+    w.content.append(&w.indicator_scroll);
 
     match controls_side {
         app_config::WindowControlsSide::Left => {
@@ -3483,6 +3693,10 @@ fn layout_collapsed_dock(state: &State, w: &TopBarWidgets, allow_retry: bool) {
                 glib::idle_add_local_once(move || {
                     apply_top_bar_mode_impl(&state, false);
                 });
+            } else {
+                // With no workspace, there is no pane header to host the toggle.
+                w.content.append(&w.dock);
+                w.handle.set_visible(true);
             }
         }
     }
@@ -3579,20 +3793,12 @@ fn sync_indicator_active_state(state: &AppState) {
 }
 
 fn update_indicator_label(button: &gtk::Button, name: &str) {
-    if let Some(content) = button.child() {
-        if let Some(content_box) = content.downcast_ref::<gtk::Box>() {
-            let mut child = content_box.first_child();
-            while let Some(widget) = child {
-                if let Some(label) = widget.downcast_ref::<gtk::Label>() {
-                    // Skip the unread dot label (it has the dot character)
-                    if label.label() != "\u{25CF}" {
-                        label.set_label(name);
-                        break;
-                    }
-                }
-                child = widget.next_sibling();
-            }
-        }
+    if let Some(label) = button
+        .child()
+        .and_then(|content| content.last_child())
+        .and_then(|widget| widget.downcast::<gtk::Label>().ok())
+    {
+        label.set_label(name);
     }
 }
 
@@ -3801,19 +4007,40 @@ fn next_active_workspace_index(
 }
 
 fn show_workspace_context_menu(state: &State, workspace_id: &str, row: &gtk::ListBoxRow) {
+    let preferred_pane_id = find_leaf_focused_pane(state)
+        .filter(|(id, _)| id == workspace_id)
+        .and_then(|(_, pane)| pane::active_surface_summary(&pane).map(|surface| surface.pane_id));
     let menu_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
     menu_box.set_margin_top(4);
     menu_box.set_margin_bottom(4);
     menu_box.set_margin_start(4);
     menu_box.set_margin_end(4);
 
+    let new_tab_btn = gtk::Button::with_label("New tab from workspace directory");
+    new_tab_btn.add_css_class("flat");
     let rename_btn = gtk::Button::with_label("Rename");
     rename_btn.add_css_class("flat");
+    let has_autostart = {
+        let app_state = state.borrow();
+        app_state
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+            .is_some_and(|workspace| workspace.autostart_command.borrow().is_some())
+    };
+    let autostart_btn = gtk::Button::with_label(if has_autostart {
+        "Edit Autostart…"
+    } else {
+        "Set Autostart…"
+    });
+    autostart_btn.add_css_class("flat");
     let delete_btn = gtk::Button::with_label("Delete");
     delete_btn.add_css_class("flat");
     delete_btn.add_css_class("destructive-action");
 
+    menu_box.append(&new_tab_btn);
     menu_box.append(&rename_btn);
+    menu_box.append(&autostart_btn);
     menu_box.append(&delete_btn);
 
     let popover = gtk::Popover::new();
@@ -3825,9 +4052,68 @@ fn show_workspace_context_menu(state: &State, workspace_id: &str, row: &gtk::Lis
         let state = state.clone();
         let ws_id = workspace_id.to_string();
         let pop = popover.clone();
+        new_tab_btn.connect_clicked(move |_| {
+            pop.popdown();
+            let (index, directory, row, sidebar_list, target_pane) = {
+                let app_state = state.borrow();
+                let Some(index) = app_state
+                    .workspaces
+                    .iter()
+                    .position(|workspace| workspace.id == ws_id)
+                else {
+                    return;
+                };
+                let workspace = &app_state.workspaces[index];
+                let target_pane = preferred_pane_id
+                    .and_then(|id| pane::pane_widget_for_root(&workspace.root, id))
+                    .or_else(|| {
+                        let first = first_leaf_pane(&workspace.root);
+                        pane::active_surface_summary(&first).and_then(|surface| {
+                            pane::pane_widget_for_root(&workspace.root, surface.pane_id)
+                        })
+                    })
+                    .or_else(|| {
+                        let first = pane::pane_summaries_for_root(&workspace.root)
+                            .first()?
+                            .pane_id;
+                        pane::pane_widget_for_root(&workspace.root, first)
+                    });
+                let Some(target_pane) = target_pane else {
+                    return;
+                };
+                let directory = workspace
+                    .folder_path
+                    .clone()
+                    .or_else(|| workspace.cwd.borrow().clone());
+                (
+                    index,
+                    directory,
+                    workspace.sidebar_row.clone(),
+                    app_state.sidebar_list.clone(),
+                    target_pane,
+                )
+            };
+            switch_workspace(&state, index);
+            sidebar_list.select_row(Some(&row));
+            pane::add_terminal_tab_to_pane_in_directory(&target_pane, directory.as_deref());
+        });
+    }
+    {
+        let state = state.clone();
+        let ws_id = workspace_id.to_string();
+        let pop = popover.clone();
         rename_btn.connect_clicked(move |_| {
             pop.popdown();
             begin_workspace_inline_rename(&state, &ws_id);
+        });
+    }
+    {
+        let state = state.clone();
+        let ws_id = workspace_id.to_string();
+        let pop = popover.clone();
+        autostart_btn.connect_clicked(move |_| {
+            pop.popdown();
+            show_workspace_autostart_dialog(&state, &ws_id);
         });
     }
     {
@@ -3847,6 +4133,130 @@ fn show_workspace_context_menu(state: &State, workspace_id: &str, row: &gtk::Lis
     }
 
     popover.popup();
+}
+
+fn normalize_autostart_command(command: &str) -> Option<String> {
+    let command = command.trim();
+    (!command.is_empty()).then(|| command.to_string())
+}
+
+fn show_workspace_autostart_dialog(state: &State, workspace_id: &str) {
+    let (workspace_name, current_command) = {
+        let app_state = state.borrow();
+        let Some(workspace) = app_state
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+        else {
+            return;
+        };
+        let workspace_name = workspace.name.clone();
+        let current_command = workspace.autostart_command.borrow().clone();
+        (workspace_name, current_command)
+    };
+
+    let dialog = gtk::Window::builder()
+        .title("Workspace Autostart")
+        .modal(true)
+        .default_width(520)
+        .resizable(false)
+        .build();
+    if let Some(window) = active_window(state) {
+        dialog.set_transient_for(Some(&window));
+    }
+
+    let description = gtk::Label::builder()
+        .label(format!(
+            "Run a command whenever a new terminal opens in {workspace_name}."
+        ))
+        .halign(gtk::Align::Start)
+        .wrap(true)
+        .build();
+    let entry = gtk::Entry::builder()
+        .text(current_command.as_deref().unwrap_or_default())
+        .placeholder_text("Command, for example: ssh user@server")
+        .hexpand(true)
+        .activates_default(true)
+        .build();
+    let hint = gtk::Label::builder()
+        .label("Leave the command empty to disable autostart for this workspace.")
+        .halign(gtk::Align::Start)
+        .wrap(true)
+        .build();
+    hint.add_css_class("dim-label");
+
+    let buttons = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .halign(gtk::Align::End)
+        .spacing(8)
+        .build();
+    let cancel_button = gtk::Button::with_label("Cancel");
+    let save_button = gtk::Button::with_label("Save");
+    save_button.add_css_class("suggested-action");
+    buttons.append(&cancel_button);
+    buttons.append(&save_button);
+
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
+        .margin_top(16)
+        .margin_bottom(16)
+        .margin_start(16)
+        .margin_end(16)
+        .build();
+    content.append(&description);
+    content.append(&entry);
+    content.append(&hint);
+    content.append(&buttons);
+    dialog.set_child(Some(&content));
+    dialog.set_default_widget(Some(&save_button));
+
+    let dialog_for_cancel = dialog.clone();
+    cancel_button.connect_clicked(move |_| dialog_for_cancel.close());
+
+    let dialog_for_key = dialog.clone();
+    let key_controller = gtk::EventControllerKey::new();
+    key_controller.connect_key_pressed(move |_controller, keyval, _keycode, _modifier| {
+        if workspace_autostart_dialog_dismisses(keyval) {
+            dialog_for_key.close();
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    dialog.add_controller(key_controller);
+
+    let state_for_save = state.clone();
+    let workspace_id_for_save = workspace_id.to_string();
+    let dialog_for_save = dialog.clone();
+    let entry_for_save = entry.clone();
+    save_button.connect_clicked(move |_| {
+        let command = normalize_autostart_command(entry_for_save.text().as_str());
+        {
+            let app_state = state_for_save.borrow();
+            let Some(workspace) = app_state
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.id == workspace_id_for_save)
+            else {
+                dialog_for_save.close();
+                return;
+            };
+            *workspace.autostart_command.borrow_mut() = command;
+        }
+        request_session_save(&state_for_save);
+        dialog_for_save.close();
+    });
+
+    let save_button_for_entry = save_button.clone();
+    entry.connect_activate(move |_| save_button_for_entry.emit_clicked());
+    entry.grab_focus();
+    entry.set_position(-1);
+    dialog.present();
+}
+
+fn workspace_autostart_dialog_dismisses(keyval: gtk::gdk::Key) -> bool {
+    keyval == gtk::gdk::Key::Escape
 }
 
 fn clamp_workspace_insert_index_for_pinning(
@@ -4179,44 +4589,17 @@ fn handle_tab_drop_to_workspace(state: &State, target_workspace_id: &str, payloa
     pane::move_tab_to_pane(&source_pane, tab_id, &target_pane)
 }
 
-/// Wire the workspace drag-and-drop drop target onto a "new workspace" button:
-/// a tab drag (payload `pane:tab`) creates a workspace, a workspace drag deletes
-/// it. Used for both the sidebar button and the top-bar "+" so whichever is
-/// visible accepts the drop.
-fn install_workspace_dnd_target(button: &gtk::Button, state: &State) {
-    let drop = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::MOVE);
-    drop.set_preload(true);
-    {
-        let button = button.clone();
-        drop.connect_motion(move |_, _, _| {
-            if pane::is_tab_dragging() {
-                button.add_css_class("limux-tab-drop-target");
-            }
-            gtk::gdk::DragAction::MOVE
-        });
-    }
-    {
-        let button = button.clone();
-        drop.connect_leave(move |_| {
-            button.remove_css_class("limux-tab-drop-target");
-        });
-    }
-    {
-        let state = state.clone();
-        let button = button.clone();
-        drop.connect_drop(move |_, value, _, _| {
-            button.remove_css_class("limux-tab-drop-target");
-            if let Ok(payload) = value.get::<String>() {
-                if payload.contains(':') {
-                    return create_workspace_for_tab(&state, &payload);
-                }
-                close_workspace_by_id(&state, &payload);
-                return true;
-            }
-            false
-        });
-    }
-    button.add_controller(drop);
+fn set_new_workspace_drop_mode(button: &gtk::Button, deleting: bool) {
+    let (icon, label) = if deleting {
+        button.add_css_class("limux-sidebar-btn-trash");
+        ("user-trash-symbolic", "Delete workspace")
+    } else {
+        button.remove_css_class("limux-sidebar-btn-trash");
+        ("list-add-symbolic", "New workspace")
+    };
+    button.set_icon_name(icon);
+    button.set_tooltip_text(Some(label));
+    button.update_property(&[gtk::accessible::Property::Label(label)]);
 }
 
 fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
@@ -4260,14 +4643,19 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
         app_state.shortcuts.clone()
     };
     let new_workspace_id = uuid::Uuid::new_v4().to_string();
+    let autostart_command = Rc::new(RefCell::new(None));
     let stack_name = format!("ws-{new_workspace_id}");
     let pane = create_pane_for_workspace(
         state,
         &shortcuts,
         &new_workspace_id,
         seed.cwd.as_deref(),
-        None,
-        true,
+        autostart_command.clone(),
+        PaneCreationOptions {
+            initial_state: None,
+            skip_default_tab: true,
+            suppress_initial_autostart: false,
+        },
     );
     let split_container = SplitTreeContainer::new(state, pane.clone().upcast());
     let root = split_container.widget().clone();
@@ -4331,6 +4719,7 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
             favorite: false,
             cwd: Rc::new(RefCell::new(seed.cwd.clone())),
             folder_path: seed.folder_path.clone(),
+            autostart_command,
             path_label,
             indicator_button,
             indicator_unread_dot,
@@ -4408,8 +4797,7 @@ fn install_workspace_row_interactions(
         drag_source.connect_drag_begin(move |source, _| {
             let mut s = state.borrow_mut();
             s.workspace_dragging = Some(workspace_id.clone());
-            s.new_ws_btn.set_label("\u{1F5D1}\u{FE0E}");
-            s.new_ws_btn.add_css_class("limux-sidebar-btn-trash");
+            set_new_workspace_drop_mode(&s.new_ws_btn, true);
             drop(s);
             pane::set_workspace_dragging_all(true);
             let icon = gtk::WidgetPaintable::new(Some(&row));
@@ -4421,8 +4809,7 @@ fn install_workspace_row_interactions(
         drag_source.connect_drag_end(move |_, _, _| {
             let mut s = state.borrow_mut();
             s.workspace_dragging = None;
-            s.new_ws_btn.set_label("New Workspace");
-            s.new_ws_btn.remove_css_class("limux-sidebar-btn-trash");
+            set_new_workspace_drop_mode(&s.new_ws_btn, false);
             s.new_ws_btn
                 .remove_css_class("limux-sidebar-btn-trash-hover");
             pane::set_workspace_dragging_all(false);
@@ -4557,24 +4944,6 @@ fn install_workspace_row_interactions(
 }
 
 fn add_workspace(state: &State, _working_directory: Option<&str>) {
-    // If there's already an active workspace, clone its folder instead of
-    // asking — matches cmux UX where the "+" creates a workspace in context.
-    let active_folder = {
-        let s = state.borrow();
-        s.active_workspace()
-            .and_then(|ws| ws.folder_path.clone().or_else(|| ws.cwd.borrow().clone()))
-    };
-
-    if let Some(folder_path) = active_folder {
-        let folder_name = std::path::Path::new(&folder_path)
-            .file_name()
-            .map(|f| f.to_string_lossy().to_string())
-            .unwrap_or_else(|| folder_path.clone());
-        create_workspace_with_folder(state, &folder_name, &folder_path);
-        return;
-    }
-
-    // No active workspace (first-run): ask for a folder.
     show_workspace_path_dialog(state);
 }
 
@@ -4720,6 +5089,19 @@ fn show_workspace_path_dialog(state: &State) {
         dialog_for_cancel.close();
     });
 
+    // ESC key handler to close the dialog
+    let dialog_for_key = dialog.clone();
+    let key_controller = gtk::EventControllerKey::new();
+    key_controller.connect_key_pressed(move |_controller, keyval, _keycode, _modifier| {
+        if keyval == gtk::gdk::Key::Escape {
+            dialog_for_key.close();
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    dialog.add_controller(key_controller);
+
     dialog.present();
 }
 
@@ -4795,16 +5177,32 @@ fn workspace_folder_path_from_input(
 }
 
 fn create_workspace_with_folder(state: &State, name: &str, folder_path: &str) {
-    let workspace = WorkspaceState {
+    let workspace = workspace_state_with_folder(name, folder_path);
+    add_workspace_from_state(state, &workspace);
+    request_session_save(state);
+}
+
+fn workspace_state_with_folder(name: &str, folder_path: &str) -> WorkspaceState {
+    WorkspaceState {
         id: None,
         name: name.to_string(),
         favorite: false,
         cwd: Some(folder_path.to_string()),
         folder_path: Some(folder_path.to_string()),
+        autostart_command: None,
         layout: LayoutNodeState::Pane(PaneState::fallback(Some(folder_path))),
-    };
-    add_workspace_from_state(state, &workspace);
-    request_session_save(state);
+    }
+}
+
+fn initial_workspace_state(home_dir: Option<&Path>, current_dir: Option<&Path>) -> WorkspaceState {
+    let folder = home_dir.or(current_dir).unwrap_or_else(|| Path::new("/"));
+    let folder_path = folder.to_string_lossy();
+    let name = folder
+        .file_name()
+        .map(|segment| segment.to_string_lossy())
+        .filter(|segment| !segment.is_empty())
+        .unwrap_or_else(|| folder_path.clone());
+    workspace_state_with_folder(&name, &folder_path)
 }
 
 fn dispatch_control_command(command: ControlCommand) {
@@ -4976,8 +5374,10 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 SplitPaneOptions {
                     initial_state: None,
                     skip_default_tab: false,
+                    inherit_active_directory: false,
                     new_pane_first: resolved.placement.new_pane_first,
                     persist: true,
+                    suppress_initial_autostart: request.command.is_some(),
                 },
             );
             let Some(new_pane) = new_pane else {
@@ -5219,27 +5619,7 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 return;
             };
 
-            let target = {
-                let app_state = state.borrow();
-                let workspace = &app_state.workspaces[index];
-                let (_focused_pane_id, focused_surface_id) =
-                    focused_ids_for_workspace(state, &workspace.id);
-                let resolved_surface_hint =
-                    surface_hint.as_deref().or(focused_surface_id.as_deref());
-                pane::terminal_handle_for_root(&workspace.root, resolved_surface_hint).map(
-                    |(surface_id, handle)| {
-                        (
-                            serde_json::json!({
-                                "workspace_id": workspace.id.as_str(),
-                                "workspace_ref": workspace_ref(&workspace.id),
-                                "surface_id": surface_id.as_str(),
-                                "surface_ref": surface_ref(&surface_id),
-                            }),
-                            handle,
-                        )
-                    },
-                )
-            };
+            let target = control_terminal_target(state, index, surface_hint.as_deref());
 
             let Some((mut payload, handle)) = target else {
                 let _ = reply.send(Err(crate::control_bridge::BridgeError::not_found(
@@ -5271,23 +5651,7 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 return;
             };
 
-            let target = {
-                let app_state = state.borrow();
-                let workspace = &app_state.workspaces[index];
-                pane::terminal_handle_for_root(&workspace.root, surface_hint.as_deref()).map(
-                    |(surface_id, handle)| {
-                        (
-                            serde_json::json!({
-                                "workspace_id": workspace.id.as_str(),
-                                "workspace_ref": workspace_ref(&workspace.id),
-                                "surface_id": surface_id.as_str(),
-                                "surface_ref": surface_ref(&surface_id),
-                            }),
-                            handle,
-                        )
-                    },
-                )
-            };
+            let target = control_terminal_target(state, index, surface_hint.as_deref());
 
             let Some((mut payload, handle)) = target else {
                 let _ = reply.send(Err(crate::control_bridge::BridgeError::not_found(
@@ -5325,23 +5689,7 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 return;
             };
 
-            let target = {
-                let app_state = state.borrow();
-                let workspace = &app_state.workspaces[index];
-                pane::terminal_handle_for_root(&workspace.root, surface_hint.as_deref()).map(
-                    |(surface_id, handle)| {
-                        (
-                            serde_json::json!({
-                                "workspace_id": workspace.id.as_str(),
-                                "workspace_ref": workspace_ref(&workspace.id),
-                                "surface_id": surface_id.as_str(),
-                                "surface_ref": surface_ref(&surface_id),
-                            }),
-                            handle,
-                        )
-                    },
-                )
-            };
+            let target = control_terminal_target(state, index, surface_hint.as_deref());
 
             let Some((mut payload, handle)) = target else {
                 let _ = reply.send(Err(crate::control_bridge::BridgeError::not_found(
@@ -5461,8 +5809,15 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
         .folder_path
         .as_deref()
         .or(workspace.cwd.as_deref());
-    let (root, split_container) =
-        build_workspace_root(state, &shortcuts, &id, working_dir, &workspace.layout);
+    let autostart_command = Rc::new(RefCell::new(workspace.autostart_command.clone()));
+    let (root, split_container) = build_workspace_root(
+        state,
+        &shortcuts,
+        &id,
+        working_dir,
+        &autostart_command,
+        &workspace.layout,
+    );
     stack.add_named(&root, Some(&stack_name));
 
     let show_workspace_path = state
@@ -5527,6 +5882,7 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
         favorite: workspace.favorite,
         cwd,
         folder_path: workspace.folder_path.clone(),
+        autostart_command,
         path_label,
         indicator_button,
         indicator_unread_dot,
@@ -5551,18 +5907,25 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
 }
 
 /// Create a PaneWidget wired up with callbacks for a specific workspace.
+pub(crate) struct PaneCreationOptions<'a> {
+    pub(crate) initial_state: Option<&'a PaneState>,
+    pub(crate) skip_default_tab: bool,
+    pub(crate) suppress_initial_autostart: bool,
+}
+
 pub(crate) fn create_pane_for_workspace(
     state: &State,
     shortcuts: &Rc<ResolvedShortcutConfig>,
     ws_id: &str,
     working_directory: Option<&str>,
-    initial_state: Option<&PaneState>,
-    skip_default_tab: bool,
+    autostart_command: Rc<RefCell<Option<String>>>,
+    options: PaneCreationOptions<'_>,
 ) -> gtk::Box {
     let state_for_split = state.clone();
     let state_for_close = state.clone();
     let state_for_bell = state.clone();
     let state_for_desktop_notification = state.clone();
+    let state_for_open_url = state.clone();
     let state_for_keybinds = state.clone();
     let state_for_pwd = state.clone();
     let state_for_empty = state.clone();
@@ -5572,6 +5935,7 @@ pub(crate) fn create_pane_for_workspace(
     let ws_id_close = ws_id.to_string();
     let ws_id_bell = ws_id.to_string();
     let ws_id_desktop_notification = ws_id.to_string();
+    let ws_id_open_url = ws_id.to_string();
     let ws_id_pwd = ws_id.to_string();
     let ws_id_empty = ws_id.to_string();
     let ws_id_unread = ws_id.to_string();
@@ -5583,6 +5947,8 @@ pub(crate) fn create_pane_for_workspace(
 
     let callbacks = Rc::new(PaneCallbacks {
         workspace_id: ws_id.to_string(),
+        autostart_command,
+        suppress_next_autostart: Cell::new(options.suppress_initial_autostart),
         on_split: Box::new(move |pane_widget, orientation| {
             split_pane(
                 &state_for_split,
@@ -5592,8 +5958,10 @@ pub(crate) fn create_pane_for_workspace(
                 SplitPaneOptions {
                     initial_state: None,
                     skip_default_tab: false,
+                    inherit_active_directory: true,
                     new_pane_first: false,
                     persist: true,
+                    suppress_initial_autostart: false,
                 },
             );
         }),
@@ -5643,6 +6011,9 @@ pub(crate) fn create_pane_for_workspace(
         ),
         on_open_browser_here: Box::new(move |pane_widget| {
             pane::add_browser_tab_to_pane(pane_widget);
+        }),
+        on_open_url_in_browser: Box::new(move |pane_widget, url| {
+            open_url_in_browser_tab(&state_for_open_url, &ws_id_open_url, pane_widget, url);
         }),
         on_open_keybinds: Box::new(move |anchor| {
             open_keybind_editor_tab(&state_for_keybinds, anchor);
@@ -5718,8 +6089,8 @@ pub(crate) fn create_pane_for_workspace(
         callbacks,
         shortcuts.clone(),
         working_directory,
-        initial_state,
-        skip_default_tab,
+        options.initial_state,
+        options.skip_default_tab,
     )
 }
 
@@ -5743,8 +6114,20 @@ fn close_workspace_by_id_internal(
     persist: bool,
     preferred_active_workspace_id: Option<&str>,
 ) {
+    let split_container = {
+        let s = state.borrow();
+        s.workspaces
+            .iter()
+            .find(|workspace| workspace.id == id)
+            .map(|workspace| workspace.split_container.clone())
+    };
+    let Some(split_container) = split_container else {
+        return;
+    };
+    split_container.retire_panes();
+
     let mut s = state.borrow_mut();
-    let Some(idx) = s.workspaces.iter().position(|w| w.id == id) else {
+    let Some(idx) = s.workspaces.iter().position(|workspace| workspace.id == id) else {
         return;
     };
     let desired_active_workspace_id = preferred_active_workspace_id
@@ -5759,6 +6142,7 @@ fn close_workspace_by_id_internal(
     if s.workspaces.is_empty() {
         s.active_idx = 0;
         drop(s);
+        apply_top_bar_mode(state);
         if persist {
             request_session_save(state);
         }
@@ -5786,6 +6170,7 @@ fn close_workspace_by_id_internal(
     drop(s);
 
     sidebar_list.select_row(Some(&row));
+    apply_top_bar_mode(state);
     if persist {
         request_session_save(state);
     }
@@ -5804,7 +6189,7 @@ fn switch_workspace(state: &State, idx: usize) {
         return;
     }
 
-    let (stack, stack_name, focus_root, workspace_id, unread_handles) = {
+    let (stack, stack_name, focus_root, workspace_id) = {
         let mut s = state.borrow_mut();
         s.active_idx = idx;
         sync_indicator_active_state(&s);
@@ -5813,21 +6198,7 @@ fn switch_workspace(state: &State, idx: usize) {
         let focus_root = s.workspaces[idx].root.clone();
         let workspace_id = s.workspaces[idx].id.clone();
 
-        let unread_handles = if s.workspaces[idx].unread {
-            let ws = &mut s.workspaces[idx];
-            ws.unread = false;
-            Some((
-                ws.notify_dot.clone(),
-                ws.notify_label.clone(),
-                ws.sidebar_row.clone(),
-                ws.indicator_button.clone(),
-                ws.indicator_unread_dot.clone(),
-            ))
-        } else {
-            None
-        };
-
-        (stack, stack_name, focus_root, workspace_id, unread_handles)
+        (stack, stack_name, focus_root, workspace_id)
     };
 
     stack.set_visible_child_name(&stack_name);
@@ -5835,24 +6206,6 @@ fn switch_workspace(state: &State, idx: usize) {
     glib::idle_add_local_once(move || {
         focus_workspace_entrypoint(&focus_root);
     });
-
-    if let Some((notify_dot, notify_label, sidebar_row, indicator_btn, indicator_dot)) =
-        unread_handles
-    {
-        notify_dot.remove_css_class("limux-notify-dot");
-        notify_dot.add_css_class("limux-notify-dot-hidden");
-        notify_label.remove_css_class("limux-notify-msg-unread");
-        notify_label.add_css_class("limux-notify-msg");
-        notify_label.set_visible(false);
-        if let Some(row_box) = sidebar_row.child() {
-            row_box.remove_css_class("limux-sidebar-row-unread");
-        }
-        // Clear unread state on indicator pill
-        indicator_btn.remove_css_class("limux-indicator-pill-unread");
-        indicator_dot.remove_css_class("limux-indicator-unread-dot");
-        indicator_dot.add_css_class("limux-indicator-unread-dot-hidden");
-        indicator_dot.set_visible(false);
-    }
 
     // If the dock toggle is parked on a pane (top-bar off, sidebar closed),
     // move it to the new active workspace's leading pane.
@@ -5923,19 +6276,43 @@ fn first_leaf_pane(widget: &gtk::Widget) -> gtk::Widget {
 /// Default sidebar width in pixels.
 const SIDEBAR_WIDTH: i32 = 220;
 
-fn sync_top_bar_visibility(state: &State) {
-    let (top_bar, preferred_visible, fullscreened) = {
+fn sidebar_target_is_visible(state: &AppState) -> bool {
+    state.sidebar_animation.as_ref().map_or_else(
+        || sidebar_is_visible(state),
+        |animation| animation.value_to() > 10.0,
+    )
+}
+
+fn sync_sidebar_toggle(state: &State) {
+    let (button, visible, shortcut) = {
         let s = state.borrow();
+        let Some(button) = s.sidebar_toggle.clone() else {
+            return;
+        };
         (
-            s.top_bar.clone(),
-            s.top_bar_visible,
-            gtk::prelude::GtkWindowExt::is_fullscreen(&s.window),
+            button,
+            sidebar_target_is_visible(&s),
+            s.shortcuts.display_label_for_id(ShortcutId::ToggleSidebar),
         )
     };
+    let label = if visible {
+        "Hide sidebar"
+    } else {
+        "Show sidebar"
+    };
+    let tooltip = shortcut.map_or_else(|| label.to_string(), |key| format!("{label} ({key})"));
+    button.set_active(visible);
+    button.set_tooltip_text(Some(&tooltip));
+    button.update_property(&[gtk::accessible::Property::Label(label)]);
+    button.update_state(&[gtk::accessible::State::Expanded(Some(visible))]);
+}
 
-    if let Some(top_bar) = top_bar {
-        top_bar.set_visible(preferred_visible && !fullscreened);
-    }
+fn top_bar_should_be_visible(configured: bool, toggled: bool, fullscreen: bool) -> bool {
+    configured && toggled && !fullscreen
+}
+
+fn sync_top_bar_visibility(state: &State) {
+    apply_top_bar_mode(state);
 }
 
 fn toggle_top_bar(state: &State) {
@@ -5944,9 +6321,6 @@ fn toggle_top_bar(state: &State) {
         s.top_bar_visible = !s.top_bar_visible;
     }
     sync_top_bar_visibility(state);
-    // Also reparent the dock/settings/+/window controls so they don't get
-    // stranded when the user hides the top bar via the keyboard shortcut.
-    apply_top_bar_mode(state);
     request_session_save(state);
 }
 
@@ -5963,8 +6337,8 @@ fn toggle_sidebar(state: &State) {
     let (sidebar_shell, sidebar_handle, current, is_visible, target_width, prior_animation, epoch) = {
         let mut s = state.borrow_mut();
         let current = sidebar_width(&s.sidebar_shell);
-        let is_visible = current > 10; // treat < 10px as collapsed
-        if is_visible {
+        let is_visible = sidebar_target_is_visible(&s);
+        if is_visible && s.sidebar_animation.is_none() {
             s.sidebar_expanded_width = current;
         }
         let target_width = s.sidebar_expanded_width.max(SIDEBAR_WIDTH);
@@ -6015,14 +6389,16 @@ fn toggle_sidebar(state: &State) {
             if is_current {
                 set_sidebar_state_widgets(&sidebar_shell, &sidebar_handle, 0, false);
                 apply_top_bar_mode(&state_for_done);
+                sync_sidebar_toggle(&state_for_done);
                 request_session_save(&state_for_done);
             }
         });
         state.borrow_mut().sidebar_animation = Some(animation.clone());
+        sync_sidebar_toggle(state);
         animation.play();
     } else {
-        // Expand: make sidebar visible, then animate position from 0 to remembered width.
-        set_sidebar_state_widgets(&sidebar_shell, &sidebar_handle, 0, true);
+        // Expand from the current position to the remembered width.
+        set_sidebar_state_widgets(&sidebar_shell, &sidebar_handle, current, true);
         apply_top_bar_mode(state);
         let target = adw::CallbackAnimationTarget::new({
             let sidebar_shell = sidebar_shell.clone();
@@ -6032,7 +6408,7 @@ fn toggle_sidebar(state: &State) {
         });
         let animation = adw::TimedAnimation::builder()
             .widget(&sidebar_shell)
-            .value_from(0.0)
+            .value_from(current as f64)
             .value_to(target_width as f64)
             .duration(200)
             .easing(adw::Easing::EaseInOutCubic)
@@ -6050,10 +6426,12 @@ fn toggle_sidebar(state: &State) {
                 }
             };
             if is_current {
+                sync_sidebar_toggle(&state_for_done);
                 request_session_save(&state_for_done);
             }
         });
         state.borrow_mut().sidebar_animation = Some(animation.clone());
+        sync_sidebar_toggle(state);
         animation.play();
     }
 }
@@ -6065,8 +6443,10 @@ fn toggle_sidebar(state: &State) {
 struct SplitPaneOptions {
     initial_state: Option<PaneState>,
     skip_default_tab: bool,
+    inherit_active_directory: bool,
     new_pane_first: bool,
     persist: bool,
+    suppress_initial_autostart: bool,
 }
 
 fn split_pane(
@@ -6076,21 +6456,18 @@ fn split_pane(
     orientation: gtk::Orientation,
     options: SplitPaneOptions,
 ) -> Option<gtk::Widget> {
-    let (shortcuts, wd, container) = {
+    let (shortcuts, wd, autostart_command, container) = {
         let s = state.borrow();
+        let workspace = s.workspaces.iter().find(|w| w.id == ws_id);
         (
             s.shortcuts.clone(),
-            s.workspaces
-                .iter()
-                .find(|w| w.id == ws_id)
-                .and_then(|ws| ws.folder_path.clone().or_else(|| ws.cwd.borrow().clone())),
-            s.workspaces
-                .iter()
-                .find(|w| w.id == ws_id)
-                .map(|ws| ws.split_container.clone()),
+            workspace.and_then(|ws| ws.folder_path.clone().or_else(|| ws.cwd.borrow().clone())),
+            workspace.map(|ws| ws.autostart_command.clone()),
+            workspace.map(|ws| ws.split_container.clone()),
         )
     };
     let container = container?;
+    let autostart_command = autostart_command?;
     if !container.can_split(pane_widget, orientation) {
         return None;
     }
@@ -6100,9 +6477,20 @@ fn split_pane(
         &shortcuts,
         ws_id,
         wd.as_deref(),
-        options.initial_state.as_ref(),
-        options.skip_default_tab,
+        autostart_command,
+        PaneCreationOptions {
+            initial_state: options.initial_state.as_ref(),
+            skip_default_tab: options.skip_default_tab || options.inherit_active_directory,
+            suppress_initial_autostart: options.suppress_initial_autostart,
+        },
     );
+    if options.inherit_active_directory {
+        let directory = pane::active_tab_working_directory(pane_widget).or(wd);
+        pane::add_terminal_tab_to_pane_in_directory(
+            &new_pane.clone().upcast(),
+            directory.as_deref(),
+        );
+    }
 
     // Mutate the data model and trigger async widget tree rebuild.
     // The existing pane's GLArea will be unrealized then re-realized
@@ -6117,18 +6505,36 @@ fn split_pane(
         return None;
     }
 
-    // Split may have changed which pane is the workspace's leading one.
-    {
-        let state = state.clone();
-        glib::idle_add_local_once(move || {
-            apply_top_bar_mode(&state);
-        });
-    }
-
     if options.persist {
         request_session_save(state);
     }
     Some(new_pane.upcast())
+}
+
+fn open_url_in_browser_tab(state: &State, ws_id: &str, pane_widget: &gtk::Widget, url: &str) {
+    let right_pane = pane_in_direction(state, pane_widget, Direction::Right);
+    crate::browser_link::open_in_right_pane(
+        pane_widget,
+        right_pane.as_ref(),
+        || {
+            split_pane(
+                state,
+                ws_id,
+                pane_widget,
+                gtk::Orientation::Horizontal,
+                SplitPaneOptions {
+                    initial_state: Some(PaneState::browser_only(Some(url))),
+                    skip_default_tab: false,
+                    inherit_active_directory: false,
+                    new_pane_first: false,
+                    persist: true,
+                    suppress_initial_autostart: false,
+                },
+            )
+            .is_some()
+        },
+        |target| pane::add_browser_tab_to_pane_with_uri(target, Some(url)),
+    );
 }
 
 fn remove_pane(state: &State, ws_id: &str, pane_widget: &gtk::Widget) {
@@ -6187,17 +6593,6 @@ fn remove_pane_internal(state: &State, ws_id: &str, pane_widget: &gtk::Widget, p
     pane::retire_pane(pane_widget);
     sync_workspace_unread(state, ws_id);
 
-    // After the pane is removed, the workspace's leading pane may be a
-    // different widget — reapply so the dock toggle (when top bar is off and
-    // sidebar closed) lands on the new leading pane. Run on idle so the
-    // split-tree rebuild has finished allocating the new widgets.
-    {
-        let state = state.clone();
-        glib::idle_add_local_once(move || {
-            apply_top_bar_mode(&state);
-        });
-    }
-
     if persist {
         request_session_save(state);
     }
@@ -6223,8 +6618,10 @@ fn handle_split_with_tab(
         SplitPaneOptions {
             initial_state: None,
             skip_default_tab: true,
+            inherit_active_directory: false,
             new_pane_first,
             persist: false,
+            suppress_initial_autostart: false,
         },
     );
     let Some(new_pane) = new_pane else { return };
@@ -6304,8 +6701,8 @@ fn show_runtime_error(state: &State, title: &str, detail: &str) {
 }
 
 fn quit_app(state: &State) {
-    save_session_now(state);
-    state.borrow().app.quit();
+    let window = state.borrow().window.clone();
+    window.close();
 }
 
 fn spawn_new_instance(state: &State) -> bool {
@@ -6427,8 +6824,10 @@ fn dispatch_browser_command(state: &State, command: ShortcutCommand) -> bool {
             SplitPaneOptions {
                 initial_state: Some(PaneState::browser_only(uri.as_deref())),
                 skip_default_tab: false,
+                inherit_active_directory: false,
                 new_pane_first: false,
                 persist: true,
+                suppress_initial_autostart: false,
             },
         )
         .is_some();
@@ -6464,8 +6863,10 @@ fn split_focused_pane(state: &State, orientation: gtk::Orientation) {
             SplitPaneOptions {
                 initial_state: None,
                 skip_default_tab: false,
+                inherit_active_directory: true,
                 new_pane_first: false,
                 persist: true,
+                suppress_initial_autostart: false,
             },
         );
     }
@@ -6571,6 +6972,20 @@ fn focus_pane_in_direction(state: &State, direction: Direction) {
         Some(v) => v,
         None => return,
     };
+
+    let Some(leaf) = pane_in_direction(state, &pane_widget, direction) else {
+        return;
+    };
+    if let Some(gl) = find_gl_area(&leaf) {
+        gl.grab_focus();
+    }
+}
+
+fn pane_in_direction(
+    state: &State,
+    pane_widget: &gtk::Widget,
+    direction: Direction,
+) -> Option<gtk::Widget> {
     let root = state.borrow().window.clone().upcast::<gtk::Widget>();
 
     // Determine which axis and sides we care about.
@@ -6585,10 +7000,7 @@ fn focus_pane_in_direction(state: &State, direction: Direction) {
     // orientation where the current subtree is on the correct side.
     let mut current: gtk::Widget = pane_widget.clone();
     loop {
-        let parent = match current.parent() {
-            Some(p) => p,
-            None => return, // reached the top without finding a valid split
-        };
+        let parent = current.parent()?;
         if let Some(paned) = parent.downcast_ref::<gtk::Paned>() {
             if paned.orientation() == target_orientation {
                 let is_start = paned.start_child().map(|c| c == current).unwrap_or(false);
@@ -6600,20 +7012,15 @@ fn focus_pane_in_direction(state: &State, direction: Direction) {
                         paned.start_child()
                     };
                     if let Some(sibling) = sibling {
-                        let leaf =
-                            best_directional_leaf_pane(&pane_widget, &sibling, &root, direction)
+                        return Some(
+                            best_directional_leaf_pane(pane_widget, &sibling, &root, direction)
                                 .unwrap_or_else(|| {
-                                    // Fall back to the old edge-based heuristic if bounds
-                                    // are unavailable for some reason.
                                     let prefer_start = !must_be_start;
                                     find_leaf_pane(&sibling, target_orientation, prefer_start)
-                                });
-                        // Find the GLArea inside the pane and focus it directly
-                        if let Some(gl) = find_gl_area(&leaf) {
-                            gl.grab_focus();
-                        }
+                                }),
+                        );
                     }
-                    return;
+                    return None;
                 }
             }
         }
@@ -7142,6 +7549,25 @@ mod tests {
     use super::gtk::ffi;
     use super::gtk::gdk;
     use super::ToVariant;
+
+    #[test]
+    fn top_bar_visibility_respects_both_preferences_and_fullscreen() {
+        for (configured, toggled, fullscreen, expected) in [
+            (false, false, false, false),
+            (false, false, true, false),
+            (false, true, false, false),
+            (false, true, true, false),
+            (true, false, false, false),
+            (true, false, true, false),
+            (true, true, false, true),
+            (true, true, true, false),
+        ] {
+            assert_eq!(
+                super::top_bar_should_be_visible(configured, toggled, fullscreen),
+                expected
+            );
+        }
+    }
     use super::{
         browser_command_requires_existing_target, build_window_css,
         clamp_workspace_insert_index_for_pinning, commit_inline_rename_for_click,
@@ -7150,17 +7576,18 @@ mod tests {
         desktop_notification_closed_id_from_signal, desktop_notification_id_from_response,
         directional_neighbor_score, favorites_prefix_len, find_leaf_pane, font_size_after_delta,
         ghostty_prefers_dark, gtk_system_prefers_dark_from_raw, has_unread,
-        keep_workspace_open_after_empty_pane, next_active_workspace_index,
-        pane_create_split_placement, queue_session_save_request, resolve_pane_create_source_id,
-        resolved_system_prefers_dark, sanitize_background_opacity,
+        initial_workspace_state, keep_workspace_open_after_empty_pane, next_active_workspace_index,
+        normalize_autostart_command, pane_create_split_placement, queue_session_save_request,
+        resolve_pane_create_source_id, resolved_system_prefers_dark, sanitize_background_opacity,
         shortcut_allowed_while_browser_find_active, shortcut_blocked_by_editable,
         shortcut_command_from_key_event, shortcut_dispatch_propagation,
         should_emit_desktop_notification, tab_drag_workspace_seed, use_opaque_window_background,
-        validate_workspace_folder_input_with_dirs, workspace_drop_layout_path,
-        workspace_folder_path_from_input, workspace_notification_message, workspace_path_visible,
-        Direction, EditableCaptureContext, NeighborScore, PaneBounds, PaneCreateDirection,
-        PaneCreateTargetError, PortalColorSchemePreference, SessionSaveAccess, SessionSaveRequest,
-        WorkspaceSeedSource, BASE_CSS, HOST_ENTRY_CSS_CLASS, WORKSPACE_RENAME_ENTRY_CSS_CLASS,
+        validate_workspace_folder_input_with_dirs, workspace_autostart_dialog_dismisses,
+        workspace_drop_layout_path, workspace_folder_path_from_input,
+        workspace_notification_message, workspace_path_visible, Direction, EditableCaptureContext,
+        NeighborScore, PaneBounds, PaneCreateDirection, PaneCreateTargetError,
+        PortalColorSchemePreference, SessionSaveAccess, SessionSaveRequest, WorkspaceSeedSource,
+        BASE_CSS, HOST_ENTRY_CSS_CLASS, WORKSPACE_RENAME_ENTRY_CSS_CLASS,
         WORKSPACE_RENAME_ENTRY_CSS_CLASSES,
     };
     use crate::layout_state::{LayoutNodeState, PaneState, SplitOrientation, SplitState};
@@ -7191,6 +7618,21 @@ mod tests {
     fn favorites_prefix_len_counts_only_leading_favorites() {
         let flags = [true, true, false, true, false];
         assert_eq!(favorites_prefix_len(&flags), 2);
+    }
+
+    #[test]
+    fn workspace_autostart_normalizes_command_and_empty_input() {
+        assert_eq!(
+            normalize_autostart_command("  ssh user@server  ").as_deref(),
+            Some("ssh user@server")
+        );
+        assert_eq!(normalize_autostart_command("  \t "), None);
+    }
+
+    #[test]
+    fn workspace_autostart_dialog_dismisses_only_escape() {
+        assert!(workspace_autostart_dialog_dismisses(gdk::Key::Escape));
+        assert!(!workspace_autostart_dialog_dismisses(gdk::Key::Return));
     }
 
     #[test]
@@ -8089,6 +8531,22 @@ mod tests {
             workspace_folder_path_from_input("relative", Some(home), Some(current)).unwrap(),
             std::path::PathBuf::from("/tmp/current/relative")
         );
+    }
+
+    #[test]
+    fn initial_workspace_uses_home_with_a_terminal_fallback() {
+        let workspace = initial_workspace_state(
+            Some(std::path::Path::new("/home/tester")),
+            Some(std::path::Path::new("/tmp/current")),
+        );
+
+        assert_eq!(workspace.name, "tester");
+        assert_eq!(workspace.cwd.as_deref(), Some("/home/tester"));
+        assert_eq!(workspace.folder_path.as_deref(), Some("/home/tester"));
+        let LayoutNodeState::Pane(pane) = workspace.layout else {
+            panic!("initial workspace must contain a terminal pane");
+        };
+        assert_eq!(pane.tabs.len(), 1);
     }
 
     #[test]

@@ -15,6 +15,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 mod agent_hooks;
+mod agent_team_file;
 
 const CLI_STATE_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const CLI_STATE_LOCK_RETRY: Duration = Duration::from_millis(25);
@@ -389,6 +390,21 @@ fn parse_opt(args: &[String], name: &str) -> Option<String> {
             None
         }
     })
+}
+
+fn parse_terminal_surface(args: &[String]) -> Result<Option<String>> {
+    let Some(surface) = parse_opt(args, "--surface") else {
+        if parse_flag(args, "--surface") {
+            bail!("--surface requires a non-empty target");
+        }
+        return Ok(None);
+    };
+    let normalized = surface.trim();
+    let normalized = normalized.strip_prefix("surface:").unwrap_or(normalized);
+    if normalized.trim().is_empty() {
+        bail!("--surface requires a non-empty target");
+    }
+    Ok(Some(surface))
 }
 
 fn parse_flag(args: &[String], name: &str) -> bool {
@@ -804,7 +820,7 @@ async fn run_send(client: &mut Client, args: &[String]) -> Result<Value> {
     let workspace = parse_opt(args, "--workspace")
         .or_else(|| env::var("LIMUX_WORKSPACE_ID").ok())
         .filter(|s| !s.is_empty());
-    let surface = parse_opt(args, "--surface").filter(|s| !s.is_empty());
+    let surface = parse_terminal_surface(args)?;
 
     let text = trailing_title(args).ok_or_else(|| anyhow!("send requires text"))?;
 
@@ -827,7 +843,7 @@ async fn run_send_key(client: &mut Client, args: &[String]) -> Result<Value> {
     let workspace = parse_opt(args, "--workspace")
         .or_else(|| env::var("LIMUX_WORKSPACE_ID").ok())
         .filter(|s| !s.is_empty());
-    let surface = parse_opt(args, "--surface").filter(|s| !s.is_empty());
+    let surface = parse_terminal_surface(args)?;
     let key = trailing_title(args).ok_or_else(|| anyhow!("send-key requires key"))?;
 
     let mut params = Map::new();
@@ -1179,30 +1195,27 @@ fn persist_agent_hook_session(
         return Ok(());
     };
 
-    let existing = store.lookup(&session_id)?;
-    let cwd = hook_str(payload, &["cwd", "working_directory", "directory"])
-        .map(str::to_string)
-        .or_else(|| existing.as_ref().and_then(|record| record.cwd.clone()));
-    let pid = hook_str(payload, &["pid"])
-        .and_then(|value| value.parse::<u32>().ok())
-        .or_else(|| agent_ancestor_pid(agent))
-        .or_else(|| existing.as_ref().and_then(|record| record.pid));
-    let launch_command = agent_hooks::launch_record_from_env(agent, cwd.as_deref()).or_else(|| {
-        existing
-            .as_ref()
-            .and_then(|record| record.launch_command.clone())
-    });
+    let result = store.update(&session_id, |existing| {
+        let cwd = hook_str(payload, &["cwd", "working_directory", "directory"])
+            .map(str::to_string)
+            .or_else(|| existing.and_then(|record| record.cwd.clone()));
+        let pid = hook_str(payload, &["pid"])
+            .and_then(|value| value.parse::<u32>().ok())
+            .or_else(|| agent_ancestor_pid(agent))
+            .or_else(|| existing.and_then(|record| record.pid));
+        let launch_command = agent_hooks::launch_record_from_env(agent, cwd.as_deref())
+            .or_else(|| existing.and_then(|record| record.launch_command.clone()));
 
-    let record = agent_hooks::AgentHookSessionRecord {
-        session_id,
-        workspace_id,
-        surface_id,
-        cwd,
-        pid,
-        launch_command,
-        updated_at: agent_hooks::now_seconds(),
-    };
-    let result = store.upsert(record);
+        agent_hooks::AgentHookSessionRecord {
+            session_id: session_id.clone(),
+            workspace_id,
+            surface_id,
+            cwd,
+            pid,
+            launch_command,
+            updated_at: agent_hooks::now_seconds(),
+        }
+    });
     if result.is_ok() {
         write_agent_hook_debug(
             agent,
@@ -2018,7 +2031,7 @@ async fn run_agent_team(client: &mut Client, args: &[String]) -> Result<Value> {
         bail!("agent-team: --agents is empty");
     }
 
-    let cwd = parse_opt(args, "--cwd")
+    let requested_cwd = parse_opt(args, "--cwd")
         .or_else(|| {
             env::current_dir()
                 .ok()
@@ -2030,6 +2043,16 @@ async fn run_agent_team(client: &mut Client, args: &[String]) -> Result<Value> {
     // the agents manually) — still splits the panes + writes AGENTS.md.
     let no_launch = args.iter().any(|a| a == "--no-launch");
     let dry_run = args.iter().any(|a| a == "--dry-run");
+    let cwd = if dry_run {
+        std::path::absolute(&requested_cwd)
+    } else {
+        fs::canonicalize(&requested_cwd)
+    }
+    .context("agent-team: could not resolve cwd")?;
+    if !dry_run && !cwd.is_dir() {
+        bail!("agent-team: cwd must be a directory");
+    }
+    let cwd = cwd.to_string_lossy().into_owned();
 
     // Resolve the agent list up front so --dry-run can build a deterministic
     // peer table without touching the host.
@@ -2070,12 +2093,6 @@ async fn run_agent_team(client: &mut Client, args: &[String]) -> Result<Value> {
             "<dry-run-workspace>",
             "<dry-run-orchestrator>",
         );
-        if let Err(err) = std::fs::write(&agents_md_path, body) {
-            eprintln!(
-                "agent-team: failed to write {}: {err}",
-                agents_md_path.display()
-            );
-        }
         return Ok(json!({
             "ok": true,
             "cwd": cwd,
@@ -2083,6 +2100,7 @@ async fn run_agent_team(client: &mut Client, args: &[String]) -> Result<Value> {
             "workspace_id": Value::Null,
             "orchestrator_surface_id": Value::Null,
             "agents_md": agents_md_path.to_string_lossy(),
+            "agents_md_preview": body,
             "dry_run": true,
             "no_launch": no_launch,
             "peers": peers
@@ -2098,6 +2116,9 @@ async fn run_agent_team(client: &mut Client, args: &[String]) -> Result<Value> {
                 .collect::<Vec<_>>(),
         }));
     }
+
+    // Reject existing instructions and check the destination before creating panes.
+    let instructions = agent_team_file::PendingInstructions::new(&agents_md_path)?;
 
     // 1. Resolve the orchestrator's workspace + pane. Prefer LIMUX_* env (set
     //    in every limux-spawned terminal) and fall back to the host's active
@@ -2190,9 +2211,10 @@ async fn run_agent_team(client: &mut Client, args: &[String]) -> Result<Value> {
             Value::String(direction.to_string()),
         );
         params.insert("type".to_string(), Value::String("terminal".to_string()));
-        if !no_launch {
-            params.insert("command".to_string(), Value::String(launch.clone()));
-        }
+        params.insert(
+            "command".to_string(),
+            Value::String(instructions.pane_command((!no_launch).then_some(launch.as_str()))),
+        );
 
         let created = client
             .call("pane.create", Value::Object(params))
@@ -2208,7 +2230,8 @@ async fn run_agent_team(client: &mut Client, args: &[String]) -> Result<Value> {
         peers.push((name.to_string(), pane_id, surface_id, launch.clone()));
     }
 
-    // 5. Write AGENTS.md into the shared cwd, clobbering any existing file.
+    // 5. Publish all peer IDs before releasing the gated startup commands.
+    // Dropping the stage on any earlier error prevents every agent from launching.
     let body = build_agents_md(
         &peers,
         &cwd,
@@ -2216,12 +2239,7 @@ async fn run_agent_team(client: &mut Client, args: &[String]) -> Result<Value> {
         &workspace_id,
         &orchestrator_surface,
     );
-    if let Err(err) = std::fs::write(&agents_md_path, body) {
-        eprintln!(
-            "agent-team: failed to write {}: {err}",
-            agents_md_path.display()
-        );
-    }
+    instructions.publish(&body)?;
 
     Ok(json!({
         "ok": true,
@@ -2373,7 +2391,7 @@ fn build_agents_md(
     out.push_str("---\n");
     out.push_str(
         "_Generated by `limux agent-team`. Safe to edit the Policies\n\
-         section; regenerating will overwrite everything above it._\n",
+         section; keep or move this file before creating another team._\n",
     );
 
     out
@@ -2518,7 +2536,7 @@ async fn run_read_screen(client: &mut Client, args: &[String]) -> Result<Value> 
     }
 
     let workspace = parse_opt(args, "--workspace");
-    let surface = parse_opt(args, "--surface");
+    let surface = parse_terminal_surface(args)?;
     let mut params = Map::new();
     if let Some(workspace) = workspace {
         params.insert("workspace_id".to_string(), Value::String(workspace));
@@ -3776,6 +3794,42 @@ mod cli_arg_tests {
         }
     }
 
+    #[tokio::test]
+    async fn terminal_commands_reject_empty_explicit_surface_before_connecting() {
+        for command in ["send", "send-key", "read-screen"] {
+            for target in ["", "   ", "surface:", " surface:   "] {
+                let mut client = Client::new(PathBuf::from("/does/not/exist.sock"));
+                let mut command_args = args(&[command, "--surface", target]);
+                if command == "send" {
+                    command_args.push("must not be sent".into());
+                }
+                if command == "send-key" {
+                    command_args.push("Enter".into());
+                }
+                let error = execute_command(&mut client, &default_opts(command_args))
+                    .await
+                    .expect_err("invalid target must fail locally");
+                assert_eq!(
+                    error.to_string(),
+                    "--surface requires a non-empty target",
+                    "{command} {target:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_surface_option_preserves_omission_and_valid_handles() {
+        assert_eq!(parse_terminal_surface(&args(&["payload"])).unwrap(), None);
+        assert!(parse_terminal_surface(&args(&["--surface"])).is_err());
+        for target in ["tab-id", "4:tab-id", "surface:4:tab-id"] {
+            assert_eq!(
+                parse_terminal_surface(&args(&["--surface", target])).unwrap(),
+                Some(target.to_string())
+            );
+        }
+    }
+
     #[test]
     fn host_binary_candidates_cover_installed_and_dev_layouts() {
         let installed = Path::new("/usr/bin/limux");
@@ -4032,6 +4086,62 @@ mod cli_arg_tests {
 #[cfg(test)]
 mod agent_team_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn dry_run_previews_instructions_without_creating_or_overwriting_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        let args = vec![
+            "--dry-run".to_string(),
+            "--cwd".to_string(),
+            dir.path().to_string_lossy().into_owned(),
+        ];
+        let mut client = Client::new(dir.path().join("absent.sock"));
+        let preview = run_agent_team(&mut client, &args).await.unwrap();
+        assert!(preview["agents_md_preview"]
+            .as_str()
+            .unwrap()
+            .contains("<agent-msg"));
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+
+        let original = "# Existing project instructions\nNever discard these.\n";
+        fs::write(&path, original).unwrap();
+        run_agent_team(&mut client, &args).await.unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn existing_instructions_fail_before_contacting_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        fs::write(&path, "User policies").unwrap();
+        let args = vec![
+            "--cwd".to_string(),
+            dir.path().to_string_lossy().into_owned(),
+        ];
+        let mut client = Client::new(dir.path().join("absent.sock"));
+        let error = run_agent_team(&mut client, &args).await.unwrap_err();
+        assert!(error.to_string().contains("refusing to replace"));
+        assert_eq!(client.seq, 0);
+        assert_eq!(fs::read_to_string(path).unwrap(), "User policies");
+    }
+
+    #[tokio::test]
+    async fn invalid_destination_fails_before_contacting_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = vec![
+            "--cwd".to_string(),
+            dir.path()
+                .join("missing-directory")
+                .to_string_lossy()
+                .into_owned(),
+        ];
+        let mut client = Client::new(dir.path().join("absent.sock"));
+        let error = run_agent_team(&mut client, &args).await.unwrap_err();
+        assert!(error.to_string().contains("could not resolve cwd"));
+        assert_eq!(client.seq, 0);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
 
     #[test]
     fn agent_launch_known() {

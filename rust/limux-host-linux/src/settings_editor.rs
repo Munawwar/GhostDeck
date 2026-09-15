@@ -6,7 +6,8 @@ use gtk4 as gtk;
 use libadwaita as adw;
 
 use crate::app_config::{
-    AppConfig, ColorScheme, NotificationSound, UiScale, WindowControlsSide, DEFAULT_UI_SCALE,
+    AppConfig, ColorScheme, LinkOpenDestination, NotificationSound, UiScale, WindowControlsSide,
+    DEFAULT_UI_SCALE,
 };
 use crate::keybind_editor;
 use crate::shortcut_config::{NormalizedShortcut, ResolvedShortcutConfig, ShortcutId};
@@ -319,6 +320,29 @@ fn build_general_page(input: &SettingsEditorInput) -> gtk::Widget {
     auto_copy_row.set_activatable_widget(Some(&auto_copy_switch));
     group.add(&auto_copy_row);
 
+    let link_destination_row = adw::ActionRow::builder()
+        .title("Open links in")
+        .subtitle("Choose whether terminal links open outside Limux or in a browser tab")
+        .build();
+    link_destination_row.set_title_lines(1);
+    link_destination_row.set_subtitle_lines(2);
+    let link_destination_dropdown =
+        gtk::DropDown::from_strings(&["Default browser", "Browser tab"]);
+    link_destination_dropdown.set_selected(
+        input
+            .config
+            .borrow()
+            .links
+            .open_destination
+            .effective(cfg!(feature = "webkit"))
+            .dropdown_index(),
+    );
+    link_destination_dropdown.set_sensitive(cfg!(feature = "webkit"));
+    link_destination_dropdown.set_valign(gtk::Align::Center);
+    link_destination_row.add_suffix(&link_destination_dropdown);
+    link_destination_row.set_activatable_widget(Some(&link_destination_dropdown));
+    group.add(&link_destination_row);
+
     let scale_row = adw::ActionRow::builder()
         .title("Interface scale")
         .subtitle("Scale Limux sidebar, pane header, and settings text")
@@ -353,7 +377,7 @@ fn build_general_page(input: &SettingsEditorInput) -> gtk::Widget {
 
     let top_bar_row = adw::ActionRow::builder()
         .title("Top bar")
-        .subtitle("Show a top bar with workspace indicators. When off, the dock toggle, settings, new workspace, and window controls move into the sidebar header (or the leading pane when the sidebar is collapsed).")
+        .subtitle("Show a top bar with workspace indicators. When off, the controls move into the sidebar header. If the sidebar is also hidden, its toggle remains on the leading pane.")
         .build();
     top_bar_row.set_title_lines(1);
     top_bar_row.set_subtitle_lines(4);
@@ -478,11 +502,47 @@ fn build_general_page(input: &SettingsEditorInput) -> gtk::Widget {
     {
         let config = input.config.clone();
         let on_changed = input.on_config_changed.clone();
+        let syncing = Rc::new(Cell::new(false));
         top_bar_switch.connect_active_notify(move |switch| {
+            if syncing.get() {
+                return;
+            }
             let show_top_bar = switch.is_active();
-            apply_config_change(&config, &*on_changed, move |c| {
+            if show_top_bar == config.borrow().interface.show_top_bar {
+                return;
+            }
+            let effective = apply_config_change(&config, &*on_changed, move |c| {
                 c.interface.show_top_bar = show_top_bar;
-            });
+            })
+            .interface
+            .show_top_bar;
+            if switch.is_active() != effective {
+                syncing.set(true);
+                switch.set_active(effective);
+                syncing.set(false);
+            }
+        });
+    }
+    {
+        let config = input.config.clone();
+        let on_changed = input.on_config_changed.clone();
+        let syncing = Rc::new(Cell::new(false));
+        link_destination_dropdown.connect_selected_notify(move |dropdown| {
+            if syncing.get() {
+                return;
+            }
+            let destination = LinkOpenDestination::from_dropdown_index(dropdown.selected());
+            let effective = apply_config_change(&config, &*on_changed, move |c| {
+                c.links.open_destination = destination;
+            })
+            .links
+            .open_destination
+            .dropdown_index();
+            if dropdown.selected() != effective {
+                syncing.set(true);
+                dropdown.set_selected(effective);
+                syncing.set(false);
+            }
         });
     }
     {
@@ -515,24 +575,56 @@ fn build_general_page(input: &SettingsEditorInput) -> gtk::Widget {
     {
         let config = input.config.clone();
         let on_changed = input.on_config_changed.clone();
+        let syncing = Rc::new(Cell::new(false));
         indicators_switch.connect_active_notify(move |switch| {
+            if syncing.get() {
+                return;
+            }
             let show_workspace_indicators = switch.is_active();
-            apply_config_change(&config, &*on_changed, move |c| {
+            if show_workspace_indicators == config.borrow().interface.show_workspace_indicators {
+                return;
+            }
+            let effective = apply_config_change(&config, &*on_changed, move |c| {
                 c.interface.show_workspace_indicators = show_workspace_indicators;
-            });
+            })
+            .interface
+            .show_workspace_indicators;
+            if switch.is_active() != effective {
+                syncing.set(true);
+                switch.set_active(effective);
+                syncing.set(false);
+            }
         });
     }
     {
         let config = input.config.clone();
         let on_changed = input.on_config_changed.clone();
+        let syncing = Rc::new(Cell::new(false));
         controls_dropdown.connect_selected_notify(move |dropdown| {
+            if syncing.get() {
+                return;
+            }
             let side = match dropdown.selected() {
                 0 => WindowControlsSide::Left,
                 _ => WindowControlsSide::Right,
             };
-            apply_config_change(&config, &*on_changed, move |c| {
+            if side == config.borrow().interface.window_controls_side {
+                return;
+            }
+            let effective = apply_config_change(&config, &*on_changed, move |c| {
                 c.interface.window_controls_side = side;
-            });
+            })
+            .interface
+            .window_controls_side;
+            let selected = match effective {
+                WindowControlsSide::Left => 0,
+                WindowControlsSide::Right => 1,
+            };
+            if dropdown.selected() != selected {
+                syncing.set(true);
+                dropdown.set_selected(selected);
+                syncing.set(false);
+            }
         });
     }
 
@@ -624,6 +716,59 @@ fn build_notifications_page(input: &SettingsEditorInput) -> gtk::Widget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires GTK; exercised by xvfb-smoke-test.sh"]
+    fn interface_controls_restore_effective_values_after_save_failure() {
+        fn find_control(widget: &gtk::Widget, title: &str) -> Option<gtk::Widget> {
+            if let Some(row) = widget.downcast_ref::<adw::ActionRow>() {
+                if row.title() == title {
+                    return row.activatable_widget();
+                }
+            }
+            let mut child = widget.first_child();
+            while let Some(widget) = child {
+                if let Some(control) = find_control(&widget, title) {
+                    return Some(control);
+                }
+                child = widget.next_sibling();
+            }
+            None
+        }
+
+        adw::init().expect("initialize GTK");
+        let config = Rc::new(RefCell::new(AppConfig::default()));
+        let rejected_changes = Rc::new(Cell::new(0));
+        let page = build_general_page(&SettingsEditorInput {
+            config: config.clone(),
+            shortcuts: Rc::new(crate::shortcut_config::default_shortcuts()),
+            on_capture: Rc::new(|_, _| Ok(crate::shortcut_config::default_shortcuts())),
+            on_config_changed: Rc::new({
+                let config = config.clone();
+                let rejected_changes = rejected_changes.clone();
+                move |previous, _| {
+                    rejected_changes.set(rejected_changes.get() + 1);
+                    config.borrow_mut().clone_from(previous);
+                }
+            }),
+        });
+        for title in ["Top bar", "Workspace indicators on the top bar"] {
+            let switch = find_control(&page, title)
+                .expect("settings control")
+                .downcast::<gtk::Switch>()
+                .expect("switch");
+            switch.set_active(false);
+            assert!(switch.is_active(), "{title} retained a rejected setting");
+        }
+        let dropdown = find_control(&page, "Window controls side")
+            .expect("settings control")
+            .downcast::<gtk::DropDown>()
+            .expect("dropdown");
+        dropdown.set_selected(0);
+        assert_eq!(dropdown.selected(), 1);
+        assert_eq!(config.borrow().interface, Default::default());
+        assert_eq!(rejected_changes.get(), 3, "rollback must not save again");
+    }
 
     #[test]
     fn apply_config_change_returns_reentrant_config_state() {
