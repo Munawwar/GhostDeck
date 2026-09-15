@@ -1817,8 +1817,12 @@ pub fn create_terminal(
 
             if had_focus.get() {
                 let gl_for_focus = gl_for_resize.clone();
+                let had_focus = had_focus.clone();
                 glib::idle_add_local_once(move || {
-                    gl_for_focus.grab_focus();
+                    // Another pane may have received focus while layout completed.
+                    if had_focus.get() {
+                        gl_for_focus.grab_focus();
+                    }
                 });
             }
         });

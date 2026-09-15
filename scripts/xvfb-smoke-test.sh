@@ -690,8 +690,121 @@ if "$LIMUX_CLI" send-key --workspace "$OTHER_WORKSPACE" --surface "$BACKGROUND_S
   echo "FAIL: explicit surface from another workspace was accepted"
   exit 1
 fi
-"$LIMUX_CLI" close-workspace --workspace "$OTHER_WORKSPACE" >"$LOG_DIR/stage6b-other-close.txt"
 echo "stage 6b: OK (text, Enter, and screen read share the focused target)"
+
+echo
+echo "== stage 6c: surface lifecycle, exact focus, and persistence =="
+wait_for_surface_focus() {
+  local surface="$1" stable=0
+  for _ in $(seq 1 60); do
+    "$LIMUX_CLI" --json --id-format both list-panels --workspace limux >"$LOG_DIR/stage6c-focus.json"
+    if jq -e --arg surface "$surface" '.surfaces | any(.surface_id == $surface and .focused)' \
+        "$LOG_DIR/stage6c-focus.json" >/dev/null; then
+      stable=$((stable + 1))
+      [ "$stable" -ge 3 ] && return 0
+    else
+      stable=0
+    fi
+    sleep 0.1
+  done
+  echo "FAIL: focus did not stay on requested surface $surface"
+  return 1
+}
+
+wait_for_saved_tab() {
+  local surface="$1" predicate="$2" tab="${1#*:}"
+  for _ in $(seq 1 60); do
+    if jq -e --arg tab "$tab" "$predicate" "$XDG_DATA_HOME/limux/session.json" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "FAIL: session did not persist requested state for $surface"
+  return 1
+}
+
+# Each route must select a background workspace and retain its non-first pane.
+for operation in pane surface tab; do
+  "$LIMUX_CLI" select-workspace --workspace "$OTHER_WORKSPACE" >"$LOG_DIR/stage6c-background-$operation.txt"
+  case "$operation" in
+    pane)
+      request="$(jq -nc --arg ws "$WORKSPACE_ID" --argjson pane "$RESPONSE_PANE" \
+        '{method:"pane.focus",params:{workspace_id:$ws,pane_id:$pane}}')"
+      "$LIMUX_CLI" --request "$request" >"$LOG_DIR/stage6c-pane-focus.json" ;;
+    surface)
+      "$LIMUX_CLI" focus-surface --workspace limux --surface "$RESPONSE_SURFACE" >"$LOG_DIR/stage6c-surface-focus.txt" ;;
+    tab)
+      "$LIMUX_CLI" tab-action --workspace limux --tab "$RESPONSE_SURFACE" --action focus >"$LOG_DIR/stage6c-tab-focus.txt" ;;
+  esac
+  wait_for_surface_focus "$RESPONSE_SURFACE"
+done
+
+# Invalid explicit targets must not close, focus, or create anything elsewhere.
+for request in \
+    '{"method":"surface.close","params":{"workspace_id":"limux","surface_id":[]}}' \
+    "$(jq -nc --arg ws "$OTHER_WORKSPACE" --arg surface "$RESPONSE_SURFACE" \
+      '{method:"surface.close",params:{workspace_id:$ws,surface_id:$surface}}')" \
+    "$(jq -nc --arg ws "$OTHER_WORKSPACE" --argjson pane "$RESPONSE_PANE" \
+      '{method:"surface.create",params:{workspace_id:$ws,pane_id:$pane}}')" \
+    "$(jq -nc --arg ws "$OTHER_WORKSPACE" --argjson pane "$RESPONSE_PANE" \
+      '{method:"pane.focus",params:{workspace_id:$ws,pane_id:$pane}}')"; do
+  if "$LIMUX_CLI" --request "$request" >>"$LOG_DIR/stage6c-invalid.txt" 2>&1; then
+    echo "FAIL: lifecycle operation accepted an invalid or foreign explicit target"
+    exit 1
+  fi
+done
+wait_for_surface_focus "$RESPONSE_SURFACE"
+
+# An untargeted new tab belongs in the focused split, not the first pane.
+"$LIMUX_CLI" --json --id-format both new-surface --workspace limux >"$LOG_DIR/stage6c-new.json"
+LIFECYCLE_SURFACE="$(jq -r '.surface_id' "$LOG_DIR/stage6c-new.json")"
+[[ "$LIFECYCLE_SURFACE" == "$RESPONSE_PANE:"* ]] \
+  || { echo "FAIL: new-surface did not use the focused pane"; exit 1; }
+wait_for_healthy_surfaces limux "$LOG_DIR/stage6c-health.json"
+wait_for_surface_focus "$LIFECYCLE_SURFACE"
+SAVED_SELECTION='[.. | objects | select(.active_tab_id? == $tab)] | length == 1'
+wait_for_saved_tab "$LIFECYCLE_SURFACE" "$SAVED_SELECTION"
+"$LIMUX_CLI" focus-surface --workspace limux --surface "$RESPONSE_SURFACE" >"$LOG_DIR/stage6c-select-original.txt"
+wait_for_saved_tab "$RESPONSE_SURFACE" "$SAVED_SELECTION"
+"$LIMUX_CLI" tab-action --workspace limux --tab "$LIFECYCLE_SURFACE" --action select >"$LOG_DIR/stage6c-select-new.txt"
+wait_for_saved_tab "$LIFECYCLE_SURFACE" "$SAVED_SELECTION"
+"$LIMUX_CLI" tab-action --workspace limux --tab "$RESPONSE_SURFACE" --action activate >"$LOG_DIR/stage6c-activate-original.txt"
+wait_for_saved_tab "$RESPONSE_SURFACE" "$SAVED_SELECTION"
+"$LIMUX_CLI" focus-surface --workspace limux --surface "$LIFECYCLE_SURFACE" >"$LOG_DIR/stage6c-focus-new.txt"
+wait_for_surface_focus "$LIFECYCLE_SURFACE"
+
+# Explicit workspace scope must not inherit an unrelated caller tab from the environment.
+LIMUX_TAB_ID=foreign-tab "$LIMUX_CLI" rename-tab --workspace limux lifecycle-renamed >"$LOG_DIR/stage6c-rename.txt"
+wait_for_saved_tab "$LIFECYCLE_SURFACE" '[.. | objects | select(.id? == $tab and .custom_name? == "lifecycle-renamed")] | length == 1'
+LIMUX_TAB_ID=foreign-tab "$LIMUX_CLI" --json --id-format both tab-action --workspace limux --action pin >"$LOG_DIR/stage6c-pin.json"
+PINNED_TAB_REF="$(jq -r '.tab_ref' "$LOG_DIR/stage6c-pin.json")"
+jq -e --arg surface "$LIFECYCLE_SURFACE" --arg tab "${LIFECYCLE_SURFACE#*:}" \
+  '.surface_id == $surface and .tab_id == $tab and .tab_ref == ("tab:" + $tab)' \
+  "$LOG_DIR/stage6c-pin.json" >/dev/null \
+  || { echo "FAIL: tab-action returned an incorrect implicit-target handle"; exit 1; }
+wait_for_saved_tab "$LIFECYCLE_SURFACE" '[.. | objects | select(.id? == $tab and .pinned? == true)] | length == 1'
+if "$LIMUX_CLI" close-surface --workspace limux --surface "$LIFECYCLE_SURFACE" >"$LOG_DIR/stage6c-pinned-close.txt" 2>&1; then
+  echo "FAIL: close-surface closed a pinned tab"
+  exit 1
+fi
+"$LIMUX_CLI" tab-action --workspace limux --tab "$PINNED_TAB_REF" --action unpin >"$LOG_DIR/stage6c-unpin.txt"
+"$LIMUX_CLI" tab-action --workspace limux --tab "$LIFECYCLE_SURFACE" --action rename --title '' >"$LOG_DIR/stage6c-clear-title.txt"
+wait_for_saved_tab "$LIFECYCLE_SURFACE" '[.. | objects | select(.id? == $tab and .pinned? == false and .custom_name? == null)] | length == 1'
+"$LIMUX_CLI" --json --id-format both list-panels --workspace limux >"$LOG_DIR/stage6c-renamed-panels.json"
+jq -e --arg surface "$LIFECYCLE_SURFACE" '.surfaces | any(.surface_id == $surface and .title != "lifecycle-renamed" and .title != "")' \
+  "$LOG_DIR/stage6c-renamed-panels.json" >/dev/null \
+  || { echo "FAIL: clearing the custom name left a stale label"; exit 1; }
+"$LIMUX_CLI" close-surface --workspace limux --surface "$LIFECYCLE_SURFACE" >"$LOG_DIR/stage6c-close.txt"
+
+# about:blank may never emit a later navigation callback. Creation must save it.
+"$LIMUX_CLI" --json --id-format both new-surface --workspace limux --pane "$RESPONSE_PANE" \
+  --type browser --url about:blank >"$LOG_DIR/stage6c-browser.json"
+BROWSER_SURFACE="$(jq -r '.surface_id' "$LOG_DIR/stage6c-browser.json")"
+wait_for_saved_tab "$BROWSER_SURFACE" '[.. | objects | select(.id? == $tab and .tab_kind? == "browser" and .uri? == "about:blank")] | length == 1'
+"$LIMUX_CLI" close-surface --workspace limux --surface "$BROWSER_SURFACE" >"$LOG_DIR/stage6c-browser-close.txt"
+"$LIMUX_CLI" close-workspace --workspace "$OTHER_WORKSPACE" >"$LOG_DIR/stage6c-other-close.txt"
+wait_for_healthy_surfaces limux "$LOG_DIR/stage6c-final-health.json"
+echo "stage 6c: OK (scoped lifecycle, background focus, pins, and saved tab selection)"
 
 # --- 10. Stage 7: hook translators end-to-end -----------------------------
 echo

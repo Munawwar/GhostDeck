@@ -175,6 +175,8 @@ fn lookup_pane_internals(id: u32) -> Option<Rc<PaneInternals>> {
     PANE_REGISTRY.with(|registry| registry.borrow().get(&id)?.upgrade())
 }
 
+/// Global lookup for GUI operations such as moving panes between workspaces.
+/// Workspace-scoped control commands must use [`pane_widget_for_root`].
 pub fn find_pane_widget_by_id(pane_id: u32) -> Option<gtk::Widget> {
     lookup_pane_internals(pane_id).map(|internals| internals.pane_outer.clone().upcast())
 }
@@ -826,6 +828,44 @@ pub fn activate_tab_in_pane(pane_widget: &gtk::Widget, tab_id: &str) -> bool {
     true
 }
 
+/// Set a custom title, or clear it when the title is empty.
+pub fn rename_tab_in_pane(pane_widget: &gtk::Widget, tab_id: &str, title: &str) -> bool {
+    let Some(internals) = find_pane_internals(pane_widget) else {
+        return false;
+    };
+
+    let mut tab_state = internals.tab_state.borrow_mut();
+    let Some(entry) = tab_state.tabs.iter_mut().find(|entry| entry.id == tab_id) else {
+        return false;
+    };
+
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        entry.custom_name = None;
+        entry.title_label.set_text(entry.kind.default_title());
+    } else {
+        entry.custom_name = Some(trimmed.to_string());
+        entry.title_label.set_text(trimmed);
+    }
+    true
+}
+
+/// Pin or unpin a tab. Pinned tabs refuse to close (see `close_tab_in_pane`).
+pub fn set_tab_pinned_in_pane(pane_widget: &gtk::Widget, tab_id: &str, pinned: bool) -> bool {
+    let Some(internals) = find_pane_internals(pane_widget) else {
+        return false;
+    };
+
+    let mut tab_state = internals.tab_state.borrow_mut();
+    let Some(entry) = tab_state.tabs.iter_mut().find(|entry| entry.id == tab_id) else {
+        return false;
+    };
+
+    entry.pinned = pinned;
+    apply_pin_visuals(&entry.tab_button, pinned);
+    true
+}
+
 fn set_tab_unread(entry: &mut TabEntry, unread: bool) -> bool {
     if entry.unread == unread {
         return false;
@@ -932,6 +972,17 @@ enum TabKind {
     Terminal { state: TerminalTabState },
     Browser { state: BrowserTabState },
     Keybinds,
+}
+
+impl TabKind {
+    /// The label a tab of this kind carries before anything overrides it.
+    fn default_title(&self) -> &'static str {
+        match self {
+            Self::Terminal { .. } => "Terminal",
+            Self::Browser { .. } => "Browser",
+            Self::Keybinds => "Keybinds",
+        }
+    }
 }
 
 enum TabFocusTarget {
@@ -2178,6 +2229,13 @@ pub(crate) fn pane_widget_for_root(root: &gtk::Widget, pane_id: u32) -> Option<g
         .into_iter()
         .find(|internals| internals.pane_id == pane_id)
         .map(|internals| internals.pane_outer.clone().upcast())
+}
+
+/// Includes panes temporarily detached from the visible tree by zoom.
+pub(crate) fn pane_widget_for_workspace(workspace_id: &str, pane_id: u32) -> Option<gtk::Widget> {
+    let internals = lookup_pane_internals(pane_id)?;
+    (internals.callbacks.workspace_id == workspace_id)
+        .then(|| internals.pane_outer.clone().upcast())
 }
 
 pub fn surface_summaries_for_root(root: &gtk::Widget) -> Vec<SurfaceSummary> {
