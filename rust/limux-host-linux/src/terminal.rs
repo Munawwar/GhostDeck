@@ -2292,6 +2292,11 @@ fn build_submenu_button(label: &str, popover: &gtk::Popover) -> gtk::MenuButton 
     button.set_halign(gtk::Align::Fill);
     button.set_popover(Some(popover));
     button.add_css_class("flat");
+    // Hover opens this submenu, so it must never take a GTK grab: an autohide
+    // popover swallows the next click to dismiss itself, which turns every
+    // item below the submenu into a two-click item. The parent menu closes it
+    // on `closed`, and sibling items close it on hover.
+    popover.set_autohide(false);
 
     let weak_button = button.downgrade();
     let motion = gtk::EventControllerMotion::new();
@@ -2424,6 +2429,14 @@ fn show_terminal_context_menu(
         if let Some(lbl) = btn.child().and_then(|c| c.downcast::<gtk::Label>().ok()) {
             lbl.set_xalign(0.0);
         }
+        let motion = gtk::EventControllerMotion::new();
+        let ids_pop = ids_popover.clone();
+        let open_in_pop = open_in_popover.clone();
+        motion.connect_enter(move |_, _, _| {
+            ids_pop.popdown();
+            open_in_pop.popdown();
+        });
+        btn.add_controller(motion);
         menu_box.append(&btn);
     }
 
@@ -2878,6 +2891,22 @@ mod tests {
         unsafe { std::ffi::CStr::from_ptr(value.cast()) }
             .to_string_lossy()
             .into_owned()
+    }
+
+    #[test]
+    #[ignore = "requires a graphical display"]
+    fn submenu_popovers_never_grab() {
+        gtk::init().expect("GTK display required");
+        let popover = gtk::Popover::new();
+        assert!(
+            popover.is_autohide(),
+            "GTK still defaults submenus to a grab"
+        );
+        let button = build_submenu_button("IDs", &popover);
+        // A grabbing submenu spends the next click dismissing itself, which
+        // makes every context-menu item below it need two clicks.
+        assert!(!popover.is_autohide());
+        assert_eq!(button.popover().as_ref(), Some(&popover));
     }
 
     #[test]
