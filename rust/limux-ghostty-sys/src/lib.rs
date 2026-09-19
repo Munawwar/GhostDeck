@@ -557,6 +557,7 @@ extern "C" {
     pub fn ghostty_surface_draw(surface: ghostty_surface_t);
     pub fn ghostty_surface_set_content_scale(surface: ghostty_surface_t, x: f64, y: f64);
     pub fn ghostty_surface_set_focus(surface: ghostty_surface_t, focused: bool);
+    pub fn ghostty_surface_set_occlusion(surface: ghostty_surface_t, visible: bool);
     pub fn ghostty_surface_set_size(surface: ghostty_surface_t, width: u32, height: u32);
     pub fn ghostty_surface_size(surface: ghostty_surface_t) -> ghostty_surface_size_s;
     pub fn ghostty_surface_process_exited(surface: ghostty_surface_t) -> bool;
