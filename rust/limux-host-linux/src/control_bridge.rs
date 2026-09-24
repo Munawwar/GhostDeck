@@ -367,6 +367,22 @@ fn optional_ref_handle(
     })
 }
 
+fn optional_surface_handle(
+    params: &Map<String, Value>,
+    keys: &[&str],
+) -> Result<Option<String>, BridgeError> {
+    for key in keys {
+        if params.get(*key).is_none_or(Value::is_null) {
+            continue;
+        }
+        return optional_ref_handle(params, &[*key], "surface:")?
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| Some(value.trim().to_string()))
+            .ok_or_else(|| BridgeError::invalid_params(format!("{key} must not be empty")));
+    }
+    Ok(None)
+}
+
 fn optional_index(params: &Map<String, Value>, key: &str) -> Result<Option<usize>, BridgeError> {
     let Some(value) = params.get(key) else {
         return Ok(None);
@@ -685,8 +701,7 @@ fn handle_method(
                 Ok(target) => target,
                 Err(error) => return error_response(id, error),
             };
-            let surface_hint = match optional_ref_handle(params, &["surface_id", "id"], "surface:")
-            {
+            let surface_hint = match optional_surface_handle(params, &["surface_id", "id"]) {
                 Ok(surface_hint) => surface_hint,
                 Err(error) => return error_response(id, error),
             };
@@ -705,8 +720,7 @@ fn handle_method(
                 Ok(target) => target,
                 Err(error) => return error_response(id, error),
             };
-            let surface_hint = match optional_ref_handle(params, &["surface_id", "id"], "surface:")
-            {
+            let surface_hint = match optional_surface_handle(params, &["surface_id", "id"]) {
                 Ok(surface_hint) => surface_hint,
                 Err(error) => return error_response(id, error),
             };
@@ -782,11 +796,15 @@ fn handle_method(
                 Ok(target) => target,
                 Err(error) => return error_response(id, error),
             };
+            let surface_hint = match optional_surface_handle(params, &["surface_id"]) {
+                Ok(surface_hint) => surface_hint,
+                Err(error) => return error_response(id, error),
+            };
             let (reply, rx) = mpsc::channel();
             (
                 ControlCommand::SendText {
                     target,
-                    surface_hint: optional_string(params, &["surface_id"]),
+                    surface_hint,
                     text,
                     reply,
                 },
@@ -804,11 +822,15 @@ fn handle_method(
                 Ok(target) => target,
                 Err(error) => return error_response(id, error),
             };
+            let surface_hint = match optional_surface_handle(params, &["surface_id"]) {
+                Ok(surface_hint) => surface_hint,
+                Err(error) => return error_response(id, error),
+            };
             let (reply, rx) = mpsc::channel();
             (
                 ControlCommand::SendKey {
                     target,
-                    surface_hint: optional_string(params, &["surface_id"]),
+                    surface_hint,
                     key,
                     reply,
                 },
