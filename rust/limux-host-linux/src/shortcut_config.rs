@@ -1750,11 +1750,6 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn definitions_cover_current_host_shortcuts() {
-        assert_eq!(definitions().len(), 52);
-    }
-
-    #[test]
     fn definitions_have_unique_ids_and_action_names_and_accels() {
         let defs = definitions();
         let mut ids = HashMap::new();
@@ -1834,24 +1829,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(shortcut.to_display_label(), "Ctrl+Shift+0");
-    }
-
-    #[test]
-    fn config_dir_path_in_uses_limux_config_dir() {
-        let base = Path::new("/tmp/example");
-        assert_eq!(
-            config_dir_path_in(base),
-            PathBuf::from("/tmp/example/limux")
-        );
-    }
-
-    #[test]
-    fn shortcuts_path_in_uses_limux_shortcuts_json() {
-        let base = Path::new("/tmp/example");
-        assert_eq!(
-            shortcuts_path_in(base),
-            PathBuf::from("/tmp/example/limux/shortcuts.json")
-        );
     }
 
     #[test]

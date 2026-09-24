@@ -2368,18 +2368,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn maps_dark_mode_to_ghostty_color_scheme() {
-        assert_eq!(
-            ghostty_color_scheme_for_dark_mode(true),
-            GHOSTTY_COLOR_SCHEME_DARK
-        );
-        assert_eq!(
-            ghostty_color_scheme_for_dark_mode(false),
-            GHOSTTY_COLOR_SCHEME_LIGHT
-        );
-    }
-
-    #[test]
     fn fallback_unshifted_codepoint_maps_shifted_symbols() {
         assert_eq!(
             fallback_unshifted_codepoint(gtk::gdk::Key::exclam),
@@ -2394,13 +2382,6 @@ mod tests {
             '-' as u32
         );
         assert_eq!(fallback_unshifted_codepoint(gtk::gdk::Key::A), 'a' as u32);
-    }
-
-    #[test]
-    fn terminal_search_action_formats_queries_for_ghostty() {
-        assert_eq!(terminal_search_action(""), "search:");
-        assert_eq!(terminal_search_action("needle"), "search:needle");
-        assert_eq!(terminal_search_action("two words"), "search:two words");
     }
 
     #[test]

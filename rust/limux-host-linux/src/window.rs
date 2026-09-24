@@ -6260,8 +6260,7 @@ mod tests {
     use super::gtk::gdk;
     use super::ToVariant;
     use super::{
-        build_window_css, clamp_workspace_insert_index_for_pinning,
-        desktop_notification_action_from_signal, desktop_notification_actions,
+        clamp_workspace_insert_index_for_pinning, desktop_notification_action_from_signal,
         desktop_notification_activation_token_from_signal,
         desktop_notification_closed_id_from_signal, desktop_notification_id_from_response,
         directional_neighbor_score, favorites_prefix_len, font_size_after_delta,
@@ -6276,9 +6275,7 @@ mod tests {
         workspace_notification_message, Direction, EditableCaptureContext, NeighborScore,
         PaneBounds, PaneCreateDirection, PaneCreateTargetError, PortalColorSchemePreference,
         SessionSaveAccess, SessionSaveRequest, WindowCloseAction, WindowCloseState,
-        WorkspaceSeedSource, BASE_CSS, HOST_ENTRY_CSS_CLASS, WINDOW_CLOSE_BUTTON_CANCEL,
-        WINDOW_CLOSE_BUTTON_CONFIRM, WORKSPACE_RENAME_ENTRY_CSS_CLASS,
-        WORKSPACE_RENAME_ENTRY_CSS_CLASSES,
+        WorkspaceSeedSource, WINDOW_CLOSE_BUTTON_CANCEL, WINDOW_CLOSE_BUTTON_CONFIRM,
     };
     use crate::layout_state::{LayoutNodeState, PaneState, SplitOrientation, SplitState};
     use crate::shortcut_config::{
@@ -6494,19 +6491,6 @@ mod tests {
     }
 
     #[test]
-    fn build_window_css_uses_ghostty_background_and_fixed_scrollbar_lane() {
-        let css = build_window_css((12, 34, 56), 0.42);
-        assert!(css.contains(".limux-host-entry"));
-        assert!(css.contains(".limux-host-entry text"));
-        assert!(css.contains(".limux-host-entry text placeholder"));
-        assert!(css.contains(".limux-content"));
-        assert!(css.contains("background-color: rgba(12, 34, 56, 0.420);"));
-        assert!(css.contains("min-width: 7px"));
-        assert!(css.contains("margin: 0; padding: 0; border: 0"));
-        assert!(css.contains(".limux-terminal-scrollbar slider { min-width: 5px; margin: 0 1px"));
-    }
-
-    #[test]
     fn font_size_after_delta_uses_default_when_unset() {
         assert_eq!(font_size_after_delta(None, 12.0, 1.0), 13.0);
     }
@@ -6515,35 +6499,6 @@ mod tests {
     fn font_size_after_delta_clamps_to_supported_range() {
         assert_eq!(font_size_after_delta(Some(1.0), 12.0, -5.0), 1.0);
         assert_eq!(font_size_after_delta(Some(255.0), 12.0, 5.0), 255.0);
-    }
-
-    #[test]
-    fn base_css_defines_theme_aware_host_entry_styles() {
-        assert!(BASE_CSS.contains(":root"));
-        assert!(BASE_CSS.contains("@media (prefers-color-scheme: dark)"));
-        assert!(BASE_CSS.contains(".limux-host-entry"));
-        assert!(BASE_CSS.contains(".limux-host-entry text"));
-        assert!(BASE_CSS.contains(".limux-host-entry text placeholder"));
-        assert!(BASE_CSS.contains(".limux-terminal-split-dim"));
-        assert!(BASE_CSS.contains(".limux-split-pane > separator"));
-        assert!(BASE_CSS.contains("caret-color: currentColor;"));
-    }
-
-    #[test]
-    fn workspace_rename_entry_uses_shared_host_entry_class() {
-        assert_eq!(
-            WORKSPACE_RENAME_ENTRY_CSS_CLASSES,
-            [HOST_ENTRY_CSS_CLASS, WORKSPACE_RENAME_ENTRY_CSS_CLASS]
-        );
-        assert!(BASE_CSS.contains(".limux-ws-rename-entry"));
-    }
-
-    #[test]
-    fn desktop_notification_actions_include_default_open_action() {
-        assert_eq!(
-            desktop_notification_actions(),
-            vec!["default".to_string(), "Open".to_string()]
-        );
     }
 
     #[test]

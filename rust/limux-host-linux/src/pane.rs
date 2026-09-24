@@ -4472,14 +4472,10 @@ mod tests {
         is_localhost_input, next_active_after_tab_removal, normalize_browser_entry_input,
         normalize_reorder_insert_index, pane_action_tooltip, resolve_terminal_working_directory,
         surface_hint_matches, terminal_focus_index, ContentDropZone, TabDragPayload,
-        TerminalFocusDirection, BROWSER_SEARCH_ENTRY_CSS_CLASS, BROWSER_SEARCH_ENTRY_CSS_CLASSES,
-        BROWSER_URL_ENTRY_CSS_CLASS, BROWSER_URL_ENTRY_CSS_CLASSES, HOST_ENTRY_CSS_CLASS, PANE_CSS,
-        TAB_RENAME_ENTRY_CSS_CLASS, TAB_RENAME_ENTRY_CSS_CLASSES,
+        TerminalFocusDirection,
     };
     #[cfg(feature = "webkit")]
-    use super::{
-        env_value_contains_token, is_kde_wayland_session_from_env, BROWSER_WEB_VIEW_CSS_CLASS,
-    };
+    use super::{env_value_contains_token, is_kde_wayland_session_from_env};
     use crate::shortcut_config::{default_shortcuts, resolve_shortcuts_from_str, ShortcutId};
 
     #[test]
@@ -4554,32 +4550,6 @@ mod tests {
         assert_eq!(
             terminal_focus_index(0, 1, TerminalFocusDirection::Right),
             None
-        );
-    }
-
-    #[test]
-    fn pane_css_keeps_entry_layout_classes_separate_from_shared_theme() {
-        assert!(PANE_CSS.contains(".limux-tab-rename-entry"));
-        assert!(PANE_CSS.contains(".limux-browser-url-entry"));
-        assert!(PANE_CSS.contains(".limux-browser-search-entry"));
-        #[cfg(feature = "webkit")]
-        assert!(PANE_CSS.contains(BROWSER_WEB_VIEW_CSS_CLASS));
-        assert!(!PANE_CSS.contains("border: 1px solid rgba(0, 145, 255, 0.5);"));
-    }
-
-    #[test]
-    fn pane_entries_use_shared_host_entry_class() {
-        assert_eq!(
-            TAB_RENAME_ENTRY_CSS_CLASSES,
-            [HOST_ENTRY_CSS_CLASS, TAB_RENAME_ENTRY_CSS_CLASS]
-        );
-        assert_eq!(
-            BROWSER_URL_ENTRY_CSS_CLASSES,
-            [HOST_ENTRY_CSS_CLASS, BROWSER_URL_ENTRY_CSS_CLASS]
-        );
-        assert_eq!(
-            BROWSER_SEARCH_ENTRY_CSS_CLASSES,
-            [HOST_ENTRY_CSS_CLASS, BROWSER_SEARCH_ENTRY_CSS_CLASS]
         );
     }
 

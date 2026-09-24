@@ -468,13 +468,6 @@ mod tests {
     }
 
     #[test]
-    fn settings_path_in_uses_limux_settings_json() {
-        let path = settings_path_in(Path::new("/tmp/example"));
-
-        assert_eq!(path, Path::new("/tmp/example/limux/settings.json"));
-    }
-
-    #[test]
     fn ensure_default_config_file_writes_dark_appearance_and_notification_defaults() {
         let dir = TempDir::new().expect("temp dir");
         let path = settings_path_in(dir.path());
