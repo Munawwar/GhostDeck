@@ -18,6 +18,7 @@ mod agent_hooks;
 
 const CLI_STATE_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const CLI_STATE_LOCK_RETRY: Duration = Duration::from_millis(25);
+const LIMUX_A2A_SKILL: &str = include_str!("../../../skills/limux-a2a/SKILL.md");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IdFormat {
@@ -201,6 +202,10 @@ fn print_help() {
     println!(
         "limux CLI\n\nUsage: limux [--socket <path>] [--json] [--id-format refs|both|uuids] <command> [args...]\n       limux\n\nRunning `limux` with no arguments launches the GTK app.\n\nCommon commands:\n  identify [--workspace <id|ref>] [--surface <id|ref>]\n  list-panels [--workspace <id|ref>]\n  list-panes [--workspace <id|ref>]\n  list-workspaces\n  surface-health [--workspace <id|ref>]\n  send [--workspace <id|ref>] [--surface <id|ref>] <text>\n  send-key [--workspace <id|ref>] [--surface <id|ref>] <key>\n  new-workspace [--cwd <path>] [--command <text>]\n  close-workspace --workspace <id|ref>\n  sidebar-state --workspace <id|ref>\n  new-surface [--workspace <id|ref>]\n  new-pane [--workspace <id|ref>] [--pane <id|ref>] [--surface <id|ref>] [--direction <left|right|up|down>] [--type <terminal|browser>] [--command <text>] [--url <url>]\n      Live GTK self-spawn currently supports terminal panes only; browser panes remain deferred.\n  rename-workspace [--workspace <id|ref>] <title>\n  rename-window [--workspace <id|ref>] <title>\n  rename-tab [--workspace <id|ref>] [--tab <id|ref>] <title>\n  read-screen [--workspace <id|ref>] [--surface <id|ref>] [--scrollback] [--lines <n>]\n  capture-pane (alias of read-screen)\n  tab-action --action <name> [--workspace <id|ref>] [--tab <id|ref>] [--title <text>] [--url <url>]\n  browser [--surface <id|ref>|<surface>] <subcommand> ...\n\nAgent integrations:\n  notify [--workspace <id|ref>] [--subtitle <text>] [--body <text>] <title>\n  hooks setup [agent] | hooks uninstall [agent] | hooks <agent> <event>\n  claude-hook | opencode-hook | gemini-hook --event <name> [--subtitle <text>] [--body <text>] [--title <text>]\n  agent-team [--agents codex,claude[,opencode,gemini]] [--cwd <path>] [--no-launch] [--dry-run]\n      Splits the active workspace into one pane per agent (caller's pane stays\n      as the orchestrator on the left, peers stack down the right), launches\n      each CLI in its pane, and writes AGENTS.md describing the <agent-msg>\n      XML protocol so peers can talk via\n      `limux send --surface <peer-surface-id> <envelope>`.\n"
     );
+    println!(
+        "  add-surface [-- <command> [args...]]\n      Adds up to 3 terminal surfaces to the caller's tab using Limux's fixed layout."
+    );
+    println!("  skill setup [codex] | skill uninstall [codex]");
 }
 
 fn should_launch_host(opts: &GlobalOptions) -> bool {
@@ -1505,6 +1510,51 @@ fn uninstall_hook_target(agent: agent_hooks::AgentKind) -> Result<()> {
     }
 }
 
+fn run_skill_command(args: &[String], json_output: bool) -> Result<CommandOutput> {
+    let Some(action) = args.first().map(String::as_str) else {
+        bail!("Usage: limux skill setup [codex]|uninstall [codex]");
+    };
+    if args.get(1).is_some_and(|agent| agent != "codex") || args.len() > 2 {
+        bail!("Limux currently supports installing its skill for Codex only");
+    }
+    let path = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".agents/skills/limux-a2a/SKILL.md");
+    let installed = match action {
+        "setup" | "install" => {
+            fs::create_dir_all(path.parent().expect("skill path has a parent")).with_context(
+                || format!("failed to create skill directory for {}", path.display()),
+            )?;
+            fs::write(&path, LIMUX_A2A_SKILL)
+                .with_context(|| format!("failed to install {}", path.display()))?;
+            true
+        }
+        "uninstall" => {
+            if fs::read_to_string(&path).ok().as_deref() == Some(LIMUX_A2A_SKILL) {
+                fs::remove_file(&path)
+                    .with_context(|| format!("failed to remove {}", path.display()))?;
+            }
+            false
+        }
+        _ => bail!("Usage: limux skill setup [codex]|uninstall [codex]"),
+    };
+    let action = if installed {
+        "installed"
+    } else {
+        "uninstalled"
+    };
+    if json_output {
+        Ok(CommandOutput::Json(
+            json!({"action": action, "skills": ["codex"]}),
+        ))
+    } else {
+        Ok(CommandOutput::Text(format!(
+            "OK {action} skill: codex ({})",
+            path.display()
+        )))
+    }
+}
+
 fn install_json_hooks(
     path: &Path,
     agent: agent_hooks::AgentKind,
@@ -2290,6 +2340,20 @@ fn build_agents_md(
          from inside the agent's own terminal.\n\n",
     );
 
+    out.push_str("## Adding a visible process surface\n\n");
+    out.push_str(
+        "Add a terminal surface to your own tab when a process should remain\n\
+         visible to the human:\n\n",
+    );
+    out.push_str("```bash\n");
+    out.push_str("limux add-surface -- npm run dev\n");
+    out.push_str("```\n\n");
+    out.push_str(
+        "Limux keeps your agent surface on the left and stacks up to three\n\
+         added surfaces on the right. The command accepts no direction or\n\
+         target flags and uses your inherited workspace, tab, and surface IDs.\n\n",
+    );
+
     out.push_str("## Splitting your own pane\n\n");
     out.push_str("If you need a scratch terminal next to you, split your own pane:\n\n");
     out.push_str("```bash\n");
@@ -2382,6 +2446,41 @@ async fn run_sidebar_state(client: &mut Client, args: &[String]) -> Result<Value
 async fn run_new_surface(client: &mut Client, args: &[String]) -> Result<Value> {
     let workspace = parse_opt(args, "--workspace");
     call_in_workspace_scope(client, workspace, "surface.create", json!({})).await
+}
+
+async fn run_add_surface(client: &mut Client, args: &[String]) -> Result<Value> {
+    if args == ["--help"] {
+        return Ok(json!({
+            "help": "Usage: limux add-surface [-- <command> [args...]]\nAdds a terminal surface to the calling agent's tab. Limux places up to three added surfaces in a fixed vertical stack to the right of the caller."
+        }));
+    }
+    let argv = match args {
+        [] => Vec::new(),
+        [separator, argv @ ..] if separator == "--" => argv.to_vec(),
+        _ => bail!(
+            "add-surface accepts no placement options; use `limux add-surface -- <command> [args...]`"
+        ),
+    };
+    let workspace_id = nonempty(env::var("LIMUX_WORKSPACE_ID").ok()).ok_or_else(|| {
+        anyhow!("add-surface must run inside a Limux terminal with LIMUX_WORKSPACE_ID")
+    })?;
+    let tab_id = nonempty(env::var("LIMUX_TAB_ID").ok())
+        .ok_or_else(|| anyhow!("add-surface must run inside a Limux terminal with LIMUX_TAB_ID"))?;
+    let source_surface_id = nonempty(env::var("LIMUX_SURFACE_ID").ok()).ok_or_else(|| {
+        anyhow!("add-surface must run inside a Limux terminal with LIMUX_SURFACE_ID")
+    })?;
+
+    client
+        .call(
+            "surface.add",
+            json!({
+                "workspace_id": workspace_id,
+                "tab_id": tab_id,
+                "source_surface_id": source_surface_id,
+                "argv": argv,
+            }),
+        )
+        .await
 }
 
 fn env_opt(name: &str) -> Option<String> {
@@ -3440,6 +3539,7 @@ async fn execute_command(client: &mut Client, opts: &GlobalOptions) -> Result<Co
             }
         }
         "hooks" => return run_hooks_command(client, args, opts.json_output).await,
+        "skill" => return run_skill_command(args, opts.json_output),
         "new-workspace" => {
             let payload = run_new_workspace(client, args).await?;
             if opts.json_output {
@@ -3505,6 +3605,17 @@ async fn execute_command(client: &mut Client, opts: &GlobalOptions) -> Result<Co
             let payload = run_new_surface(client, args).await?;
             if opts.json_output {
                 CommandOutput::Json(payload)
+            } else {
+                let handle = handle_from_payload(&payload, "surface_id", "surface_ref");
+                CommandOutput::Text(format!("OK {}", handle))
+            }
+        }
+        "add-surface" => {
+            let payload = run_add_surface(client, args).await?;
+            if opts.json_output {
+                CommandOutput::Json(payload)
+            } else if let Some(help) = get_string(&payload, &["help"]) {
+                CommandOutput::Text(help)
             } else {
                 let handle = handle_from_payload(&payload, "surface_id", "surface_ref");
                 CommandOutput::Text(format!("OK {}", handle))

@@ -383,6 +383,16 @@ pub enum TerminalFocusDirection {
     Right,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AddSurfaceError {
+    PaneNotFound,
+    TabNotFound,
+    NotTerminal,
+    SourceNotFound,
+    UnsupportedLayout,
+    LimitReached,
+}
+
 impl TerminalTabState {
     fn from_tree(tree: TerminalSplitNode, active_leaf_id: Option<String>) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -1725,6 +1735,137 @@ pub fn split_active_terminal_tab_in_pane(
         &source_leaf,
         orientation,
     )
+}
+
+pub fn add_surface_to_terminal_tab(
+    pane_widget: &gtk::Widget,
+    tab_id: &str,
+    source_surface_id: &str,
+) -> Result<SurfaceSummary, AddSurfaceError> {
+    let internals = find_pane_internals(pane_widget).ok_or(AddSurfaceError::PaneNotFound)?;
+    let (terminal_tab_state, title_label) = {
+        let tab_state = internals.tab_state.borrow();
+        let entry = tab_state
+            .tabs
+            .iter()
+            .find(|entry| entry.id == tab_id)
+            .ok_or(AddSurfaceError::TabNotFound)?;
+        let TabKind::Terminal { state } = &entry.kind else {
+            return Err(AddSurfaceError::NotTerminal);
+        };
+        (state.clone(), entry.title_label.clone())
+    };
+    let requested = normalize_surface_hint(source_surface_id);
+    let source_leaf = {
+        let tree = terminal_tab_state.inner.tree.borrow();
+        let mut matched = None;
+        tree.for_each_leaf(|leaf| {
+            let current_id = terminal_surface_id(internals.pane_id, tab_id, &leaf.leaf_id);
+            if requested == current_id || requested == leaf.surface_id {
+                matched = Some(leaf.clone());
+            }
+        });
+        matched.ok_or(AddSurfaceError::SourceNotFound)?
+    };
+    let leaf_count = terminal_tab_state.leaf_count();
+    if leaf_count >= 4 {
+        return Err(AddSurfaceError::LimitReached);
+    }
+
+    {
+        let tree = terminal_tab_state.inner.tree.borrow();
+        let valid = match (&*tree, leaf_count) {
+            (TerminalSplitNode::Leaf(leaf), 1) => leaf.leaf_id == source_leaf.leaf_id,
+            (
+                TerminalSplitNode::Split {
+                    orientation,
+                    start,
+                    end,
+                    ..
+                },
+                2,
+            ) => {
+                *orientation == gtk::Orientation::Horizontal
+                    && matches!(start.as_ref(), TerminalSplitNode::Leaf(leaf) if leaf.leaf_id == source_leaf.leaf_id)
+                    && matches!(end.as_ref(), TerminalSplitNode::Leaf(_))
+            }
+            (
+                TerminalSplitNode::Split {
+                    orientation,
+                    start,
+                    end,
+                    ..
+                },
+                3,
+            ) => {
+                *orientation == gtk::Orientation::Horizontal
+                    && matches!(start.as_ref(), TerminalSplitNode::Leaf(leaf) if leaf.leaf_id == source_leaf.leaf_id)
+                    && matches!(end.as_ref(), TerminalSplitNode::Split { orientation, start, end, .. }
+                        if *orientation == gtk::Orientation::Vertical
+                            && matches!(start.as_ref(), TerminalSplitNode::Leaf(_))
+                            && matches!(end.as_ref(), TerminalSplitNode::Leaf(_)))
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err(AddSurfaceError::UnsupportedLayout);
+        }
+    }
+
+    let new_leaf = create_terminal_leaf(
+        &internals,
+        tab_id,
+        &next_leaf_id(),
+        source_leaf.cwd.borrow().as_deref(),
+        source_leaf.cwd.borrow().as_deref(),
+        None,
+    );
+    let new_surface_id = terminal_surface_id(internals.pane_id, tab_id, &new_leaf.leaf_id);
+    {
+        let mut tree = terminal_tab_state.inner.tree.borrow_mut();
+        if leaf_count == 1 {
+            *tree = TerminalSplitNode::Split {
+                orientation: gtk::Orientation::Horizontal,
+                ratio: Rc::new(RefCell::new(layout_state::DEFAULT_SPLIT_RATIO)),
+                start: Box::new(tree.clone()),
+                end: Box::new(TerminalSplitNode::Leaf(new_leaf.clone())),
+            };
+        } else if let TerminalSplitNode::Split { end, .. } = &mut *tree {
+            let mut column_leaves = Vec::with_capacity(leaf_count);
+            end.for_each_leaf(|leaf| column_leaves.push(leaf.clone()));
+            column_leaves.push(new_leaf.clone());
+            let mut column = TerminalSplitNode::Leaf(column_leaves.remove(0));
+            for (index, leaf) in column_leaves.into_iter().enumerate() {
+                let placed = index + 1;
+                column = TerminalSplitNode::Split {
+                    orientation: gtk::Orientation::Vertical,
+                    ratio: Rc::new(RefCell::new(placed as f64 / (placed + 1) as f64)),
+                    start: Box::new(column),
+                    end: Box::new(TerminalSplitNode::Leaf(leaf)),
+                };
+            }
+            **end = column;
+        }
+    }
+
+    *terminal_tab_state.inner.active_leaf_id.borrow_mut() = source_leaf.leaf_id;
+    terminal_tab_state.replace_callbacks(|leaf| {
+        make_terminal_callbacks(&internals, &terminal_tab_state, tab_id, &title_label, leaf)
+    });
+    terminal_tab_state.sync_split_dimming();
+    terminal_tab_state.trigger_rebuild(false);
+    (internals.callbacks.on_state_changed)();
+    let cwd = new_leaf.cwd.borrow().clone();
+
+    Ok(SurfaceSummary {
+        pane_id: internals.pane_id,
+        surface_id: new_surface_id,
+        title: title_label.label().to_string(),
+        kind: "terminal".to_string(),
+        selected: false,
+        cwd,
+        uri: None,
+    })
 }
 
 pub fn focus_active_terminal_in_pane(

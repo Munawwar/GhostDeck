@@ -125,6 +125,9 @@ limux notify --subtitle "needs review" --body "blocked on auth choice" "Input ne
 # Install Limux session-restore hooks for supported agents
 limux hooks setup
 
+# Install Limux's compact agent skill for Codex
+limux skill setup codex
+
 # Drop-in hook handlers translate hook JSON on stdin into notify/session state
 echo '{"event":"stop"}' | limux claude-hook --event stop
 echo '{"event":"finished"}' | limux gemini-hook --event finished
@@ -140,6 +143,11 @@ limux agent-team --agents codex,claude --cwd "$PWD"
 # Inside Limux, workspace/surface/pane default from LIMUX_*:
 limux new-pane --direction right --command claude
 # Live GTK self-spawn currently supports terminal panes only.
+
+# Add a visible process to the agent's current terminal tab. Limux owns the
+# layout: the agent starts on the left and up to three added surfaces stack on
+# the right. No direction or target flags are accepted.
+limux add-surface -- npm run dev
 
 # Explicit source targets are also accepted and serialized unchanged:
 limux new-pane --workspace "$LIMUX_WORKSPACE_ID" --surface "$LIMUX_SURFACE_ID" \

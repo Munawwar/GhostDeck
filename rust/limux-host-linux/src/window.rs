@@ -10,6 +10,7 @@ use gtk::glib;
 use gtk::glib::variant::ToVariant;
 use gtk4 as gtk;
 use libadwaita as adw;
+use shell_quote::Bash;
 
 use crate::app_config;
 use crate::control_bridge::{
@@ -188,7 +189,7 @@ fn pane_create_response_payload(
     })
 }
 
-fn send_pane_create_response_after_command(
+fn send_create_response_after_command(
     pane_widget: gtk::Widget,
     surface_id: String,
     command: String,
@@ -218,7 +219,7 @@ fn send_pane_create_response_after_command(
             if attempts >= PANE_CREATE_COMMAND_READY_ATTEMPTS {
                 if let Some(reply) = reply.take() {
                     let _ = reply.send(Err(BridgeError::internal(format!(
-                        "pane.create command target surface {surface_id} never became writable"
+                        "command target surface {surface_id} never became writable"
                     ))));
                 }
                 glib::ControlFlow::Break
@@ -4199,13 +4200,107 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 pane_create_response_payload(&resolved.workspace_id, &workspace_name, surface);
 
             if let Some(command) = request.command {
-                send_pane_create_response_after_command(
-                    new_pane, surface_id, command, response, reply,
-                );
+                send_create_response_after_command(new_pane, surface_id, command, response, reply);
                 return;
             }
 
             let _ = reply.send(Ok(response));
+        }
+        ControlCommand::AddSurface { request, reply } => {
+            let resolved = {
+                let app_state = state.borrow();
+                workspace_index_for_target(&app_state, &request.target)
+            };
+            let Some(index) = resolved else {
+                let _ = reply.send(Err(BridgeError::not_found("workspace not found")));
+                return;
+            };
+            let (workspace_id, workspace_name, pane_widget) = {
+                let app_state = state.borrow();
+                let workspace = &app_state.workspaces[index];
+                let pane_id = pane::surface_summaries_for_root(&workspace.root)
+                    .into_iter()
+                    .find(|surface| {
+                        surface.surface_id.split(':').nth(1) == Some(request.tab_id.as_str())
+                    })
+                    .map(|surface| surface.pane_id);
+                (
+                    workspace.id.clone(),
+                    workspace.name.clone(),
+                    pane_id
+                        .and_then(|pane_id| pane::pane_widget_for_root(&workspace.root, pane_id)),
+                )
+            };
+            let Some(pane_widget) = pane_widget else {
+                let _ = reply.send(Err(BridgeError::not_found("terminal tab not found")));
+                return;
+            };
+            let surface = match pane::add_surface_to_terminal_tab(
+                &pane_widget,
+                &request.tab_id,
+                &request.source_surface_id,
+            ) {
+                Ok(surface) => surface,
+                Err(pane::AddSurfaceError::PaneNotFound) => {
+                    let _ = reply.send(Err(BridgeError::not_found("pane not found")));
+                    return;
+                }
+                Err(pane::AddSurfaceError::TabNotFound) => {
+                    let _ = reply.send(Err(BridgeError::not_found("terminal tab not found")));
+                    return;
+                }
+                Err(pane::AddSurfaceError::NotTerminal) => {
+                    let _ = reply.send(Err(BridgeError::invalid_params(
+                        "surface.add requires a terminal tab",
+                    )));
+                    return;
+                }
+                Err(pane::AddSurfaceError::SourceNotFound) => {
+                    let _ = reply.send(Err(BridgeError::not_found(
+                        "source surface was not found in the caller tab",
+                    )));
+                    return;
+                }
+                Err(pane::AddSurfaceError::UnsupportedLayout) => {
+                    let _ = reply.send(Err(BridgeError::conflict(
+                        "surface.add requires the caller's fixed agent layout",
+                    )));
+                    return;
+                }
+                Err(pane::AddSurfaceError::LimitReached) => {
+                    let _ = reply.send(Err(BridgeError::conflict(
+                        "maximum of 3 additional surfaces reached",
+                    )));
+                    return;
+                }
+            };
+            let surface_id = surface.surface_id.clone();
+            let mut response =
+                pane_create_response_payload(&workspace_id, &workspace_name, surface);
+            if let Some(response) = response.as_object_mut() {
+                response.insert(
+                    "tab_id".to_string(),
+                    serde_json::Value::String(request.tab_id.clone()),
+                );
+                response.insert(
+                    "source_surface_id".to_string(),
+                    serde_json::Value::String(request.source_surface_id.clone()),
+                );
+            }
+            if request.argv.is_empty() {
+                let _ = reply.send(Ok(response));
+                return;
+            }
+            let command = request
+                .argv
+                .iter()
+                .map(|arg| {
+                    String::from_utf8(Bash::quote_vec(arg.as_bytes()))
+                        .expect("bash quoting should preserve UTF-8 arguments")
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            send_create_response_after_command(pane_widget, surface_id, command, response, reply);
         }
         ControlCommand::ListSurfaces { target, reply } => {
             let resolved = {
@@ -6577,8 +6672,8 @@ mod tests {
         assert_eq!(
             shortcut_command_from_key_event(
                 &shortcuts,
-                gdk::Key::Page_Down,
-                gdk::ModifierType::CONTROL_MASK
+                gdk::Key::Down,
+                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
             ),
             Some(ShortcutCommand::NextWorkspace)
         );

@@ -29,6 +29,7 @@ const METHODS: &[&str] = &[
     "pane.surfaces",
     "pane.create",
     "surface.list",
+    "surface.add",
     "surface.health",
     "surface.read_text",
     "surface.send_text",
@@ -97,6 +98,14 @@ pub struct CreatePaneRequest {
     pub command: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AddSurfaceRequest {
+    pub target: WorkspaceTarget,
+    pub tab_id: String,
+    pub source_surface_id: String,
+    pub argv: Vec<String>,
+}
+
 #[derive(Debug)]
 pub enum ControlCommand {
     Identify {
@@ -120,6 +129,10 @@ pub enum ControlCommand {
     },
     CreatePane {
         request: CreatePaneRequest,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    AddSurface {
+        request: AddSurfaceRequest,
         reply: mpsc::Sender<BridgeResult>,
     },
     ListSurfaces {
@@ -188,6 +201,7 @@ impl ControlCommand {
             | Self::ListPanes { reply, .. }
             | Self::ListPaneSurfaces { reply, .. }
             | Self::CreatePane { reply, .. }
+            | Self::AddSurface { reply, .. }
             | Self::ListSurfaces { reply, .. }
             | Self::SurfaceHealth { reply, .. }
             | Self::ReadSurfaceText { reply, .. }
@@ -499,6 +513,67 @@ fn handle_method(
             };
             let (reply, rx) = mpsc::channel();
             (ControlCommand::CreatePane { request, reply }, rx)
+        }
+        "surface.add" | "add-surface" => {
+            let target = match parse_required_workspace_target(params, false, "surface.add") {
+                Ok(target) => target,
+                Err(error) => return error_response(id, error),
+            };
+            let Some(tab_id) = optional_string(params, &["tab_id"]) else {
+                return error_response(
+                    id,
+                    BridgeError::invalid_params("surface.add requires tab_id"),
+                );
+            };
+            let source_surface_id =
+                match optional_ref_handle(params, &["source_surface_id"], "surface:") {
+                    Ok(Some(surface_id)) => surface_id,
+                    Ok(None) => {
+                        return error_response(
+                            id,
+                            BridgeError::invalid_params("surface.add requires source_surface_id"),
+                        );
+                    }
+                    Err(error) => return error_response(id, error),
+                };
+            let argv = match params.get("argv") {
+                None => Vec::new(),
+                Some(Value::Array(argv)) => {
+                    let Some(argv) = argv
+                        .iter()
+                        .map(Value::as_str)
+                        .map(|arg| arg.map(ToOwned::to_owned))
+                        .collect::<Option<Vec<_>>>()
+                    else {
+                        return error_response(
+                            id,
+                            BridgeError::invalid_params(
+                                "surface.add argv must contain only strings",
+                            ),
+                        );
+                    };
+                    argv
+                }
+                Some(_) => {
+                    return error_response(
+                        id,
+                        BridgeError::invalid_params("surface.add argv must be an array"),
+                    );
+                }
+            };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::AddSurface {
+                    request: AddSurfaceRequest {
+                        target,
+                        tab_id,
+                        source_surface_id,
+                        argv,
+                    },
+                    reply,
+                },
+                rx,
+            )
         }
         "surface.list" | "list-panels" => {
             let target = match parse_optional_workspace_target(params, true) {

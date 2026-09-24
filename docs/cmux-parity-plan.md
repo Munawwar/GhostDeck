@@ -13,7 +13,8 @@ Limux has **two control servers**:
    `system.ping`, `system.identify`, `workspace.{current,list,create,
    select,rename,close}`, `pane.list`, `pane.surfaces`, `surface.list`,
    `pane.create` for terminal self-spawn, `surface.send_text`,
-   `surface.send_key`, `surface.read_text`, `surface.health`, and
+   `surface.add` for fixed-layout agent terminals, `surface.send_key`,
+   `surface.read_text`, `surface.health`, and
    `notification.create`. It still does **NOT** support browser commands.
 
 When the GUI is running, the CLI targets the bridge via the runtime
@@ -59,6 +60,9 @@ dispatcher parity.
   inside an agent terminal, `limux new-pane --direction right --command claude`
   uses `LIMUX_WORKSPACE_ID`, `LIMUX_SURFACE_ID`, and `LIMUX_PANE_ID` to split
   the caller's pane, create a new terminal, and launch the command there.
+- `surface.add` adds up to three terminal surfaces to the caller's exact tab.
+  Limux keeps the caller on the left and owns the fixed vertical stack on the
+  right; the caller cannot provide a direction or target.
 
 **Still open (priority order):**
 

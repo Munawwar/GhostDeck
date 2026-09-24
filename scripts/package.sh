@@ -22,6 +22,7 @@ WEBKITGTK_RUNTIME_DIR=""
 WEBKITGTK_PROCESS_DIR=""
 ICONS_DIR="${ROOT_DIR}/rust/limux-host-linux/icons"
 APP_ICONS_DIR="${ROOT_DIR}/rust/limux-host-linux/icons/app"
+SKILLS_DIR="${ROOT_DIR}/skills"
 DESKTOP_FILE="${ROOT_DIR}/rust/limux-host-linux/dev.limux.linux.desktop"
 METADATA_FILE="${ROOT_DIR}/rust/limux-host-linux/dev.limux.linux.metainfo.xml"
 OUT_DIR="${ROOT_DIR}/dist"
@@ -325,6 +326,7 @@ populate_tree() {
     # Ghostty resources required for named themes and shell integration
     cp -r "$GHOSTTY_SHARE_DIR"/. "$ghostty_resdir"
     copy_ghostty_terminfo_entries "$GHOSTTY_TERMINFO_DIR" "$ghostty_datadir/terminfo"
+    cp -r "$SKILLS_DIR" "$ghostty_datadir/skills"
 
     # Desktop file. Use the absolute CLI path so desktop launchers do not
     # accidentally resolve an older GTK host binary named `limux` from PATH.
@@ -418,6 +420,7 @@ cp "$GHOSTTY_SO" "$TARBALL_STAGE/lib/libghostty.so"
 strip --strip-debug "$TARBALL_STAGE/lib/libghostty.so"
 cp -r "$GHOSTTY_SHARE_DIR"/. "$TARBALL_STAGE/share/limux/ghostty"
 copy_ghostty_terminfo_entries "$GHOSTTY_TERMINFO_DIR" "$TARBALL_STAGE/share/limux/terminfo"
+cp -r "$SKILLS_DIR" "$TARBALL_STAGE/share/limux/skills"
 cp "$DESKTOP_FILE" "$TARBALL_STAGE/share/applications/dev.limux.linux.desktop"
 cp "$METADATA_FILE" "$TARBALL_STAGE/share/metainfo/dev.limux.linux.metainfo.xml"
 
@@ -735,6 +738,7 @@ copy_appimage_webkit_runtime "$APPDIR"
 
 # Ghostty resources required for named themes and shell integration
 cp -r "$GHOSTTY_SHARE_DIR" "$APPDIR/usr/share/limux/ghostty"
+cp -r "$SKILLS_DIR" "$APPDIR/usr/share/limux/skills"
 
 # Desktop file (at AppDir root and in usr/share)
 cp "$DESKTOP_FILE" "$APPDIR/dev.limux.linux.desktop"
