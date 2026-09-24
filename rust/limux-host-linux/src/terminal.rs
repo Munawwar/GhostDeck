@@ -235,7 +235,7 @@ impl TerminalHandle {
             return;
         };
 
-        refresh_realized_surface_display(surface, &self.gl_area);
+        refresh_surface_display(surface, &self.gl_area);
     }
 
     pub fn set_split_dimmed(&self, dimmed: bool) {
@@ -465,16 +465,6 @@ fn refresh_surface_display(surface: ghostty_surface_t, gl_area: &gtk::GLArea) {
     }
     unsafe { ghostty_surface_refresh(surface) };
     gl_area.queue_render();
-}
-
-fn refresh_realized_surface_display(surface: ghostty_surface_t, gl_area: &gtk::GLArea) {
-    if gl_area.is_realized() {
-        gl_area.make_current();
-        if gl_area.error().is_none() {
-            unsafe { ghostty_surface_display_realized(surface) };
-        }
-    }
-    refresh_surface_display(surface, gl_area);
 }
 
 fn clear_ghostty_preedit(surface: ghostty_surface_t) {
@@ -1277,7 +1267,7 @@ pub fn create_terminal(
         let surface_cell = surface_cell.clone();
         gl_area.connect_map(move |gl_area| {
             if let Some(surface) = *surface_cell.borrow() {
-                refresh_realized_surface_display(surface, gl_area);
+                refresh_surface_display(surface, gl_area);
             } else {
                 gl_area.queue_render();
             }
@@ -1371,7 +1361,8 @@ pub fn create_terminal(
             // reinitialize the GL renderer with the new GL context while
             // preserving the terminal/pty state.
             if let Some(surface) = *surface_cell.borrow() {
-                refresh_realized_surface_display(surface, gl_area);
+                unsafe { ghostty_surface_display_realized(surface) };
+                refresh_surface_display(surface, gl_area);
                 let gl_area = gl_area.clone();
                 glib::idle_add_local_once(move || {
                     gl_area.queue_render();
