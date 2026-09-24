@@ -117,13 +117,9 @@ These are the current supported config keys and defaults:
 | `split_down` | `<Ctrl><Shift>d` |
 | `new_terminal_in_focused_pane` | `<Ctrl><Shift>t` |
 | `split_right` | `<Ctrl>d` |
-| `close_focused_pane` | `<Ctrl>w` |
-| `toggle_focused_pane_zoom` | `<Ctrl><Shift>z` |
 | `new_terminal` | `<Ctrl>t` |
-| `focus_left` | `<Ctrl>Left` |
-| `focus_right` | `<Ctrl>Right` |
-| `focus_up` | `<Ctrl>Up` |
-| `focus_down` | `<Ctrl>Down` |
+| `focus_left` | `<Ctrl><Shift>comma` |
+| `focus_right` | `<Ctrl><Shift>period` |
 | `activate_workspace_1` | `<Ctrl>1` |
 | `activate_workspace_2` | `<Ctrl>2` |
 | `activate_workspace_3` | `<Ctrl>3` |
@@ -192,7 +188,6 @@ These UI surfaces currently reflect shortcut overrides:
   - new terminal tab
   - split right
   - split down
-  - close pane
 
 Note:
 
@@ -234,7 +229,6 @@ Launch Limux and verify:
 - `Ctrl+T` opens a terminal tab
 - `Ctrl+D` splits right
 - `Ctrl+Shift+D` splits down
-- `Ctrl+W` closes the focused pane
 - `Ctrl+Page_Down` and `Ctrl+Page_Up` switch workspaces
 - pane button tooltips show the default shortcut suffixes where applicable
 - `Ctrl+Q` quits Limux
@@ -284,19 +278,16 @@ Create:
 ```json
 {
   "shortcuts": {
-    "new_terminal": "<Ctrl><Alt>t",
-    "close_focused_pane": "<Ctrl><Alt>w"
+    "new_terminal": "<Ctrl><Alt>t"
   }
 }
 ```
 
 Restart Limux and verify:
 
-- pane button tooltips show `Ctrl+Alt+T` and `Ctrl+Alt+W`
+- the new terminal button tooltip shows `Ctrl+Alt+T`
 - `Ctrl+Alt+T` opens a terminal tab
 - `Ctrl+T` no longer opens a terminal tab
-- `Ctrl+Alt+W` closes the focused pane
-- `Ctrl+W` no longer closes the pane
 
 ### 5. Duplicate-Binding Rejection
 

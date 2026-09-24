@@ -12,7 +12,7 @@ Limux has **two control servers**:
    routes a narrow subset of methods to the GTK main loop. Supports
    `system.ping`, `system.identify`, `workspace.{current,list,create,
    select,rename,close}`, `pane.list`, `pane.surfaces`, `surface.list`,
-   `pane.create` for terminal self-spawn, `surface.send_text`,
+   `surface.send_text`,
    `surface.add` for fixed-layout agent terminals, `surface.run` for commands
    in caller-created surfaces, `surface.close` for removing those surfaces,
    `surface.send_key`,
@@ -20,7 +20,7 @@ Limux has **two control servers**:
    `notification.create`.
 
 When the GUI is running, the CLI targets the bridge via the runtime
-socket. `list-panes` / `list-panels`, terminal `new-pane --command ...`,
+socket. `list-panes` / `list-panels`, `add-surface --cmd ...`,
 text injection, key-level injection, `surface-health`, and terminal
 `read-screen` now work against the running host.
 
@@ -57,10 +57,6 @@ Remaining proxy work is for broader dispatcher parity.
   so agents can send deterministic key-level control such as Ctrl-C.
 - `surface.health` and `surface.read_text` now route on the live GTK bridge,
   so agents can inspect peer terminal health and visible screen text.
-- `pane.create` now routes through the GTK bridge for terminal panes. From
-  inside an agent terminal, `limux new-pane --direction right --command claude`
-  uses `LIMUX_WORKSPACE_ID`, `LIMUX_SURFACE_ID`, and `LIMUX_PANE_ID` to split
-  the caller's pane, create a new terminal, and launch the command there.
 - `surface.add` adds up to three terminal surfaces to the caller's exact tab.
   Limux keeps the caller on the left and owns the fixed vertical stack on the
   right; the caller cannot provide a direction or target.
@@ -79,14 +75,11 @@ into a `notify` (and, where useful, an inline `send`). Drop-in for
 `limux agent-team [--agents codex,claude[,opencode,gemini]] [--cwd <path>]
 [--no-launch] [--dry-run]`:
 
-- Calls `workspace.create` once per agent with `name=<agent>`, `cwd=<shared>`,
-  `command=<agent CLI>` so each workspace launches the agent automatically.
-- Bridge now passes `allow_name=true` to `parse_optional_workspace_target`
-  for `surface.send_text` and `notification.create`, so peers address each
-  other by workspace name (`limux send --workspace claude …`) instead of
-  needing to swap UUIDs.
+- Calls `surface.add` for each peer (up to three) in the caller's tab and
+  launches the agent through the terminal's configured shell.
+- Peers use their surface IDs for direct messages.
 - Writes `AGENTS.md` in the shared cwd documenting:
-    - the peers table (agent → workspace name → workspace ID → launch cmd),
+    - the peers table (agent → surface ID → launch command),
     - the `<agent-msg from="…" to="…" id="…" reply-to="…" ts="…">` envelope,
     - the exact `limux send` invocation for sending and replying,
     - the `limux notify` escalation path for human input,

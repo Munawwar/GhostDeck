@@ -26,20 +26,12 @@ pub enum ShortcutId {
     CycleTabPrev,
     CycleTabNext,
     SplitDown,
-    SplitPanelDown,
     NewTerminalInFocusedPane,
     SplitRight,
     SwapSurfaces,
-    SplitPanelRight,
-    CloseFocusedPane,
-    ToggleFocusedPaneZoom,
     NewTerminal,
     FocusLeft,
     FocusRight,
-    FocusPanelLeft,
-    FocusPanelRight,
-    FocusUp,
-    FocusDown,
     ActivateWorkspace1,
     ActivateWorkspace2,
     ActivateWorkspace3,
@@ -76,19 +68,11 @@ pub enum ShortcutCommand {
     CycleTabPrev,
     CycleTabNext,
     SplitDown,
-    SplitPanelDown,
     NewTerminal,
     SplitRight,
     SwapSurfaces,
-    SplitPanelRight,
-    CloseFocusedPane,
-    ToggleFocusedPaneZoom,
     FocusLeft,
     FocusRight,
-    FocusPanelLeft,
-    FocusPanelRight,
-    FocusUp,
-    FocusDown,
     ActivateWorkspace1,
     ActivateWorkspace2,
     ActivateWorkspace3,
@@ -306,7 +290,7 @@ struct ShortcutConfigFile {
     shortcuts: HashMap<String, serde_json::Value>,
 }
 
-const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 46] = [
+const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 38] = [
     ShortcutDefinition {
         id: ShortcutId::NewWorkspace,
         config_key: "new_workspace",
@@ -440,17 +424,6 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 46] = [
         editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
     ShortcutDefinition {
-        id: ShortcutId::SplitPanelDown,
-        config_key: "split_panel_down",
-        action_name: "win.split-panel-down",
-        default_accel: "",
-        label: "Split Panel Down",
-        registers_gtk_accel: false,
-        command: ShortcutCommand::SplitPanelDown,
-        scope: ShortcutScope::Window,
-        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
-    },
-    ShortcutDefinition {
         id: ShortcutId::NewTerminalInFocusedPane,
         config_key: "new_terminal_in_focused_pane",
         action_name: "win.new-terminal-in-focused-pane",
@@ -484,39 +457,6 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 46] = [
         editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
     ShortcutDefinition {
-        id: ShortcutId::SplitPanelRight,
-        config_key: "split_panel_right",
-        action_name: "win.split-panel-right",
-        default_accel: "",
-        label: "Split Panel Right",
-        registers_gtk_accel: false,
-        command: ShortcutCommand::SplitPanelRight,
-        scope: ShortcutScope::Window,
-        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
-    },
-    ShortcutDefinition {
-        id: ShortcutId::CloseFocusedPane,
-        config_key: "close_focused_pane",
-        action_name: "win.close-focused-pane",
-        default_accel: "<Ctrl>w",
-        label: "Close Focused Pane",
-        registers_gtk_accel: false,
-        command: ShortcutCommand::CloseFocusedPane,
-        scope: ShortcutScope::Window,
-        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
-    },
-    ShortcutDefinition {
-        id: ShortcutId::ToggleFocusedPaneZoom,
-        config_key: "toggle_focused_pane_zoom",
-        action_name: "win.toggle-focused-pane-zoom",
-        default_accel: "<Ctrl><Shift>z",
-        label: "Toggle Focused Pane Zoom",
-        registers_gtk_accel: false,
-        command: ShortcutCommand::ToggleFocusedPaneZoom,
-        scope: ShortcutScope::Window,
-        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
-    },
-    ShortcutDefinition {
         id: ShortcutId::NewTerminal,
         config_key: "new_terminal",
         action_name: "win.new-terminal",
@@ -546,50 +486,6 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 46] = [
         label: "Focus Right",
         registers_gtk_accel: false,
         command: ShortcutCommand::FocusRight,
-        scope: ShortcutScope::Window,
-        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
-    },
-    ShortcutDefinition {
-        id: ShortcutId::FocusPanelLeft,
-        config_key: "focus_panel_left",
-        action_name: "win.focus-panel-left",
-        default_accel: "<Ctrl>Left",
-        label: "Focus Panel Left",
-        registers_gtk_accel: false,
-        command: ShortcutCommand::FocusPanelLeft,
-        scope: ShortcutScope::Window,
-        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
-    },
-    ShortcutDefinition {
-        id: ShortcutId::FocusPanelRight,
-        config_key: "focus_panel_right",
-        action_name: "win.focus-panel-right",
-        default_accel: "<Ctrl>Right",
-        label: "Focus Panel Right",
-        registers_gtk_accel: false,
-        command: ShortcutCommand::FocusPanelRight,
-        scope: ShortcutScope::Window,
-        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
-    },
-    ShortcutDefinition {
-        id: ShortcutId::FocusUp,
-        config_key: "focus_up",
-        action_name: "win.focus-up",
-        default_accel: "<Ctrl>Up",
-        label: "Focus Up",
-        registers_gtk_accel: false,
-        command: ShortcutCommand::FocusUp,
-        scope: ShortcutScope::Window,
-        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
-    },
-    ShortcutDefinition {
-        id: ShortcutId::FocusDown,
-        config_key: "focus_down",
-        action_name: "win.focus-down",
-        default_accel: "<Ctrl>Down",
-        label: "Focus Down",
-        registers_gtk_accel: false,
-        command: ShortcutCommand::FocusDown,
         scope: ShortcutScope::Window,
         editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
@@ -1787,26 +1683,6 @@ mod tests {
     }
 
     #[test]
-    fn focused_pane_zoom_shortcut_is_remappable_window_command() {
-        let defaults = default_shortcuts();
-        let shortcut = defaults
-            .find_by_id(ShortcutId::ToggleFocusedPaneZoom)
-            .expect("focused pane zoom shortcut should be registered");
-
-        assert_eq!(shortcut.definition.config_key, "toggle_focused_pane_zoom");
-        assert_eq!(
-            shortcut.definition.command,
-            ShortcutCommand::ToggleFocusedPaneZoom
-        );
-        assert_eq!(shortcut.definition.scope, ShortcutScope::Window);
-        assert_eq!(shortcut.runtime_combo().as_deref(), Some("ctrl+shift+z"));
-        assert_eq!(
-            defaults.command_for_runtime_combo("ctrl+shift+z"),
-            Some(ShortcutCommand::ToggleFocusedPaneZoom)
-        );
-    }
-
-    #[test]
     fn resolve_shortcuts_from_str_warns_on_unknown_ids() {
         let resolved = resolve_shortcuts_from_str(
             r#"{
@@ -1872,7 +1748,7 @@ mod tests {
                 "theme": "legacy",
                 "shortcuts": {
                     "split_right": "<Ctrl>h",
-                    "close_focused_pane": null,
+                    "split_down": null,
                     "toggle_sidebar": "<Ctrl>m"
                 }
             }"#,
@@ -1891,7 +1767,7 @@ mod tests {
         );
         assert_eq!(
             resolved
-                .find_by_id(ShortcutId::CloseFocusedPane)
+                .find_by_id(ShortcutId::SplitDown)
                 .and_then(ResolvedShortcut::gtk_accel),
             None
         );
@@ -1903,10 +1779,7 @@ mod tests {
         let migrated: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap())
             .expect("migrated shortcuts config should be valid");
         assert_eq!(migrated["shortcuts"]["split_right"], "<Ctrl>h");
-        assert_eq!(
-            migrated["shortcuts"]["close_focused_pane"],
-            serde_json::Value::Null
-        );
+        assert_eq!(migrated["shortcuts"]["split_down"], serde_json::Value::Null);
         assert!(migrated["shortcuts"].get("toggle_sidebar").is_none());
         assert!(migrated.get("theme").is_none());
     }
@@ -2154,14 +2027,6 @@ mod tests {
             Some(ShortcutCommand::FocusRight)
         );
         assert_eq!(
-            resolved.command_for_runtime_combo("ctrl+left"),
-            Some(ShortcutCommand::FocusPanelLeft)
-        );
-        assert_eq!(
-            resolved.command_for_runtime_combo("ctrl+right"),
-            Some(ShortcutCommand::FocusPanelRight)
-        );
-        assert_eq!(
             resolved.command_for_runtime_combo("ctrl+9"),
             Some(ShortcutCommand::ActivateLastWorkspace)
         );
@@ -2186,12 +2051,6 @@ mod tests {
         );
         assert_eq!(
             resolved
-                .default_display_label_for_id(ShortcutId::SplitPanelRight)
-                .as_deref(),
-            None
-        );
-        assert_eq!(
-            resolved
                 .default_display_label_for_id(ShortcutId::TerminalPaste)
                 .as_deref(),
             Some("Ctrl+Shift+V")
@@ -2201,12 +2060,6 @@ mod tests {
                 .default_display_label_for_id(ShortcutId::FocusLeft)
                 .as_deref(),
             Some("Ctrl+Shift+,")
-        );
-        assert_eq!(
-            resolved
-                .default_display_label_for_id(ShortcutId::FocusPanelLeft)
-                .as_deref(),
-            Some("Ctrl+Left")
         );
     }
 
@@ -2227,7 +2080,7 @@ mod tests {
             r#"{
                 "shortcuts": {
                     "split_right": "<Ctrl>h",
-                    "close_focused_pane": null
+                    "split_down": null
                 }
             }"#,
         )
@@ -2239,7 +2092,7 @@ mod tests {
             overrides.get("split_right"),
             Some(&Value::String("<Ctrl>h".to_string()))
         );
-        assert_eq!(overrides.get("close_focused_pane"), Some(&Value::Null));
+        assert_eq!(overrides.get("split_down"), Some(&Value::Null));
         assert!(!overrides.contains_key("toggle_sidebar"));
     }
 
@@ -2455,7 +2308,7 @@ mod tests {
             r#"{
                 "shortcuts": {
                     "split_right": "<Ctrl><Alt>h",
-                    "close_focused_pane": null
+                    "split_down": null
                 }
             }"#,
         )
@@ -2467,10 +2320,7 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(written["theme"], "nord");
         assert_eq!(written["shortcuts"]["split_right"], "<Ctrl><Alt>h");
-        assert_eq!(
-            written["shortcuts"]["close_focused_pane"],
-            serde_json::Value::Null
-        );
+        assert_eq!(written["shortcuts"]["split_down"], serde_json::Value::Null);
         assert!(written["shortcuts"].get("toggle_sidebar").is_none());
     }
 

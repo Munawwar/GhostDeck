@@ -200,7 +200,7 @@ fn parse_global_args() -> Result<GlobalOptions> {
 
 fn print_help() {
     println!(
-        "limux CLI\n\nUsage: limux [--socket <path>] [--json] [--id-format refs|both|uuids] <command> [args...]\n       limux\n\nRunning `limux` with no arguments launches the GTK app.\n\nCommon commands:\n  identify [--workspace <id|ref>] [--surface <id|ref>]\n  list-panels [--workspace <id|ref>]\n  list-panes [--workspace <id|ref>]\n  list-workspaces\n  surface-health [--workspace <id|ref>]\n  send [--workspace <id|ref>] [--surface <id|ref>] <text>\n  send-key [--workspace <id|ref>] [--surface <id|ref>] <key>\n  new-workspace [--cwd <path>] [--command <text>]\n  close-workspace --workspace <id|ref>\n  sidebar-state --workspace <id|ref>\n  new-surface [--workspace <id|ref>]\n  new-pane [--workspace <id|ref>] [--pane <id|ref>] [--surface <id|ref>] [--direction <left|right|up|down>] [--command <text>]\n  rename-workspace [--workspace <id|ref>] <title>\n  rename-window [--workspace <id|ref>] <title>\n  rename-tab [--workspace <id|ref>] [--tab <id|ref>] <title>\n  read-screen [--workspace <id|ref>] [--surface <id|ref>] [--scrollback] [--lines <n>]\n  capture-pane (alias of read-screen)\n  tab-action --action <name> [--workspace <id|ref>] [--tab <id|ref>] [--title <text>]\n\nAgent integrations:\n  notify [--workspace <id|ref>] [--subtitle <text>] [--body <text>] <title>\n  hooks setup [agent] | hooks uninstall [agent] | hooks <agent> <event>\n  claude-hook | opencode-hook | gemini-hook --event <name> [--subtitle <text>] [--body <text>] [--title <text>]\n  agent-team [--agents codex,claude[,opencode,gemini]] [--cwd <path>] [--no-launch] [--dry-run]\n      Splits the active workspace into one pane per agent (caller's pane stays\n      as the orchestrator on the left, peers stack down the right), launches\n      each CLI in its pane, and writes AGENTS.md describing the <agent-msg>\n      XML protocol so peers can talk via\n      `limux send --surface <peer-surface-id> <envelope>`.\n"
+        "limux CLI\n\nUsage: limux [--socket <path>] [--json] [--id-format refs|both|uuids] <command> [args...]\n       limux\n\nRunning `limux` with no arguments launches the GTK app.\n\nCommon commands:\n  identify [--workspace <id|ref>] [--surface <id|ref>]\n  list-panels [--workspace <id|ref>]\n  list-panes [--workspace <id|ref>]\n  list-workspaces\n  surface-health [--workspace <id|ref>]\n  send [--workspace <id|ref>] [--surface <id|ref>] <text>\n  send-key [--workspace <id|ref>] [--surface <id|ref>] <key>\n  new-workspace [--cwd <path>] [--command <text>]\n  close-workspace --workspace <id|ref>\n  sidebar-state --workspace <id|ref>\n  new-surface [--workspace <id|ref>]\n  rename-workspace [--workspace <id|ref>] <title>\n  rename-window [--workspace <id|ref>] <title>\n  rename-tab [--workspace <id|ref>] [--tab <id|ref>] <title>\n  read-screen [--workspace <id|ref>] [--surface <id|ref>] [--scrollback] [--lines <n>]\n  capture-pane (alias of read-screen)\n  tab-action --action <name> [--workspace <id|ref>] [--tab <id|ref>] [--title <text>]\n\nAgent integrations:\n  notify [--workspace <id|ref>] [--subtitle <text>] [--body <text>] <title>\n  hooks setup [agent] | hooks uninstall [agent] | hooks <agent> <event>\n  claude-hook | opencode-hook | gemini-hook --event <name> [--subtitle <text>] [--body <text>] [--title <text>]\n  agent-team [--agents codex,claude[,opencode,gemini]] [--cwd <path>] [--no-launch] [--dry-run]\n      Adds up to three peer surfaces in the caller's tab, launches each CLI\n      there, and writes AGENTS.md describing the <agent-msg>\n      XML protocol so peers can talk via\n      `limux send --surface <peer-surface-id> <envelope>`.\n"
     );
     println!(
         "  add-surface [--cwd <directory>] [--cmd <shell-command>]\n      Adds up to 3 terminal surfaces to the caller's tab using Limux's fixed layout."
@@ -563,47 +563,6 @@ async fn call_in_workspace_scope(
         return client.call(method, Value::Object(map)).await;
     }
     client.call(method, params).await
-}
-
-async fn selected_surface_for_pane(
-    client: &mut Client,
-    workspace: Option<String>,
-    pane_id: &str,
-) -> Result<String> {
-    let payload = call_in_workspace_scope(
-        client,
-        workspace,
-        "pane.surfaces",
-        json!({ "pane_id": pane_id }),
-    )
-    .await?;
-    let rows = payload
-        .get("surfaces")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("pane.surfaces returned no surfaces"))?;
-
-    for row in rows {
-        let focused = row.get("focused").and_then(Value::as_bool).unwrap_or(false)
-            || row
-                .get("selected")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-        if focused {
-            let handle = handle_from_payload(row, "surface_id", "surface_ref");
-            if !handle.is_empty() {
-                return Ok(handle);
-            }
-        }
-    }
-
-    let first = rows
-        .first()
-        .ok_or_else(|| anyhow!("pane has no surfaces"))?;
-    let handle = handle_from_payload(first, "surface_id", "surface_ref");
-    if handle.is_empty() {
-        bail!("pane.surfaces returned an empty surface handle");
-    }
-    Ok(handle)
 }
 
 async fn run_identify(client: &mut Client, args: &[String]) -> Result<Value> {
@@ -1958,9 +1917,8 @@ async fn run_new_workspace(client: &mut Client, args: &[String]) -> Result<Value
 // `limux agent-team` — spin up a multi-agent collaboration workspace.
 // ---------------------------------------------------------------------------
 //
-// Creates ONE workspace and one pane per requested agent (codex / claude /
-// opencode / gemini), launches each agent's CLI in its pane, captures the
-// pane/surface IDs, and seeds an AGENTS.md in the shared cwd describing the
+// Adds peer surfaces to the caller's tab, launches each agent's CLI, captures
+// their surface IDs, and seeds an AGENTS.md in the shared cwd describing the
 // XML-tagged message protocol and the peer directory so agents can message
 // each other.
 //
@@ -2007,8 +1965,7 @@ async fn run_agent_team(client: &mut Client, args: &[String]) -> Result<Value> {
         })
         .ok_or_else(|| anyhow!("agent-team: could not resolve --cwd"))?;
 
-    // Optional: skip launching the CLIs (useful when the user wants to open
-    // the agents manually) — still splits the panes + writes AGENTS.md.
+    // Optional: create peer surfaces without launching the CLIs.
     let no_launch = args.iter().any(|a| a == "--no-launch");
     let dry_run = args.iter().any(|a| a == "--dry-run");
 
@@ -2029,16 +1986,18 @@ async fn run_agent_team(client: &mut Client, args: &[String]) -> Result<Value> {
         bail!("agent-team: no valid agents spawned");
     }
 
+    if resolved.len() > 3 {
+        bail!("agent-team supports at most three peers in one tab");
+    }
     let agents_md_path = std::path::Path::new(&cwd).join("AGENTS.md");
 
     if dry_run {
         let peers: Vec<(String, String, String, String)> = resolved
             .iter()
-            .enumerate()
-            .map(|(i, (_, name, launch))| {
+            .map(|(_, name, launch)| {
                 (
                     name.to_string(),
-                    format!("<dry-run-pane-{i}>"),
+                    "<dry-run-pane>".to_string(),
                     format!("<dry-run-surface-{name}>"),
                     launch.clone(),
                 )
@@ -2088,6 +2047,7 @@ async fn run_agent_team(client: &mut Client, args: &[String]) -> Result<Value> {
         .filter(|s| !s.is_empty());
     let orchestrator_surface_env = env::var("LIMUX_SURFACE_ID").ok().filter(|s| !s.is_empty());
     let orchestrator_pane_env = env::var("LIMUX_PANE_ID").ok().filter(|s| !s.is_empty());
+    let orchestrator_tab_env = env::var("LIMUX_TAB_ID").ok().filter(|s| !s.is_empty());
 
     let workspace_id = match orchestrator_workspace.clone() {
         Some(id) => id,
@@ -2096,7 +2056,7 @@ async fn run_agent_team(client: &mut Client, args: &[String]) -> Result<Value> {
             .context("agent-team: could not resolve active workspace; run from inside a limux pane or pass --workspace")?,
     };
 
-    // 2. Discover the orchestrator pane's surface_id. If env didn't tell us,
+    // 2. Discover the orchestrator surface. If env didn't tell us,
     //    use the focused/first surface in the workspace.
     let surfaces = client
         .call(
@@ -2148,45 +2108,53 @@ async fn run_agent_team(client: &mut Client, args: &[String]) -> Result<Value> {
         .and_then(|row| get_string(&row, &["name", "title"]))
         .unwrap_or_else(|| "active workspace".to_string());
 
-    // 4. Split a pane per agent. Layout: agent[0] splits RIGHT of orchestrator,
-    //    each subsequent agent splits DOWN of the previous agent — orchestrator
-    //    keeps its full height on the left, peers stack top-to-bottom on the right.
+    // 4. Add peers to the orchestrator's tab. The host owns their fixed layout.
+    let tab_id = orchestrator_tab_env
+        .or_else(|| {
+            orchestrator_surface
+                .split(':')
+                .nth(1)
+                .map(ToOwned::to_owned)
+        })
+        .ok_or_else(|| anyhow!("agent-team: could not determine orchestrator tab"))?;
+    let existing_surfaces = surface_rows
+        .iter()
+        .filter(|row| {
+            get_string(row, &["surface_id"])
+                .is_some_and(|id| id.split(':').nth(1) == Some(tab_id.as_str()))
+        })
+        .count();
+    if existing_surfaces + resolved.len() > 4 {
+        bail!("agent-team: caller tab has room for at most three peer surfaces");
+    }
+    let cwd = fs::canonicalize(&cwd)
+        .with_context(|| format!("agent-team: invalid working directory {cwd}"))?
+        .to_string_lossy()
+        .into_owned();
     let mut peers: Vec<(String, String, String, String)> = Vec::new();
-    let mut parent_surface = orchestrator_surface.clone();
-
-    for (i, (_alias, name, launch)) in resolved.iter().enumerate() {
-        let direction = if i == 0 { "right" } else { "down" };
-
-        let mut params = Map::new();
-        params.insert(
-            "workspace_id".to_string(),
-            Value::String(workspace_id.clone()),
-        );
-        params.insert(
-            "surface_id".to_string(),
-            Value::String(parent_surface.clone()),
-        );
-        params.insert(
-            "direction".to_string(),
-            Value::String(direction.to_string()),
-        );
-        params.insert("type".to_string(), Value::String("terminal".to_string()));
-        if !no_launch {
-            params.insert("command".to_string(), Value::String(launch.clone()));
-        }
-
+    for (_alias, name, launch) in &resolved {
         let created = client
-            .call("pane.create", Value::Object(params))
+            .call(
+                "surface.add",
+                json!({
+                    "workspace_id": workspace_id,
+                    "tab_id": tab_id,
+                    "source_surface_id": orchestrator_surface,
+                    "cwd": cwd,
+                    "command": (!no_launch).then_some(launch),
+                }),
+            )
             .await
-            .with_context(|| format!("pane.create failed for agent '{name}'"))?;
-        let pane_id = get_string(&created, &["pane_id"])
-            .ok_or_else(|| anyhow!("agent-team: pane.create for '{name}' returned no pane_id"))?;
+            .with_context(|| format!("surface.add failed for agent '{name}'"))?;
         let surface_id = get_string(&created, &["surface_id"]).ok_or_else(|| {
-            anyhow!("agent-team: pane.create for '{name}' returned no surface_id")
+            anyhow!("agent-team: surface.add for '{name}' returned no surface_id")
         })?;
-
-        parent_surface = surface_id.clone();
-        peers.push((name.to_string(), pane_id, surface_id, launch.clone()));
+        peers.push((
+            name.to_string(),
+            orchestrator_pane.clone(),
+            surface_id,
+            launch.clone(),
+        ));
     }
 
     // 5. Write AGENTS.md into the shared cwd, clobbering any existing file.
@@ -2246,8 +2214,7 @@ fn build_agents_md(
 
     out.push_str(&format!(
         "## Team workspace\n\n\
-         The orchestrator (the pane that ran `limux agent-team`) and all\n\
-         spawned peers share one workspace:\n\n\
+         The orchestrator and all spawned peers share one tab in a workspace:\n\n\
          - Workspace name: `{workspace_name}`\n\
          - Workspace ID: `{workspace_id}`\n\
          - Orchestrator surface: `{orchestrator_surface}`\n\
@@ -2350,18 +2317,6 @@ fn build_agents_md(
         "Close a surface you created when finished; this shuts down its terminal session:\n\n",
     );
     out.push_str("```bash\nlimux close-surface --surface <surface-id>\n```\n\n");
-
-    out.push_str("## Splitting your own pane\n\n");
-    out.push_str("If you need a scratch terminal next to you, split your own pane:\n\n");
-    out.push_str("```bash\n");
-    out.push_str("limux new-pane --direction right --command bash\n");
-    out.push_str("```\n\n");
-    out.push_str(
-        "`new-pane` reads `LIMUX_WORKSPACE_ID`, `LIMUX_SURFACE_ID`, and\n\
-         `LIMUX_PANE_ID`, so it splits your current pane even if GTK focus has\n\
-         moved elsewhere. Live GTK self-spawn currently supports terminal\n\
-         panes only.\n\n",
-    );
 
     out.push_str("## Policies (edit these freely)\n\n");
     out.push_str(
@@ -2554,49 +2509,8 @@ async fn run_surface_action(client: &mut Client, action: &str, args: &[String]) 
         .await
 }
 
-fn env_opt(name: &str) -> Option<String> {
-    env::var(name).ok()
-}
-
 fn nonempty(value: Option<String>) -> Option<String> {
     value.filter(|s| !s.trim().is_empty())
-}
-
-fn build_new_pane_request(
-    args: &[String],
-    env_lookup: impl Fn(&str) -> Option<String>,
-) -> (Option<String>, Value) {
-    let workspace =
-        nonempty(parse_opt(args, "--workspace").or_else(|| env_lookup("LIMUX_WORKSPACE_ID")));
-    let surface = nonempty(parse_opt(args, "--surface").or_else(|| env_lookup("LIMUX_SURFACE_ID")));
-    let pane = nonempty(parse_opt(args, "--pane").or_else(|| env_lookup("LIMUX_PANE_ID")));
-    let direction = parse_opt(args, "--direction").unwrap_or_else(|| "right".to_string());
-    let command = nonempty(parse_opt(args, "--command"));
-
-    let mut params = Map::new();
-    params.insert("direction".to_string(), Value::String(direction));
-    if let Some(surface) = surface {
-        params.insert("surface_id".to_string(), Value::String(surface));
-    }
-    if let Some(pane) = pane {
-        params.insert("pane_id".to_string(), Value::String(pane));
-    }
-    if let Some(command) = command {
-        params.insert("command".to_string(), Value::String(command));
-    }
-
-    (workspace, Value::Object(params))
-}
-
-async fn run_new_pane(client: &mut Client, args: &[String]) -> Result<Value> {
-    // `pane.create` contract shared with the core dispatcher and live GTK host:
-    // direction is validated by the server, and responses keep
-    // pane_id/pane_ref/surface_id/surface_ref. Inside a Limux terminal,
-    // LIMUX_* defaults make `limux new-pane --command claude` split the
-    // caller's pane; outside Limux, omitting workspace preserves active-focus
-    // server behavior.
-    let (workspace, params) = build_new_pane_request(args, env_opt);
-    call_in_workspace_scope(client, workspace, "pane.create", params).await
 }
 
 async fn run_read_screen(client: &mut Client, args: &[String]) -> Result<Value> {
@@ -2678,21 +2592,6 @@ async fn run_tab_action(client: &mut Client, args: &[String]) -> Result<Value> {
     let workspace = parse_opt(args, "--workspace").or_else(|| env::var("LIMUX_WORKSPACE_ID").ok());
     let tab = parse_opt(args, "--tab").or_else(|| env::var("LIMUX_TAB_ID").ok());
     let title = parse_opt(args, "--title").or_else(|| trailing_title(args));
-
-    if action == "new-terminal-right" {
-        let mut params = vec!["--direction".to_string(), "right".to_string()];
-        if let Some(workspace) = workspace.clone() {
-            params.push("--workspace".to_string());
-            params.push(workspace);
-        }
-        let created = run_new_pane(client, &params).await?;
-        let tab_ref = tab.unwrap_or_else(|| "tab:1".to_string());
-        return Ok(json!({
-            "tab_ref": tab_ref,
-            "surface_id": created.get("surface_id").cloned().unwrap_or(Value::Null),
-            "surface_ref": created.get("surface_ref").cloned().unwrap_or(Value::Null),
-        }));
-    }
 
     let mut params = Map::new();
     params.insert("action".to_string(), Value::String(action.clone()));
@@ -2808,68 +2707,6 @@ async fn run_tmux_compat(client: &mut Client, command: &str, args: &[String]) ->
         "last-window" => client.call("workspace.last", json!({})).await,
         "next-window" => client.call("workspace.next", json!({})).await,
         "previous-window" => client.call("workspace.previous", json!({})).await,
-        "swap-pane" => {
-            let workspace = parse_opt(args, "--workspace");
-            let pane =
-                parse_opt(args, "--pane").ok_or_else(|| anyhow!("swap-pane requires --pane"))?;
-            let target = parse_opt(args, "--target-pane")
-                .ok_or_else(|| anyhow!("swap-pane requires --target-pane"))?;
-
-            let source_surface =
-                selected_surface_for_pane(client, workspace.clone(), &pane).await?;
-            let target_surface =
-                selected_surface_for_pane(client, workspace.clone(), &target).await?;
-
-            let _ = call_in_workspace_scope(
-                client,
-                workspace.clone(),
-                "surface.move",
-                json!({"surface_id": source_surface, "target_pane_id": target, "index": 0}),
-            )
-            .await?;
-            let _ = call_in_workspace_scope(
-                client,
-                workspace.clone(),
-                "surface.move",
-                json!({"surface_id": target_surface, "target_pane_id": pane, "index": 0}),
-            )
-            .await?;
-
-            Ok(json!({"ok": true}))
-        }
-        "break-pane" => {
-            let workspace = parse_opt(args, "--workspace");
-            let pane = parse_opt(args, "--pane");
-            let surface = parse_opt(args, "--surface");
-            let mut p = Map::new();
-            if let Some(pane) = pane {
-                p.insert("pane_id".to_string(), Value::String(pane));
-            }
-            if let Some(surface) = surface {
-                p.insert("surface_id".to_string(), Value::String(surface));
-            }
-            call_in_workspace_scope(client, workspace, "pane.break", Value::Object(p)).await
-        }
-        "join-pane" => {
-            let workspace = parse_opt(args, "--workspace");
-            let pane = parse_opt(args, "--pane");
-            let surface = parse_opt(args, "--surface");
-            let target = parse_opt(args, "--target-pane")
-                .ok_or_else(|| anyhow!("join-pane requires --target-pane"))?;
-            let mut p = Map::new();
-            p.insert("target_pane_id".to_string(), Value::String(target));
-            if let Some(pane) = pane {
-                p.insert("pane_id".to_string(), Value::String(pane));
-            }
-            if let Some(surface) = surface {
-                p.insert("surface_id".to_string(), Value::String(surface));
-            }
-            call_in_workspace_scope(client, workspace, "pane.join", Value::Object(p)).await
-        }
-        "last-pane" => {
-            let workspace = parse_opt(args, "--workspace");
-            call_in_workspace_scope(client, workspace, "pane.last", json!({})).await
-        }
         "clear-history" => {
             let workspace = parse_opt(args, "--workspace");
             let surface = parse_opt(args, "--surface");
@@ -2913,32 +2750,6 @@ async fn run_tmux_compat(client: &mut Client, command: &str, args: &[String]) ->
                 write_json_map(path, hooks)?;
                 Ok(json!({"ok": true}))
             })
-        }
-        "resize-pane" => {
-            let workspace = parse_opt(args, "--workspace");
-            let pane =
-                parse_opt(args, "--pane").ok_or_else(|| anyhow!("resize-pane requires --pane"))?;
-            let direction = if parse_flag(args, "-R") {
-                "right"
-            } else if parse_flag(args, "-L") {
-                "left"
-            } else if parse_flag(args, "-D") {
-                "down"
-            } else if parse_flag(args, "-U") {
-                "up"
-            } else {
-                "right"
-            };
-            let amount = parse_opt(args, "--amount")
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(1);
-            call_in_workspace_scope(
-                client,
-                workspace,
-                "pane.resize",
-                json!({"pane_id": pane, "direction": direction, "amount": amount}),
-            )
-            .await
         }
         "set-buffer" => {
             let name =
@@ -3153,15 +2964,6 @@ async fn execute_command(client: &mut Client, opts: &GlobalOptions) -> Result<Co
                 })
             }
         }
-        "new-pane" => {
-            let payload = run_new_pane(client, args).await?;
-            if opts.json_output {
-                CommandOutput::Json(payload)
-            } else {
-                let handle = handle_from_payload(&payload, "surface_id", "surface_ref");
-                CommandOutput::Text(format!("OK {}", handle))
-            }
-        }
         "tab-action" => {
             let payload = run_tab_action(client, args).await?;
             if opts.json_output {
@@ -3197,8 +2999,7 @@ async fn execute_command(client: &mut Client, opts: &GlobalOptions) -> Result<Co
             }
         }
         "pipe-pane" | "wait-for" | "find-window" | "last-window" | "next-window"
-        | "previous-window" | "swap-pane" | "break-pane" | "join-pane" | "last-pane"
-        | "clear-history" | "set-hook" | "resize-pane" | "set-buffer" | "list-buffers"
+        | "previous-window" | "clear-history" | "set-hook" | "set-buffer" | "list-buffers"
         | "paste-buffer" | "respawn-pane" | "display-message" | "popup" | "bind-key"
         | "unbind-key" | "copy-mode" => {
             let payload = run_tmux_compat(client, command, args).await?;
@@ -3601,89 +3402,5 @@ mod agent_team_tests {
         assert!(md.contains("limux notify"));
         assert!(md.contains("LIMUX_WORKSPACE_ID"));
         assert!(md.contains("LIMUX_SURFACE_ID"));
-        assert!(md.contains("limux new-pane --direction right --command bash"));
-        assert!(md.contains("Live GTK self-spawn currently supports terminal"));
-    }
-}
-
-#[cfg(test)]
-mod new_pane_tests {
-    use super::*;
-
-    fn args(values: &[&str]) -> Vec<String> {
-        values.iter().map(|value| value.to_string()).collect()
-    }
-
-    fn test_env(name: &str) -> Option<String> {
-        match name {
-            "LIMUX_WORKSPACE_ID" => Some("workspace:agent".to_string()),
-            "LIMUX_SURFACE_ID" => Some("surface:11:tab-a".to_string()),
-            "LIMUX_PANE_ID" => Some("pane:11".to_string()),
-            _ => None,
-        }
-    }
-
-    #[test]
-    fn new_pane_serializes_env_defaults_and_command() {
-        let (workspace, params) = build_new_pane_request(&args(&["--command", "claude"]), test_env);
-
-        assert_eq!(workspace.as_deref(), Some("workspace:agent"));
-        assert_eq!(
-            params,
-            json!({
-                "direction": "right",
-                "type": "terminal",
-                "surface_id": "surface:11:tab-a",
-                "pane_id": "pane:11",
-                "command": "claude"
-            })
-        );
-    }
-
-    #[test]
-    fn new_pane_flags_override_env_and_preserve_raw_refs() {
-        let (workspace, params) = build_new_pane_request(
-            &args(&[
-                "--workspace",
-                "raw-workspace",
-                "--surface",
-                "7:tab-b",
-                "--pane",
-                "7",
-                "--direction",
-                "down",
-                "--type",
-                "terminal",
-                "--command",
-                "codex --ask-for-approval never",
-            ]),
-            test_env,
-        );
-
-        assert_eq!(workspace.as_deref(), Some("raw-workspace"));
-        assert_eq!(
-            params,
-            json!({
-                "direction": "down",
-                "type": "terminal",
-                "surface_id": "7:tab-b",
-                "pane_id": "7",
-                "command": "codex --ask-for-approval never"
-            })
-        );
-    }
-
-    #[test]
-    fn new_pane_without_env_preserves_active_workspace_fallback() {
-        let (workspace, params) = build_new_pane_request(&args(&[]), |_| None);
-
-        assert_eq!(workspace, None);
-        assert_eq!(
-            params,
-            json!({
-                "direction": "right",
-                "type": "terminal"
-            })
-        );
     }
 }

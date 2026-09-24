@@ -501,6 +501,35 @@ pub fn normalize_session(mut state: AppSessionState) -> AppSessionState {
         state.active_workspace_index = state.workspaces.len() - 1;
     }
     for workspace in &mut state.workspaces {
+        if matches!(workspace.layout, LayoutNodeState::Split(_)) {
+            let mut pending = vec![std::mem::replace(
+                &mut workspace.layout,
+                LayoutNodeState::Pane(PaneState::fallback(None)),
+            )];
+            let mut merged = PaneState {
+                pane_id: None,
+                active_tab_id: None,
+                tabs: Vec::new(),
+            };
+            while let Some(node) = pending.pop() {
+                match node {
+                    LayoutNodeState::Pane(pane) => {
+                        if merged.pane_id.is_none() {
+                            merged.pane_id = pane.pane_id;
+                        }
+                        if merged.active_tab_id.is_none() {
+                            merged.active_tab_id = pane.active_tab_id;
+                        }
+                        merged.tabs.extend(pane.tabs);
+                    }
+                    LayoutNodeState::Split(split) => {
+                        pending.push(*split.end);
+                        pending.push(*split.start);
+                    }
+                }
+            }
+            workspace.layout = LayoutNodeState::Pane(merged);
+        }
         normalize_layout(
             &mut workspace.layout,
             workspace
@@ -623,11 +652,14 @@ struct HookSessionFile {
     sessions: BTreeMap<String, HookSessionRecord>,
 }
 
+type IndexedAgent = Option<(RestorableAgentState, f64)>;
+
 #[derive(Clone, Debug, Default)]
 pub struct RestorableAgentIndex {
     by_surface: HashMap<(String, String), (RestorableAgentState, f64)>,
-    by_any_workspace_surface: HashMap<String, Option<(RestorableAgentState, f64)>>,
-    by_tab_id: HashMap<String, Option<(RestorableAgentState, f64)>>,
+    by_any_workspace_surface: HashMap<String, IndexedAgent>,
+    by_workspace_tab_leaf: HashMap<(String, String, Option<String>), IndexedAgent>,
+    by_tab_id: HashMap<String, IndexedAgent>,
 }
 
 impl RestorableAgentIndex {
@@ -660,9 +692,10 @@ impl RestorableAgentIndex {
                 let Some(surface_id) = normalized_str(&record.surface_id) else {
                     continue;
                 };
-                let tab_id = surface_id
-                    .rsplit_once(':')
-                    .map(|(_, tab_id)| tab_id.to_string());
+                let mut parts = surface_id.splitn(3, ':');
+                let _pane_id = parts.next();
+                let tab_id = parts.next().map(str::to_owned);
+                let leaf_id = parts.next().map(str::to_owned);
                 let key = (workspace_id, surface_id);
                 if index
                     .by_surface
@@ -671,49 +704,41 @@ impl RestorableAgentIndex {
                 {
                     continue;
                 }
-                index.by_surface.insert(
-                    key.clone(),
-                    (
-                        RestorableAgentState {
-                            kind,
-                            session_id: session_id.clone(),
-                            cwd: record.cwd.clone(),
-                            launch_command: record.launch_command.clone(),
-                            restore_on_startup: true,
-                        },
-                        record.updated_at,
-                    ),
+                let candidate = (
+                    RestorableAgentState {
+                        kind,
+                        session_id,
+                        cwd: record.cwd.clone(),
+                        launch_command: record.launch_command.clone(),
+                        restore_on_startup: true,
+                    },
+                    record.updated_at,
                 );
+                index.by_surface.insert(key.clone(), candidate.clone());
                 match index.by_any_workspace_surface.entry(key.1) {
                     Entry::Vacant(entry) => {
-                        entry.insert(Some((
-                            RestorableAgentState {
-                                kind,
-                                session_id: session_id.clone(),
-                                cwd: record.cwd.clone(),
-                                launch_command: record.launch_command.clone(),
-                                restore_on_startup: true,
-                            },
-                            record.updated_at,
-                        )));
+                        entry.insert(Some(candidate.clone()));
                     }
                     Entry::Occupied(mut entry) => {
                         entry.insert(None);
                     }
                 }
                 if let Some(tab_id) = tab_id {
+                    match index.by_workspace_tab_leaf.entry((
+                        key.0.clone(),
+                        tab_id.clone(),
+                        leaf_id.clone(),
+                    )) {
+                        Entry::Vacant(entry) => {
+                            entry.insert(Some(candidate.clone()));
+                        }
+                        Entry::Occupied(mut entry) => {
+                            entry.insert(None);
+                        }
+                    }
                     match index.by_tab_id.entry(tab_id) {
                         Entry::Vacant(entry) => {
-                            entry.insert(Some((
-                                RestorableAgentState {
-                                    kind,
-                                    session_id: session_id.clone(),
-                                    cwd: record.cwd.clone(),
-                                    launch_command: record.launch_command.clone(),
-                                    restore_on_startup: true,
-                                },
-                                record.updated_at,
-                            )));
+                            entry.insert(Some(candidate.clone()));
                         }
                         Entry::Occupied(mut entry) => {
                             entry.insert(None);
@@ -746,6 +771,15 @@ impl RestorableAgentIndex {
                             .get(surface_id)
                             .and_then(|candidate| candidate.as_ref())
                     })
+            })
+            .or_else(|| {
+                self.by_workspace_tab_leaf
+                    .get(&(
+                        workspace_id.to_string(),
+                        tab_id.to_string(),
+                        leaf_id.map(str::to_owned),
+                    ))
+                    .and_then(|candidate| candidate.as_ref())
             })
             .or_else(|| {
                 self.by_tab_id
@@ -1192,6 +1226,89 @@ mod tests {
         let loaded = load_session_from_dir(dir.path());
         assert_eq!(loaded.source, SessionLoadSource::Canonical);
         assert_eq!(loaded.state.workspaces[0].name, "canonical");
+    }
+
+    #[test]
+    fn old_outer_splits_load_as_tabs_and_save_in_the_new_layout() {
+        let dir = tempdir().expect("tempdir");
+        let old = AppSessionState {
+            workspaces: vec![WorkspaceState {
+                id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+                name: "old layout".to_string(),
+                favorite: false,
+                cwd: Some("/tmp".to_string()),
+                folder_path: None,
+                layout: LayoutNodeState::Split(SplitState {
+                    orientation: SplitOrientation::Horizontal,
+                    ratio: 0.4,
+                    start: Box::new(LayoutNodeState::Pane(PaneState {
+                        pane_id: Some(10),
+                        active_tab_id: Some("first".to_string()),
+                        tabs: vec![TabState::terminal("first", Some("/tmp/first"))],
+                    })),
+                    end: Box::new(LayoutNodeState::Pane(PaneState {
+                        pane_id: Some(11),
+                        active_tab_id: Some("browser".to_string()),
+                        tabs: vec![
+                            TabState {
+                                id: "browser".to_string(),
+                                custom_name: None,
+                                pinned: false,
+                                content: TabContentState::Browser {
+                                    uri: Some("https://example.com".to_string()),
+                                },
+                            },
+                            TabState::terminal("second", Some("/tmp/second")),
+                        ],
+                    })),
+                }),
+            }],
+            ..AppSessionState::default()
+        };
+        fs::write(
+            canonical_session_path_in(dir.path()),
+            serde_json::to_vec(&old).unwrap(),
+        )
+        .expect("write old session");
+
+        let mut loaded = load_session_from_dir(dir.path()).state;
+        let LayoutNodeState::Pane(pane) = &loaded.workspaces[0].layout else {
+            panic!("outer splits must be flattened");
+        };
+        assert_eq!(pane.pane_id, Some(10));
+        assert_eq!(pane.active_tab_id.as_deref(), Some("first"));
+        assert_eq!(
+            pane.tabs
+                .iter()
+                .map(|tab| tab.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+
+        fs::write(
+            dir.path().join("codex-hook-sessions.json"),
+            r#"{"sessions":{"agent":{"session_id":"agent","workspace_id":"11111111-1111-4111-8111-111111111111","surface_id":"11:second:leaf-0","updated_at":1.0}}}"#,
+        )
+        .expect("write old agent record");
+        let index = RestorableAgentIndex::load_from_dir(dir.path());
+        attach_restorable_agents_to_layout(
+            &mut loaded.workspaces[0].layout,
+            "11111111-1111-4111-8111-111111111111",
+            &index,
+        );
+        let LayoutNodeState::Pane(pane) = &loaded.workspaces[0].layout else {
+            unreachable!()
+        };
+        let TabContentState::Terminal { agent, .. } = &pane.tabs[1].content else {
+            unreachable!()
+        };
+        assert_eq!(
+            agent.as_ref().map(|agent| agent.session_id.as_str()),
+            Some("agent")
+        );
+
+        save_session_atomic_in(dir.path(), &loaded).expect("save migrated session");
+        assert_eq!(load_session_from_dir(dir.path()).state, loaded);
     }
 
     #[test]

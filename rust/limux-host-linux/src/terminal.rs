@@ -1150,8 +1150,6 @@ pub struct TerminalCallbacks {
     pub on_open_url: Box<OpenUrlCallback>,
     pub on_split_right: Box<VoidCallback>,
     pub on_split_down: Box<VoidCallback>,
-    pub on_split_panel_right: Box<VoidCallback>,
-    pub on_split_panel_down: Box<VoidCallback>,
     pub on_swap: Box<VoidCallback>,
 }
 
@@ -1995,45 +1993,6 @@ fn surface_action(surface: Option<ghostty_surface_t>, action: &str) {
     }
 }
 
-fn context_submenu(labels: &[&str]) -> (gtk::Popover, Vec<gtk::Button>) {
-    let popover = gtk::Popover::new();
-    popover.set_has_arrow(false);
-    popover.set_position(gtk::PositionType::Right);
-    let menu_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    menu_box.set_margin_top(4);
-    menu_box.set_margin_bottom(4);
-    menu_box.set_margin_start(4);
-    menu_box.set_margin_end(4);
-    let buttons = labels
-        .iter()
-        .map(|label| {
-            let button = gtk::Button::with_label(label);
-            button.add_css_class("flat");
-            button.set_halign(gtk::Align::Fill);
-            if let Some(label) = button
-                .child()
-                .and_then(|child| child.downcast::<gtk::Label>().ok())
-            {
-                label.set_xalign(0.0);
-            }
-            menu_box.append(&button);
-            button
-        })
-        .collect();
-    popover.set_child(Some(&menu_box));
-    (popover, buttons)
-}
-
-fn attach_context_submenu(button: &gtk::Button, popover: &gtk::Popover) {
-    popover.set_parent(button);
-    let popover_for_motion = popover.clone();
-    let motion = gtk::EventControllerMotion::new();
-    motion.connect_enter(move |_, _, _| popover_for_motion.popup());
-    button.add_controller(motion);
-    let popover = popover.clone();
-    button.connect_clicked(move |_| popover.popup());
-}
-
 fn show_terminal_context_menu(
     gl_area: &gtk::GLArea,
     surface: Option<ghostty_surface_t>,
@@ -2058,30 +2017,10 @@ fn show_terminal_context_menu(
         ("---", false),
         ("Split Right", true),
         ("Split Down", true),
-        ("Split Panel", true),
         ("Swap", true),
         ("---", false),
         ("Clear", true),
     ];
-
-    let (split_panel_popover, split_panel_buttons) = context_submenu(&["Right", "Down"]);
-    for (btn, split_right) in split_panel_buttons.into_iter().zip([true, false]) {
-        let split_panel_popover = split_panel_popover.clone();
-        let popover = popover.clone();
-        let callbacks = callbacks.clone();
-        btn.connect_clicked(move |_| {
-            {
-                let callbacks = callbacks.borrow();
-                if split_right {
-                    (callbacks.on_split_panel_right)();
-                } else {
-                    (callbacks.on_split_panel_down)();
-                }
-            }
-            split_panel_popover.popdown();
-            popover.popdown();
-        });
-    }
 
     for (label, enabled) in &items {
         if *label == "---" {
@@ -2092,19 +2031,12 @@ fn show_terminal_context_menu(
             continue;
         }
 
-        let btn = gtk::Button::with_label(if *label == "Split Panel" {
-            "Split Panel >"
-        } else {
-            label
-        });
+        let btn = gtk::Button::with_label(label);
         btn.add_css_class("flat");
         btn.set_sensitive(*enabled);
         btn.set_halign(gtk::Align::Fill);
         if let Some(lbl) = btn.child().and_then(|c| c.downcast::<gtk::Label>().ok()) {
             lbl.set_xalign(0.0);
-        }
-        if *label == "Split Panel" {
-            attach_context_submenu(&btn, &split_panel_popover);
         }
         menu_box.append(&btn);
     }
@@ -2123,9 +2055,6 @@ fn show_terminal_context_menu(
             let cb = callbacks.clone();
 
             btn.connect_clicked(move |_| {
-                if label == "Split Panel >" {
-                    return;
-                }
                 pop.popdown();
                 match label.as_str() {
                     "Copy" => surface_action(surface, "copy_to_clipboard"),
@@ -2147,13 +2076,7 @@ fn show_terminal_context_menu(
         child = widget.next_sibling();
     }
 
-    {
-        let split_panel_popover = split_panel_popover.clone();
-        popover.connect_closed(move |p| {
-            split_panel_popover.popdown();
-            p.unparent();
-        });
-    }
+    popover.connect_closed(|p| p.unparent());
 
     popover.popup();
 }

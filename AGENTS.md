@@ -74,7 +74,7 @@ There are two control-server paths:
 
 When fixing user-visible CLI behavior, verify the production GTK bridge path,
 not only the standalone dispatcher. The live bridge supports workspace, pane,
-surface, terminal send/key/read/health, notification, and terminal pane-create
+surface, terminal send/key/read/health, notification, and agent surface-create
 commands. Check `docs/cmux-parity-plan.md` before changing agent automation.
 
 ## IDs And Env
@@ -114,7 +114,7 @@ is needed.
 The CLI surface lives in `rust/limux-cli/src/main.rs`:
 
 - `agent_launch_command` maps supported agents to launch commands.
-- `run_agent_team` splits the current workspace and launches peers.
+- `run_agent_team` adds peer surfaces in the caller's tab and launches agents.
 - `build_agents_md` writes the generated runtime protocol file.
 
 Keep `limux agent-team --dry-run` working without a host. For live behavior,

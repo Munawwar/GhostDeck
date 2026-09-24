@@ -44,7 +44,7 @@ limux close-surface --surface "$surface"
 ## Peer agent
 
 ```bash
-peer="$(limux --json new-pane --command 'codex "Task prompt"')"
+peer="$(limux --json add-surface --cmd 'codex "Task prompt"')"
 peer_surface="$(printf '%s\n' "$peer" | jq -r '.surface_id')"
 limux send --surface "$peer_surface" "message"
 ```

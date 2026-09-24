@@ -12,9 +12,7 @@ use gtk4 as gtk;
 use libadwaita as adw;
 
 use crate::app_config;
-use crate::control_bridge::{
-    BridgeError, ControlCommand, PaneCreateDirection as BridgePaneCreateDirection, WorkspaceTarget,
-};
+use crate::control_bridge::{BridgeError, ControlCommand, WorkspaceTarget};
 use crate::keybind_editor;
 use crate::layout_state::{
     self, AppSessionState, LayoutNodeState, LoadedSession, PaneState, WorkspaceState,
@@ -23,10 +21,9 @@ use crate::pane::{self, PaneCallbacks};
 use crate::shortcut_config::{
     self, EditableCapturePolicy, ResolvedShortcutConfig, ShortcutCommand, ShortcutId,
 };
-use crate::split_tree::{self, SplitTreeContainer};
 
-const PANE_CREATE_COMMAND_READY_INTERVAL_MS: u64 = 50;
-const PANE_CREATE_COMMAND_READY_ATTEMPTS: u32 = 40;
+const SURFACE_ADD_COMMAND_READY_INTERVAL_MS: u64 = 50;
+const SURFACE_ADD_COMMAND_READY_ATTEMPTS: u32 = 40;
 
 // ---------------------------------------------------------------------------
 // State
@@ -37,8 +34,6 @@ struct Workspace {
     name: String,
     /// The root widget in the content stack for this workspace.
     root: gtk::Widget,
-    /// Manages the split tree data model and async widget rebuild.
-    split_container: Rc<SplitTreeContainer>,
     /// The sidebar row widget.
     sidebar_row: gtk::ListBoxRow,
     /// Name label in sidebar row.
@@ -142,7 +137,7 @@ impl AppState {
     fn workspace_for_widget(&self, widget: &gtk::Widget) -> Option<&Workspace> {
         self.workspaces
             .iter()
-            .find(|workspace| widget.is_ancestor(&workspace.root))
+            .find(|workspace| widget == &workspace.root || widget.is_ancestor(&workspace.root))
     }
 }
 
@@ -158,7 +153,7 @@ fn surface_ref(id: &str) -> String {
     format!("surface:{id}")
 }
 
-fn pane_create_response_payload(
+fn surface_add_response_payload(
     workspace_id: &str,
     workspace_name: &str,
     surface: pane::SurfaceSummary,
@@ -242,7 +237,7 @@ fn terminal_tab_surface_error(error: pane::TerminalTabSurfaceError) -> BridgeErr
     }
 }
 
-fn send_create_response_after_command(
+fn send_add_response_after_command(
     pane_widget: gtk::Widget,
     surface_id: String,
     command: String,
@@ -254,7 +249,7 @@ fn send_create_response_after_command(
     let command = format!("{command}\n");
 
     glib::timeout_add_local(
-        std::time::Duration::from_millis(PANE_CREATE_COMMAND_READY_INTERVAL_MS),
+        std::time::Duration::from_millis(SURFACE_ADD_COMMAND_READY_INTERVAL_MS),
         move || {
             attempts += 1;
 
@@ -269,7 +264,7 @@ fn send_create_response_after_command(
                 }
             }
 
-            if attempts >= PANE_CREATE_COMMAND_READY_ATTEMPTS {
+            if attempts >= SURFACE_ADD_COMMAND_READY_ATTEMPTS {
                 if let Some(reply) = reply.take() {
                     let _ = reply.send(Err(BridgeError::internal(format!(
                         "command target surface {surface_id} never became writable"
@@ -420,198 +415,6 @@ fn focused_ids_for_workspace(state: &State, workspace_id: &str) -> (Option<u32>,
         return (None, None);
     };
     (Some(surface.pane_id), Some(surface.surface_id))
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
-pub(crate) enum PaneCreateDirection {
-    Left,
-    Right,
-    Up,
-    Down,
-}
-
-impl PaneCreateDirection {
-    #[allow(dead_code)]
-    pub(crate) fn from_str(raw: &str) -> Option<Self> {
-        match raw {
-            "left" => Some(Self::Left),
-            "right" => Some(Self::Right),
-            "up" => Some(Self::Up),
-            "down" => Some(Self::Down),
-            _ => None,
-        }
-    }
-}
-
-impl From<BridgePaneCreateDirection> for PaneCreateDirection {
-    fn from(direction: BridgePaneCreateDirection) -> Self {
-        match direction {
-            BridgePaneCreateDirection::Left => Self::Left,
-            BridgePaneCreateDirection::Right => Self::Right,
-            BridgePaneCreateDirection::Up => Self::Up,
-            BridgePaneCreateDirection::Down => Self::Down,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct PaneCreateSplitPlacement {
-    pub(crate) orientation: gtk::Orientation,
-    pub(crate) new_pane_first: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
-pub(crate) enum PaneCreateTargetError {
-    WorkspaceNotFound,
-    InvalidSurfaceId(String),
-    InvalidPaneId(u32),
-    NoPanes,
-}
-
-#[allow(dead_code)]
-pub(crate) struct ResolvedPaneCreateTarget {
-    pub(crate) workspace_id: String,
-    pub(crate) pane_id: u32,
-    pub(crate) pane_widget: gtk::Widget,
-    pub(crate) placement: PaneCreateSplitPlacement,
-}
-
-fn pane_create_split_placement(direction: PaneCreateDirection) -> PaneCreateSplitPlacement {
-    match direction {
-        PaneCreateDirection::Left => PaneCreateSplitPlacement {
-            orientation: gtk::Orientation::Horizontal,
-            new_pane_first: true,
-        },
-        PaneCreateDirection::Right => PaneCreateSplitPlacement {
-            orientation: gtk::Orientation::Horizontal,
-            new_pane_first: false,
-        },
-        PaneCreateDirection::Up => PaneCreateSplitPlacement {
-            orientation: gtk::Orientation::Vertical,
-            new_pane_first: true,
-        },
-        PaneCreateDirection::Down => PaneCreateSplitPlacement {
-            orientation: gtk::Orientation::Vertical,
-            new_pane_first: false,
-        },
-    }
-}
-
-fn normalize_surface_handle(raw: &str) -> &str {
-    raw.trim()
-        .strip_prefix("surface:")
-        .unwrap_or_else(|| raw.trim())
-}
-
-fn resolve_pane_create_source_id(
-    surface_id: Option<&str>,
-    pane_id: Option<u32>,
-    focused_pane_id: Option<u32>,
-    target_workspace_is_active: bool,
-    pane_ids: &[u32],
-    surface_to_pane: &[(&str, u32)],
-) -> Result<u32, PaneCreateTargetError> {
-    if pane_ids.is_empty() {
-        return Err(PaneCreateTargetError::NoPanes);
-    }
-
-    if let Some(surface_id) = surface_id {
-        let requested = normalize_surface_handle(surface_id);
-        return surface_to_pane
-            .iter()
-            .find(|(known_surface_id, _)| {
-                *known_surface_id == requested
-                    || known_surface_id
-                        .strip_prefix(requested)
-                        .is_some_and(|suffix| suffix.starts_with(':'))
-            })
-            .map(|(_, pane_id)| *pane_id)
-            .ok_or_else(|| PaneCreateTargetError::InvalidSurfaceId(surface_id.to_string()));
-    }
-
-    if let Some(pane_id) = pane_id {
-        if pane_ids.contains(&pane_id) {
-            return Ok(pane_id);
-        }
-        return Err(PaneCreateTargetError::InvalidPaneId(pane_id));
-    }
-
-    if target_workspace_is_active {
-        if let Some(focused_pane_id) = focused_pane_id {
-            if pane_ids.contains(&focused_pane_id) {
-                return Ok(focused_pane_id);
-            }
-        }
-    }
-
-    pane_ids
-        .first()
-        .copied()
-        .ok_or(PaneCreateTargetError::NoPanes)
-}
-
-fn pane_create_target_error(error: PaneCreateTargetError) -> BridgeError {
-    match error {
-        PaneCreateTargetError::WorkspaceNotFound => BridgeError::not_found("workspace not found"),
-        PaneCreateTargetError::InvalidSurfaceId(_) => BridgeError::not_found("surface not found"),
-        PaneCreateTargetError::InvalidPaneId(_) => BridgeError::not_found("pane not found"),
-        PaneCreateTargetError::NoPanes => BridgeError::not_found("pane not found"),
-    }
-}
-
-#[allow(dead_code)]
-pub(crate) fn resolve_pane_create_target(
-    state: &State,
-    target: &WorkspaceTarget,
-    surface_id: Option<&str>,
-    pane_id: Option<u32>,
-    direction: PaneCreateDirection,
-) -> Result<ResolvedPaneCreateTarget, PaneCreateTargetError> {
-    let (workspace_id, workspace_root, target_workspace_is_active) = {
-        let app_state = state.borrow();
-        let workspace_index = workspace_index_for_target(&app_state, target)
-            .ok_or(PaneCreateTargetError::WorkspaceNotFound)?;
-        let workspace = &app_state.workspaces[workspace_index];
-        (
-            workspace.id.clone(),
-            workspace.root.clone(),
-            workspace_index == app_state.active_idx,
-        )
-    };
-
-    let pane_summaries = pane::pane_summaries_for_root(&workspace_root);
-    let pane_ids = pane_summaries
-        .iter()
-        .map(|summary| summary.pane_id)
-        .collect::<Vec<_>>();
-    let surface_summaries = pane::surface_summaries_for_root(&workspace_root);
-    let surface_to_pane = surface_summaries
-        .iter()
-        .map(|surface| (surface.surface_id.as_str(), surface.pane_id))
-        .collect::<Vec<_>>();
-    let focused_pane_id = target_workspace_is_active
-        .then(|| focused_ids_for_workspace(state, &workspace_id).0)
-        .flatten();
-
-    let pane_id = resolve_pane_create_source_id(
-        surface_id,
-        pane_id,
-        focused_pane_id,
-        target_workspace_is_active,
-        &pane_ids,
-        &surface_to_pane,
-    )?;
-    let pane_widget = pane::pane_widget_for_root(&workspace_root, pane_id)
-        .ok_or(PaneCreateTargetError::InvalidPaneId(pane_id))?;
-
-    Ok(ResolvedPaneCreateTarget {
-        workspace_id,
-        pane_id,
-        pane_widget,
-        placement: pane_create_split_placement(direction),
-    })
 }
 
 fn pane_list_payload(state: &State, workspace: &Workspace) -> serde_json::Value {
@@ -795,7 +598,8 @@ fn surface_health_payload(
     workspace: &Workspace,
     surface_hint: Option<&str>,
 ) -> Result<serde_json::Value, BridgeError> {
-    let requested = surface_hint.map(normalize_surface_handle);
+    let requested =
+        surface_hint.map(|raw| raw.trim().strip_prefix("surface:").unwrap_or(raw.trim()));
     let surfaces = pane::surface_summaries_for_root(&workspace.root)
         .into_iter()
         .filter(|surface| {
@@ -1070,10 +874,10 @@ fn snapshot_session_state(state: &State) -> AppSessionState {
             let cwd = workspace.cwd.borrow().clone();
             let folder_path = workspace.folder_path.clone();
             let working_directory = folder_path.clone().or(cwd.clone());
-            let mut layout = workspace
-                .split_container
-                .tree()
-                .snapshot(working_directory.as_deref());
+            let mut layout = LayoutNodeState::Pane(
+                pane::snapshot_pane_state(&workspace.root)
+                    .unwrap_or_else(|| PaneState::fallback(working_directory.as_deref())),
+            );
             layout_state::attach_restorable_agents_to_layout(
                 &mut layout,
                 &workspace.id,
@@ -1125,25 +929,6 @@ pub(crate) fn update_split_ratio_state(paned: &gtk::Paned, ratio: f64) {
             paned.set_data(SPLIT_RATIO_STATE_KEY, Rc::new(RefCell::new(ratio)));
         }
     }
-}
-
-fn build_workspace_root(
-    state: &State,
-    shortcuts: &Rc<ResolvedShortcutConfig>,
-    ws_id: &str,
-    working_directory: Option<&str>,
-    layout: &LayoutNodeState,
-) -> (gtk::Widget, Rc<SplitTreeContainer>) {
-    let tree_node = split_tree::build_split_node_from_layout(
-        state,
-        shortcuts,
-        ws_id,
-        working_directory,
-        layout,
-    );
-    let container = SplitTreeContainer::new_from_tree(state, tree_node);
-    let root = container.widget().clone().upcast::<gtk::Widget>();
-    (root, container)
 }
 
 fn apply_ratio_value(paned: &gtk::Paned, orientation: gtk::Orientation, ratio: f64) -> bool {
@@ -1241,33 +1026,6 @@ pub(crate) fn apply_split_ratio_after_layout(
     // Reads from the cell so drag-adjusted ratios are restored correctly.
     paned.connect_map(move |_| {
         schedule_restore_for_map(&paned_for_map, &ratio_cell_for_map, &applying_for_map);
-    });
-}
-
-pub(crate) fn attach_split_position_persistence(
-    state: &State,
-    paned: &gtk::Paned,
-    applying: Rc<Cell<bool>>,
-) {
-    update_split_ratio_state(paned, layout_state::DEFAULT_SPLIT_RATIO);
-    let state = state.clone();
-    paned.connect_position_notify(move |paned| {
-        if applying.get() {
-            return;
-        }
-        let allocation = paned.allocation();
-        let size = if paned.orientation() == gtk::Orientation::Horizontal {
-            allocation.width()
-        } else {
-            allocation.height()
-        };
-        let ratio = layout_state::snapshot_split_ratio(
-            paned.position(),
-            size,
-            split_ratio_state(paned).map(|ratio| *ratio.borrow()),
-        );
-        update_split_ratio_state(paned, ratio);
-        request_session_save(&state);
     });
 }
 
@@ -2265,44 +2023,12 @@ fn dispatch_shortcut_command(state: &State, command: ShortcutCommand) -> bool {
             }
             true
         }
-        ShortcutCommand::SplitPanelDown => {
-            split_focused_panel(state, gtk::Orientation::Vertical);
-            true
-        }
-        ShortcutCommand::SplitPanelRight => {
-            split_focused_panel(state, gtk::Orientation::Horizontal);
-            true
-        }
-        ShortcutCommand::CloseFocusedPane => {
-            close_focused_tab(state);
-            true
-        }
-        ShortcutCommand::ToggleFocusedPaneZoom => {
-            toggle_focused_pane_zoom(state);
-            true
-        }
         ShortcutCommand::FocusLeft => {
             focus_inner_terminal_in_direction(state, pane::TerminalFocusDirection::Left);
             true
         }
         ShortcutCommand::FocusRight => {
             focus_inner_terminal_in_direction(state, pane::TerminalFocusDirection::Right);
-            true
-        }
-        ShortcutCommand::FocusPanelLeft => {
-            focus_pane_in_direction(state, Direction::Left);
-            true
-        }
-        ShortcutCommand::FocusPanelRight => {
-            focus_pane_in_direction(state, Direction::Right);
-            true
-        }
-        ShortcutCommand::FocusUp => {
-            focus_pane_in_direction(state, Direction::Up);
-            true
-        }
-        ShortcutCommand::FocusDown => {
-            focus_pane_in_direction(state, Direction::Down);
             true
         }
         ShortcutCommand::ActivateWorkspace1 => {
@@ -3066,18 +2792,6 @@ fn favorites_prefix_len(flags: &[bool]) -> usize {
     flags.iter().take_while(|is_favorite| **is_favorite).count()
 }
 
-#[cfg(test)]
-fn workspace_drop_layout_path(layout: &LayoutNodeState) -> Vec<bool> {
-    match layout {
-        LayoutNodeState::Pane(_) => Vec::new(),
-        LayoutNodeState::Split(split) => {
-            let mut path = vec![true];
-            path.extend(workspace_drop_layout_path(&split.start));
-            path
-        }
-    }
-}
-
 fn tab_drag_workspace_seed(
     source: WorkspaceSeedSource,
     title: &str,
@@ -3507,7 +3221,7 @@ fn handle_tab_drop_to_workspace(state: &State, target_workspace_id: &str, payloa
         else {
             return false;
         };
-        find_leaf_pane(&workspace.root, gtk::Orientation::Horizontal, true)
+        workspace.root.clone()
     };
 
     pane::move_tab_to_pane(&source_pane, tab_id, &target_pane)
@@ -3563,8 +3277,7 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
         None,
         true,
     );
-    let split_container = SplitTreeContainer::new(state, pane.clone().upcast());
-    let root = split_container.widget().clone();
+    let root = pane.clone().upcast::<gtk::Widget>();
 
     let (row, name_label, favorite_button, notify_dot, notify_label, path_label) =
         build_sidebar_row(&seed.name, seed.folder_path.as_deref());
@@ -3579,7 +3292,6 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
             id: new_workspace_id.clone(),
             name: seed.name.clone(),
             root: root.clone().upcast(),
-            split_container,
             sidebar_row: row,
             name_label,
             favorite_button,
@@ -4142,83 +3854,6 @@ fn handle_control_command(state: &State, command: ControlCommand) {
 
             let _ = reply.send(Ok(result));
         }
-        ControlCommand::CreatePane { request, reply } => {
-            let source_pane_id = request
-                .source_pane_id
-                .as_deref()
-                .and_then(parse_pane_handle);
-            if request.source_pane_id.is_some() && source_pane_id.is_none() {
-                let _ = reply.send(Err(BridgeError::invalid_params(
-                    "pane.create requires a valid pane_id",
-                )));
-                return;
-            }
-
-            let direction = PaneCreateDirection::from(request.direction);
-            let resolved = match resolve_pane_create_target(
-                state,
-                &request.target,
-                request.source_surface_id.as_deref(),
-                source_pane_id,
-                direction,
-            ) {
-                Ok(resolved) => resolved,
-                Err(error) => {
-                    let _ = reply.send(Err(pane_create_target_error(error)));
-                    return;
-                }
-            };
-
-            let workspace_name = {
-                let app_state = state.borrow();
-                app_state
-                    .workspaces
-                    .iter()
-                    .find(|workspace| workspace.id == resolved.workspace_id)
-                    .map(|workspace| workspace.name.clone())
-            };
-            let Some(workspace_name) = workspace_name else {
-                let _ = reply.send(Err(BridgeError::not_found("workspace not found")));
-                return;
-            };
-
-            let new_pane = split_pane(
-                state,
-                &resolved.workspace_id,
-                &resolved.pane_widget,
-                resolved.placement.orientation,
-                SplitPaneOptions {
-                    initial_state: None,
-                    skip_default_tab: false,
-                    new_pane_first: resolved.placement.new_pane_first,
-                    persist: true,
-                },
-            );
-            let Some(new_pane) = new_pane else {
-                let _ = reply.send(Err(BridgeError::invalid_params(
-                    "not enough room to split pane",
-                )));
-                return;
-            };
-
-            let Some(surface) = pane::active_surface_summary(&new_pane) else {
-                let _ = reply.send(Err(BridgeError::internal(
-                    "pane.create did not produce a terminal surface",
-                )));
-                return;
-            };
-
-            let surface_id = surface.surface_id.clone();
-            let response =
-                pane_create_response_payload(&resolved.workspace_id, &workspace_name, surface);
-
-            if let Some(command) = request.command {
-                send_create_response_after_command(new_pane, surface_id, command, response, reply);
-                return;
-            }
-
-            let _ = reply.send(Ok(response));
-        }
         ControlCommand::AddSurface { request, reply } => {
             let (workspace_id, workspace_name, pane_widget) =
                 match terminal_tab_target(state, &request.target, &request.tab_id) {
@@ -4250,7 +3885,7 @@ fn handle_control_command(state: &State, command: ControlCommand) {
             };
             let surface_id = surface.surface_id.clone();
             let mut response =
-                pane_create_response_payload(&workspace_id, &workspace_name, surface);
+                surface_add_response_payload(&workspace_id, &workspace_name, surface);
             if let Some(response) = response.as_object_mut() {
                 response.insert(
                     "tab_id".to_string(),
@@ -4262,13 +3897,7 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 );
             }
             if let Some(command) = request.command {
-                send_create_response_after_command(
-                    pane_widget,
-                    surface_id,
-                    command,
-                    response,
-                    reply,
-                );
+                send_add_response_after_command(pane_widget, surface_id, command, response, reply);
             } else {
                 let _ = reply.send(Ok(response));
             }
@@ -4762,8 +4391,12 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
         .folder_path
         .as_deref()
         .or(workspace.cwd.as_deref());
-    let (root, split_container) =
-        build_workspace_root(state, &shortcuts, &id, working_dir, &workspace.layout);
+    let LayoutNodeState::Pane(pane_state) = &workspace.layout else {
+        unreachable!("session must be normalized")
+    };
+    let root =
+        create_pane_for_workspace(state, &shortcuts, &id, working_dir, Some(pane_state), false)
+            .upcast::<gtk::Widget>();
     stack.add_named(&root, Some(&stack_name));
 
     let (row, name_label, favorite_button, notify_dot, notify_label, path_label) =
@@ -4776,7 +4409,6 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
         id,
         name: workspace.name.clone(),
         root,
-        split_container,
         sidebar_row: row.clone(),
         name_label,
         favorite_button,
@@ -4812,42 +4444,19 @@ pub(crate) fn create_pane_for_workspace(
     initial_state: Option<&PaneState>,
     skip_default_tab: bool,
 ) -> gtk::Box {
-    let state_for_split = state.clone();
-    let state_for_close = state.clone();
     let state_for_bell = state.clone();
     let state_for_desktop_notification = state.clone();
     let state_for_pwd = state.clone();
     let state_for_empty = state.clone();
-    let ws_id_split = ws_id.to_string();
-    let ws_id_close = ws_id.to_string();
     let ws_id_bell = ws_id.to_string();
     let ws_id_desktop_notification = ws_id.to_string();
     let ws_id_pwd = ws_id.to_string();
     let ws_id_empty = ws_id.to_string();
-    let state_for_split_with_tab = state.clone();
     let state_for_config = state.clone();
     let state_for_config_changed = state.clone();
-    let ws_id_split_with_tab = ws_id.to_string();
     let ws_id_for_env = ws_id.to_string();
 
     let callbacks = Rc::new(PaneCallbacks {
-        on_split: Box::new(move |pane_widget, orientation| {
-            split_pane(
-                &state_for_split,
-                &ws_id_split,
-                pane_widget,
-                orientation,
-                SplitPaneOptions {
-                    initial_state: None,
-                    skip_default_tab: false,
-                    new_pane_first: false,
-                    persist: true,
-                },
-            );
-        }),
-        on_close_pane: Box::new(move |pane_widget| {
-            request_pane_close_confirmation(&state_for_close, &ws_id_close, pane_widget);
-        }),
         on_bell: Box::new(move |source_focused: bool, pane_id: u32, tab_id: &str| {
             // Defer to avoid RefCell borrow conflicts — bell can fire during state mutation
             let state = state_for_bell.clone();
@@ -4911,27 +4520,13 @@ pub(crate) fn create_pane_for_workspace(
                 }
             });
         }),
-        on_empty: Box::new(move |pane_widget, reason| {
-            let persist = matches!(reason, pane::PaneEmptyReason::ClosedLastTab);
-            remove_pane_internal(&state_for_empty, &ws_id_empty, pane_widget, persist);
+        on_empty: Box::new(move || {
+            close_workspace_by_id(&state_for_empty, &ws_id_empty);
         }),
         on_state_changed: Box::new({
             let state = state.clone();
             move || request_session_save(&state)
         }),
-        on_split_with_tab: Box::new(
-            move |source_pane, target_pane, orientation, tab_id, new_pane_first| {
-                handle_split_with_tab(
-                    &state_for_split_with_tab,
-                    &ws_id_split_with_tab,
-                    source_pane,
-                    target_pane,
-                    orientation,
-                    &tab_id,
-                    new_pane_first,
-                );
-            },
-        ),
         current_config: Box::new(move || {
             let s = state_for_config.borrow();
             s.config.clone()
@@ -5001,11 +4596,7 @@ fn close_workspace_by_id_internal(
         .or_else(|| s.active_workspace().map(|workspace| workspace.id.clone()));
 
     let ws = s.workspaces.remove(idx);
-    let mut panes = Vec::new();
-    collect_leaf_panes(&ws.root, &mut panes);
-    for pane_widget in panes {
-        pane::close_processes(&pane_widget);
-    }
+    pane::close_processes(&ws.root);
     s.stack.remove(&ws.root);
     s.sidebar_list.remove(&ws.sidebar_row);
 
@@ -5285,122 +4876,6 @@ fn toggle_sidebar(state: &State) {
 // Split / close pane operations
 // ---------------------------------------------------------------------------
 
-struct SplitPaneOptions {
-    initial_state: Option<PaneState>,
-    skip_default_tab: bool,
-    new_pane_first: bool,
-    persist: bool,
-}
-
-fn split_pane(
-    state: &State,
-    ws_id: &str,
-    pane_widget: &gtk::Widget,
-    orientation: gtk::Orientation,
-    options: SplitPaneOptions,
-) -> Option<gtk::Widget> {
-    let (shortcuts, wd, container) = {
-        let s = state.borrow();
-        (
-            s.shortcuts.clone(),
-            s.workspaces
-                .iter()
-                .find(|w| w.id == ws_id)
-                .and_then(|ws| ws.folder_path.clone().or_else(|| ws.cwd.borrow().clone())),
-            s.workspaces
-                .iter()
-                .find(|w| w.id == ws_id)
-                .map(|ws| ws.split_container.clone()),
-        )
-    };
-    let container = container?;
-    if !container.can_split(pane_widget, orientation) {
-        return None;
-    }
-
-    let new_pane = create_pane_for_workspace(
-        state,
-        &shortcuts,
-        ws_id,
-        wd.as_deref(),
-        options.initial_state.as_ref(),
-        options.skip_default_tab,
-    );
-
-    // Mutate the data model and trigger async widget tree rebuild.
-    // The existing pane's GLArea will be unrealized then re-realized
-    // on separate ticks, avoiding the GTK4 GLArea breakage.
-    if !container.split(
-        pane_widget,
-        new_pane.clone().upcast(),
-        orientation,
-        options.new_pane_first,
-        layout_state::DEFAULT_SPLIT_RATIO,
-    ) {
-        return None;
-    }
-    if options.persist {
-        request_session_save(state);
-    }
-    Some(new_pane.upcast())
-}
-
-fn remove_pane_internal(state: &State, ws_id: &str, pane_widget: &gtk::Widget, persist: bool) {
-    let container = {
-        let s = state.borrow();
-        s.workspaces
-            .iter()
-            .find(|w| w.id == ws_id)
-            .map(|ws| ws.split_container.clone())
-    };
-
-    let Some(container) = container else { return };
-
-    // If this is the only pane, close the entire workspace
-    if container.is_single_pane() {
-        close_workspace_by_id(state, ws_id);
-        return;
-    }
-
-    // Mutate the data model and trigger async widget tree rebuild
-    pane::close_processes(pane_widget);
-    container.remove(pane_widget);
-
-    if persist {
-        request_session_save(state);
-    }
-}
-
-fn handle_split_with_tab(
-    state: &State,
-    ws_id: &str,
-    source_pane: &gtk::Widget,
-    target_pane: &gtk::Widget,
-    orientation: gtk::Orientation,
-    tab_id: &str,
-    new_pane_first: bool,
-) {
-    if pane::tab_title(source_pane, tab_id).is_none() {
-        return;
-    }
-    let new_pane = split_pane(
-        state,
-        ws_id,
-        target_pane,
-        orientation,
-        SplitPaneOptions {
-            initial_state: None,
-            skip_default_tab: true,
-            new_pane_first,
-            persist: false,
-        },
-    );
-    let Some(new_pane) = new_pane else { return };
-    if pane::move_tab_to_pane(source_pane, tab_id, &new_pane) {
-        request_session_save(state);
-    }
-}
-
 /// Find the focused pane widget (a gtk::Box with class limux-pane-toolbar child)
 /// by walking up from the currently focused widget.
 fn find_leaf_focused_pane(state: &State) -> Option<(String, gtk::Widget)> {
@@ -5443,7 +4918,7 @@ fn find_focused_pane(state: &State) -> Option<(String, gtk::Widget)> {
         (ws.id.clone(), ws.root.clone())
     };
 
-    Some((ws_id, first_leaf_pane(&root)))
+    Some((ws_id, root))
 }
 
 fn focused_shortcut_target(state: &State) -> pane::FocusedShortcutTarget {
@@ -5519,27 +4994,6 @@ fn request_workspace_close_confirmation(state: &State, workspace_id: &str) {
     dialog.choose(Some(&window), None::<&gio::Cancellable>, move |response| {
         if response.ok() == Some(1) {
             close_workspace_by_id(&state, &workspace_id);
-        }
-    });
-}
-
-fn request_pane_close_confirmation(state: &State, workspace_id: &str, pane_widget: &gtk::Widget) {
-    let window = state.borrow().window.clone();
-    let dialog = gtk::AlertDialog::builder()
-        .modal(true)
-        .message("Close this pane?")
-        .detail("All terminals and running processes in this pane will be closed.")
-        .build();
-    dialog.set_buttons(&["Cancel", "Close Pane"]);
-    dialog.set_default_button(0);
-    dialog.set_cancel_button(0);
-
-    let state = state.clone();
-    let workspace_id = workspace_id.to_string();
-    let pane_widget = pane_widget.clone();
-    dialog.choose(Some(&window), None::<&gio::Cancellable>, move |response| {
-        if response.ok() == Some(1) {
-            remove_pane_internal(&state, &workspace_id, &pane_widget, true);
         }
     });
 }
@@ -5643,74 +5097,14 @@ fn broadcast_font_size(size: f32) {
 }
 
 fn split_focused_terminal(state: &State, orientation: gtk::Orientation) {
-    if let Some((ws_id, pane_widget)) = find_focused_pane(state) {
-        if pane::split_active_terminal_tab_in_pane(&pane_widget, orientation) {
-            return;
-        }
-        let _ = split_pane(
-            state,
-            &ws_id,
-            &pane_widget,
-            orientation,
-            SplitPaneOptions {
-                initial_state: None,
-                skip_default_tab: false,
-                new_pane_first: false,
-                persist: true,
-            },
-        );
-    }
-}
-
-fn split_focused_panel(state: &State, orientation: gtk::Orientation) {
-    if let Some((ws_id, pane_widget)) = find_focused_pane(state) {
-        let _ = split_pane(
-            state,
-            &ws_id,
-            &pane_widget,
-            orientation,
-            SplitPaneOptions {
-                initial_state: None,
-                skip_default_tab: false,
-                new_pane_first: false,
-                persist: true,
-            },
-        );
+    if let Some((_, pane_widget)) = find_focused_pane(state) {
+        pane::split_active_terminal_tab_in_pane(&pane_widget, orientation);
     }
 }
 
 fn cycle_focused_pane_tab(state: &State, delta: i32) {
     if let Some((_ws_id, pane_widget)) = find_focused_pane(state) {
         pane::cycle_tab_in_pane(&pane_widget, delta);
-    }
-}
-
-fn close_focused_tab(state: &State) {
-    if let Some((ws_id, pane_widget)) = find_focused_pane(state) {
-        let parent = pane_widget.parent();
-        // If this is the only pane (parent is Stack), don't close — keep workspace alive
-        if let Some(ref p) = parent {
-            if p.downcast_ref::<gtk::Stack>().is_some() {
-                return;
-            }
-        }
-        request_pane_close_confirmation(state, &ws_id, &pane_widget);
-    }
-}
-
-fn toggle_focused_pane_zoom(state: &State) {
-    let Some((ws_id, pane_widget)) = find_focused_pane(state) else {
-        return;
-    };
-    let container = {
-        let s = state.borrow();
-        s.workspaces
-            .iter()
-            .find(|workspace| workspace.id == ws_id)
-            .map(|workspace| workspace.split_container.clone())
-    };
-    if let Some(container) = container {
-        container.toggle_zoom(&pane_widget);
     }
 }
 
@@ -5725,227 +5119,6 @@ fn focus_inner_terminal_in_direction(state: &State, direction: pane::TerminalFoc
         return;
     };
     let _ = pane::focus_active_terminal_in_pane(&pane_widget, direction);
-}
-
-/// Direction for pane navigation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Direction {
-    Left,
-    Right,
-    Up,
-    Down,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct PaneBounds {
-    left: f64,
-    top: f64,
-    right: f64,
-    bottom: f64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct NeighborScore {
-    has_overlap: bool,
-    overlap: i32,
-    gap: i32,
-    center_delta: i32,
-}
-
-/// Focus the neighboring pane in the given direction by walking the gtk::Paned tree.
-fn focus_pane_in_direction(state: &State, direction: Direction) {
-    let (_ws_id, pane_widget) = match find_focused_pane(state) {
-        Some(v) => v,
-        None => return,
-    };
-    let root = state.borrow().window.clone().upcast::<gtk::Widget>();
-
-    // Determine which axis and sides we care about.
-    let (target_orientation, must_be_start) = match direction {
-        Direction::Left => (gtk::Orientation::Horizontal, false), // must be end_child to go left
-        Direction::Right => (gtk::Orientation::Horizontal, true), // must be start_child to go right
-        Direction::Up => (gtk::Orientation::Vertical, false),     // must be end_child to go up
-        Direction::Down => (gtk::Orientation::Vertical, true),    // must be start_child to go down
-    };
-
-    // Walk up from the focused pane to find a gtk::Paned with the right
-    // orientation where the current subtree is on the correct side.
-    let mut current: gtk::Widget = pane_widget.clone();
-    loop {
-        let parent = match current.parent() {
-            Some(p) => p,
-            None => return, // reached the top without finding a valid split
-        };
-        if let Some(paned) = parent.downcast_ref::<gtk::Paned>() {
-            if paned.orientation() == target_orientation {
-                let is_start = paned.start_child().map(|c| c == current).unwrap_or(false);
-                if is_start == must_be_start {
-                    // Found the split point. Navigate to the sibling subtree.
-                    let sibling = if must_be_start {
-                        paned.end_child()
-                    } else {
-                        paned.start_child()
-                    };
-                    if let Some(sibling) = sibling {
-                        let leaf =
-                            best_directional_leaf_pane(&pane_widget, &sibling, &root, direction)
-                                .unwrap_or_else(|| {
-                                    // Fall back to the old edge-based heuristic if bounds
-                                    // are unavailable for some reason.
-                                    let prefer_start = !must_be_start;
-                                    find_leaf_pane(&sibling, target_orientation, prefer_start)
-                                });
-                        // Find the GLArea inside the pane and focus it directly
-                        if let Some(gl) = find_gl_area(&leaf) {
-                            gl.grab_focus();
-                        }
-                    }
-                    return;
-                }
-            }
-        }
-        current = parent;
-    }
-}
-
-fn widget_bounds_in_root(widget: &gtk::Widget, root: &gtk::Widget) -> Option<PaneBounds> {
-    let allocation = widget.allocation();
-    let width = allocation.width();
-    let height = allocation.height();
-    if width <= 0 || height <= 0 {
-        return None;
-    }
-
-    let (left, top) = widget.translate_coordinates(root, 0.0, 0.0)?;
-    Some(PaneBounds {
-        left,
-        top,
-        right: left + f64::from(width),
-        bottom: top + f64::from(height),
-    })
-}
-
-fn overlap_1d(a_start: f64, a_end: f64, b_start: f64, b_end: f64) -> i32 {
-    (a_end.min(b_end) - a_start.max(b_start)).max(0.0).round() as i32
-}
-
-fn directional_neighbor_score(
-    current: PaneBounds,
-    candidate: PaneBounds,
-    direction: Direction,
-) -> Option<NeighborScore> {
-    let (gap, overlap, current_center, candidate_center) = match direction {
-        Direction::Left => (
-            current.left - candidate.right,
-            overlap_1d(current.top, current.bottom, candidate.top, candidate.bottom),
-            (current.top + current.bottom) / 2.0,
-            (candidate.top + candidate.bottom) / 2.0,
-        ),
-        Direction::Right => (
-            candidate.left - current.right,
-            overlap_1d(current.top, current.bottom, candidate.top, candidate.bottom),
-            (current.top + current.bottom) / 2.0,
-            (candidate.top + candidate.bottom) / 2.0,
-        ),
-        Direction::Up => (
-            current.top - candidate.bottom,
-            overlap_1d(current.left, current.right, candidate.left, candidate.right),
-            (current.left + current.right) / 2.0,
-            (candidate.left + candidate.right) / 2.0,
-        ),
-        Direction::Down => (
-            candidate.top - current.bottom,
-            overlap_1d(current.left, current.right, candidate.left, candidate.right),
-            (current.left + current.right) / 2.0,
-            (candidate.left + candidate.right) / 2.0,
-        ),
-    };
-
-    if gap < -0.5 {
-        return None;
-    }
-
-    Some(NeighborScore {
-        has_overlap: overlap > 0,
-        overlap,
-        gap: gap.max(0.0).round() as i32,
-        center_delta: (candidate_center - current_center).abs().round() as i32,
-    })
-}
-
-fn neighbor_score_better(candidate: NeighborScore, best: NeighborScore) -> bool {
-    (
-        candidate.has_overlap,
-        candidate.overlap,
-        -candidate.gap,
-        -candidate.center_delta,
-    ) > (
-        best.has_overlap,
-        best.overlap,
-        -best.gap,
-        -best.center_delta,
-    )
-}
-
-fn collect_leaf_panes(widget: &gtk::Widget, panes: &mut Vec<gtk::Widget>) {
-    if pane::is_pane_widget(widget) {
-        panes.push(widget.clone());
-        return;
-    }
-
-    if let Some(paned) = widget.downcast_ref::<gtk::Paned>() {
-        if let Some(child) = paned.start_child() {
-            collect_leaf_panes(&child, panes);
-        }
-        if let Some(child) = paned.end_child() {
-            collect_leaf_panes(&child, panes);
-        }
-        return;
-    }
-
-    if let Some(stack) = widget.downcast_ref::<gtk::Stack>() {
-        if let Some(visible) = stack.visible_child() {
-            collect_leaf_panes(&visible, panes);
-        }
-        return;
-    }
-
-    let mut child = widget.first_child();
-    while let Some(current) = child {
-        collect_leaf_panes(&current, panes);
-        child = current.next_sibling();
-    }
-}
-
-fn best_directional_leaf_pane(
-    current_pane: &gtk::Widget,
-    sibling_subtree: &gtk::Widget,
-    root: &gtk::Widget,
-    direction: Direction,
-) -> Option<gtk::Widget> {
-    let current_bounds = widget_bounds_in_root(current_pane, root)?;
-    let mut leaves = Vec::new();
-    collect_leaf_panes(sibling_subtree, &mut leaves);
-
-    let mut best: Option<(gtk::Widget, NeighborScore)> = None;
-    for leaf in leaves {
-        let Some(bounds) = widget_bounds_in_root(&leaf, root) else {
-            continue;
-        };
-        let Some(score) = directional_neighbor_score(current_bounds, bounds, direction) else {
-            continue;
-        };
-
-        let should_replace = best
-            .as_ref()
-            .map(|(_, best_score)| neighbor_score_better(score, *best_score))
-            .unwrap_or(true);
-        if should_replace {
-            best = Some((leaf, score));
-        }
-    }
-
-    best.map(|(leaf, _)| leaf)
 }
 
 /// Recursively find the first visible GLArea inside a widget tree.
@@ -5969,32 +5142,6 @@ pub(crate) fn find_gl_area(widget: &gtk::Widget) -> Option<gtk::GLArea> {
         child = c.next_sibling();
     }
     None
-}
-
-/// Descend a pane/split subtree to find a leaf pane widget.
-/// When encountering a gtk::Paned matching `axis`, prefer `start_child` if
-/// `prefer_start` is true (to find the nearest edge). For Paned widgets on
-/// the other axis, prefer start_child (arbitrary but consistent).
-fn find_leaf_pane(widget: &gtk::Widget, axis: gtk::Orientation, prefer_start: bool) -> gtk::Widget {
-    if let Some(paned) = widget.downcast_ref::<gtk::Paned>() {
-        let pick_start = if paned.orientation() == axis {
-            prefer_start
-        } else {
-            true // arbitrary default for orthogonal splits
-        };
-        let child = if pick_start {
-            paned.start_child()
-        } else {
-            paned.end_child()
-        };
-        match child {
-            Some(c) => find_leaf_pane(&c, axis, prefer_start),
-            None => widget.clone(),
-        }
-    } else {
-        // Leaf pane — this is a pane gtk::Box
-        widget.clone()
-    }
 }
 
 fn should_emit_desktop_notification(
@@ -6178,20 +5325,17 @@ mod tests {
         clamp_workspace_insert_index_for_pinning, desktop_notification_action_from_signal,
         desktop_notification_activation_token_from_signal,
         desktop_notification_closed_id_from_signal, desktop_notification_id_from_response,
-        directional_neighbor_score, favorites_prefix_len, font_size_after_delta,
-        ghostty_prefers_dark, gtk_system_prefers_dark_from_raw, next_active_workspace_index,
-        pane_create_split_placement, queue_session_save_request, resolve_pane_create_source_id,
+        favorites_prefix_len, font_size_after_delta, ghostty_prefers_dark,
+        gtk_system_prefers_dark_from_raw, next_active_workspace_index, queue_session_save_request,
         resolved_system_prefers_dark, sanitize_background_opacity, shortcut_blocked_by_editable,
         shortcut_command_from_key_event, shortcut_dispatch_propagation,
         should_emit_desktop_notification, tab_drag_workspace_seed, use_opaque_window_background,
         validate_workspace_folder_input_with_dirs, window_close_state_from_response,
-        workspace_drop_layout_path, workspace_folder_path_from_input,
-        workspace_notification_message, Direction, EditableCaptureContext, NeighborScore,
-        PaneBounds, PaneCreateDirection, PaneCreateTargetError, PortalColorSchemePreference,
-        SessionSaveAccess, SessionSaveRequest, WindowCloseAction, WindowCloseState,
-        WorkspaceSeedSource, WINDOW_CLOSE_BUTTON_CANCEL, WINDOW_CLOSE_BUTTON_CONFIRM,
+        workspace_folder_path_from_input, workspace_notification_message, EditableCaptureContext,
+        PortalColorSchemePreference, SessionSaveAccess, SessionSaveRequest, WindowCloseAction,
+        WindowCloseState, WorkspaceSeedSource, WINDOW_CLOSE_BUTTON_CANCEL,
+        WINDOW_CLOSE_BUTTON_CONFIRM,
     };
-    use crate::layout_state::{LayoutNodeState, PaneState, SplitOrientation, SplitState};
     use crate::shortcut_config::{
         default_shortcuts, resolve_shortcuts_from_str, EditableCapturePolicy, ShortcutCommand,
     };
@@ -6235,173 +5379,6 @@ mod tests {
         assert!(use_opaque_window_background(1.0));
         assert!(use_opaque_window_background(5.0));
         assert!(use_opaque_window_background(f64::NAN));
-    }
-
-    #[test]
-    fn directional_neighbor_score_prefers_row_overlap_when_moving_left() {
-        let current = PaneBounds {
-            left: 100.0,
-            top: 100.0,
-            right: 200.0,
-            bottom: 200.0,
-        };
-        let top_left = PaneBounds {
-            left: 0.0,
-            top: 0.0,
-            right: 100.0,
-            bottom: 100.0,
-        };
-        let bottom_left = PaneBounds {
-            left: 0.0,
-            top: 100.0,
-            right: 100.0,
-            bottom: 200.0,
-        };
-
-        let top_score =
-            directional_neighbor_score(current, top_left, Direction::Left).expect("top score");
-        let bottom_score = directional_neighbor_score(current, bottom_left, Direction::Left)
-            .expect("bottom score");
-
-        assert_eq!(
-            top_score,
-            NeighborScore {
-                has_overlap: false,
-                overlap: 0,
-                gap: 0,
-                center_delta: 100,
-            }
-        );
-        assert_eq!(
-            bottom_score,
-            NeighborScore {
-                has_overlap: true,
-                overlap: 100,
-                gap: 0,
-                center_delta: 0,
-            }
-        );
-    }
-
-    #[test]
-    fn directional_neighbor_score_prefers_column_overlap_when_moving_up() {
-        let current = PaneBounds {
-            left: 100.0,
-            top: 100.0,
-            right: 200.0,
-            bottom: 200.0,
-        };
-        let top_left = PaneBounds {
-            left: 0.0,
-            top: 0.0,
-            right: 100.0,
-            bottom: 100.0,
-        };
-        let top_right = PaneBounds {
-            left: 100.0,
-            top: 0.0,
-            right: 200.0,
-            bottom: 100.0,
-        };
-
-        let left_score =
-            directional_neighbor_score(current, top_left, Direction::Up).expect("left score");
-        let right_score =
-            directional_neighbor_score(current, top_right, Direction::Up).expect("right score");
-
-        assert_eq!(left_score.overlap, 0);
-        assert_eq!(right_score.overlap, 100);
-        assert!(right_score.has_overlap);
-    }
-
-    #[test]
-    fn pane_create_split_placement_maps_direction_to_orientation_and_order() {
-        assert_eq!(
-            pane_create_split_placement(PaneCreateDirection::Left),
-            super::PaneCreateSplitPlacement {
-                orientation: super::gtk::Orientation::Horizontal,
-                new_pane_first: true,
-            }
-        );
-        assert_eq!(
-            pane_create_split_placement(PaneCreateDirection::Right),
-            super::PaneCreateSplitPlacement {
-                orientation: super::gtk::Orientation::Horizontal,
-                new_pane_first: false,
-            }
-        );
-        assert_eq!(
-            pane_create_split_placement(PaneCreateDirection::Up),
-            super::PaneCreateSplitPlacement {
-                orientation: super::gtk::Orientation::Vertical,
-                new_pane_first: true,
-            }
-        );
-        assert_eq!(
-            pane_create_split_placement(PaneCreateDirection::Down),
-            super::PaneCreateSplitPlacement {
-                orientation: super::gtk::Orientation::Vertical,
-                new_pane_first: false,
-            }
-        );
-    }
-
-    #[test]
-    fn pane_create_source_prefers_surface_then_pane_then_active_focus_then_first_leaf() {
-        let panes = [10, 20, 30];
-        let surfaces = [("10:aaa", 10), ("20:bbb", 20)];
-
-        assert_eq!(
-            resolve_pane_create_source_id(
-                Some("surface:20:bbb"),
-                Some(10),
-                Some(30),
-                true,
-                &panes,
-                &surfaces,
-            ),
-            Ok(20)
-        );
-        assert_eq!(
-            resolve_pane_create_source_id(None, Some(10), Some(30), true, &panes, &surfaces),
-            Ok(10)
-        );
-        assert_eq!(
-            resolve_pane_create_source_id(None, None, Some(30), true, &panes, &surfaces),
-            Ok(30)
-        );
-        assert_eq!(
-            resolve_pane_create_source_id(None, None, Some(30), false, &panes, &surfaces),
-            Ok(10)
-        );
-    }
-
-    #[test]
-    fn pane_create_source_reports_invalid_surface_pane_and_empty_workspace() {
-        let panes = [10, 20];
-        let surfaces = [("10:aaa", 10)];
-
-        assert_eq!(
-            resolve_pane_create_source_id(
-                Some("missing"),
-                Some(10),
-                Some(20),
-                true,
-                &panes,
-                &surfaces,
-            ),
-            Err(PaneCreateTargetError::InvalidSurfaceId(
-                "missing".to_string()
-            ))
-        );
-        assert_eq!(
-            resolve_pane_create_source_id(None, Some(99), Some(20), true, &panes, &surfaces),
-            Err(PaneCreateTargetError::InvalidPaneId(99))
-        );
-        assert_eq!(
-            resolve_pane_create_source_id(None, None, None, true, &[], &[]),
-            Err(PaneCreateTargetError::NoPanes)
-        );
     }
 
     #[test]
@@ -6681,22 +5658,6 @@ mod tests {
         assert_eq!(
             shortcut_command_from_key_event(
                 &shortcuts,
-                gdk::Key::Left,
-                gdk::ModifierType::CONTROL_MASK
-            ),
-            Some(ShortcutCommand::FocusPanelLeft)
-        );
-        assert_eq!(
-            shortcut_command_from_key_event(
-                &shortcuts,
-                gdk::Key::Right,
-                gdk::ModifierType::CONTROL_MASK
-            ),
-            Some(ShortcutCommand::FocusPanelRight)
-        );
-        assert_eq!(
-            shortcut_command_from_key_event(
-                &shortcuts,
                 gdk::Key::D,
                 gdk::ModifierType::CONTROL_MASK
             ),
@@ -6847,23 +5808,6 @@ mod tests {
             EditableCapturePolicy::BypassInEditable,
             EditableCaptureContext::default()
         ));
-    }
-
-    #[test]
-    fn workspace_drop_layout_path_prefers_deterministic_startmost_leaf() {
-        let layout = LayoutNodeState::Split(SplitState {
-            orientation: SplitOrientation::Horizontal,
-            ratio: 0.5,
-            start: Box::new(LayoutNodeState::Split(SplitState {
-                orientation: SplitOrientation::Vertical,
-                ratio: 0.5,
-                start: Box::new(LayoutNodeState::Pane(PaneState::fallback(Some("/a")))),
-                end: Box::new(LayoutNodeState::Pane(PaneState::fallback(Some("/b")))),
-            })),
-            end: Box::new(LayoutNodeState::Pane(PaneState::fallback(Some("/c")))),
-        });
-
-        assert_eq!(workspace_drop_layout_path(&layout), vec![true, true]);
     }
 
     #[test]

@@ -93,21 +93,6 @@ impl TabDragPayload {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ContentDropZone {
-    Center,
-    Left,
-    Right,
-    Top,
-    Bottom,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PaneEmptyReason {
-    ClosedLastTab,
-    MovedLastTabOut,
-}
-
 const HOST_ENTRY_CSS_CLASS: &str = "limux-host-entry";
 const TAB_RENAME_ENTRY_CSS_CLASS: &str = "limux-tab-rename-entry";
 const TAB_RENAME_ENTRY_CSS_CLASSES: [&str; 2] = [HOST_ENTRY_CSS_CLASS, TAB_RENAME_ENTRY_CSS_CLASS];
@@ -128,12 +113,6 @@ pub fn on_tab_drag_change(callback: impl Fn(bool) + 'static) -> usize {
         listeners.borrow_mut().insert(id, Box::new(callback));
         id
     })
-}
-
-pub fn remove_tab_drag_listener(id: usize) {
-    TAB_DRAG_LISTENERS.with(|listeners| {
-        listeners.borrow_mut().remove(&id);
-    });
 }
 
 fn set_tab_dragging(active: bool) {
@@ -194,17 +173,14 @@ pub fn set_workspace_dragging_all(active: bool) {
 // Types
 // ---------------------------------------------------------------------------
 
-type PaneSplitCallback = dyn Fn(&gtk::Widget, gtk::Orientation);
-type PaneWidgetCallback = dyn Fn(&gtk::Widget);
 type PaneSignalCallback = dyn Fn();
 type PaneBellCallback = dyn Fn(bool, u32, &str);
 type PanePathCallback = dyn Fn(&str);
 type PaneDesktopNotificationCallback = dyn Fn(&str, &str, bool, u32, &str);
-type PaneEmptyCallback = dyn Fn(&gtk::Widget, PaneEmptyReason);
+type PaneEmptyCallback = dyn Fn();
 type PaneShortcutStateCallback = dyn Fn() -> Rc<ResolvedShortcutConfig>;
 type PaneShortcutCaptureCallback =
     dyn Fn(ShortcutId, Option<NormalizedShortcut>) -> Result<ResolvedShortcutConfig, String>;
-type PaneSplitWithTabCallback = dyn Fn(&gtk::Widget, &gtk::Widget, gtk::Orientation, String, bool);
 type PaneConfigCallback = dyn Fn() -> Rc<RefCell<AppConfig>>;
 type PaneConfigChangedCallback = dyn Fn(&AppConfig, &AppConfig);
 /// Returns the workspace id that owns a given pane widget, or `None` if the
@@ -213,8 +189,6 @@ type PaneConfigChangedCallback = dyn Fn(&AppConfig, &AppConfig);
 type PaneWorkspaceLookupCallback = dyn Fn(&gtk::Widget) -> Option<String>;
 
 pub struct PaneCallbacks {
-    pub on_split: Box<PaneSplitCallback>,
-    pub on_close_pane: Box<PaneWidgetCallback>,
     pub on_bell: Box<PaneBellCallback>,
     pub on_desktop_notification: Box<PaneDesktopNotificationCallback>,
     pub current_shortcuts: Box<PaneShortcutStateCallback>,
@@ -222,7 +196,6 @@ pub struct PaneCallbacks {
     pub on_pwd_changed: Box<PanePathCallback>,
     pub on_empty: Box<PaneEmptyCallback>,
     pub on_state_changed: Box<PaneSignalCallback>,
-    pub on_split_with_tab: Box<PaneSplitWithTabCallback>,
     pub current_config: Box<PaneConfigCallback>,
     pub on_config_changed: Rc<PaneConfigChangedCallback>,
     /// Resolve the workspace id for a given pane widget. May be `None` while
@@ -1110,14 +1083,6 @@ pub const PANE_CSS: &str = r#"
 .limux-tab-overlay:drop(active) {
     box-shadow: none;
 }
-.limux-drop-preview {
-    background: alpha(@accent_bg_color, 0.24);
-    border: 1px solid alpha(@accent_bg_color, 0.65);
-    border-radius: 10px;
-}
-.limux-drop-preview-center {
-    background: alpha(@accent_bg_color, 0.14);
-}
 "#;
 
 // ---------------------------------------------------------------------------
@@ -1169,18 +1134,6 @@ pub fn create_pane(
     content_stack.set_hexpand(true);
     content_stack.set_vexpand(true);
 
-    let content_overlay = gtk::Overlay::new();
-    content_overlay.set_hexpand(true);
-    content_overlay.set_vexpand(true);
-    content_overlay.set_child(Some(&content_stack));
-
-    let content_drop_overlay = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    content_drop_overlay.set_halign(gtk::Align::Start);
-    content_drop_overlay.set_valign(gtk::Align::Start);
-    content_drop_overlay.set_visible(false);
-    content_drop_overlay.set_can_target(false);
-    content_overlay.add_overlay(&content_drop_overlay);
-
     // Action icons (right side)
     let actions = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -1204,22 +1157,17 @@ pub fn create_pane(
         &pane_action_tooltip(&shortcuts, "Split down", Some(ShortcutId::SplitDown)),
     );
     let settings_btn = icon_button("emblem-system-symbolic", "Settings");
-    let close_btn = icon_button(
-        "window-close-symbolic",
-        &pane_action_tooltip(&shortcuts, "Close pane", Some(ShortcutId::CloseFocusedPane)),
-    );
 
     actions.append(&new_term_btn);
     actions.append(&split_h_btn);
     actions.append(&split_v_btn);
     actions.append(&settings_btn);
-    actions.append(&close_btn);
 
     header.append(&tab_overlay);
     header.append(&actions);
 
     outer.append(&header);
-    outer.append(&content_overlay);
+    outer.append(&content_stack);
 
     let ws_wd = Rc::new(RefCell::new(
         working_directory.map(|value| value.to_string()),
@@ -1236,7 +1184,6 @@ pub fn create_pane(
         tab_strip: tab_strip.clone(),
         content_stack: content_stack.clone(),
         drop_indicator: drop_indicator.clone(),
-        content_drop_overlay: content_drop_overlay.clone(),
         pane_outer: outer.clone(),
         callbacks: callbacks.clone(),
         working_directory: ws_wd.clone(),
@@ -1244,7 +1191,6 @@ pub fn create_pane(
         new_terminal_button: new_term_btn.clone(),
         split_right_button: split_h_btn.clone(),
         split_down_button: split_v_btn.clone(),
-        close_pane_button: close_btn.clone(),
     });
 
     if let Some(saved_state) = initial_state {
@@ -1263,29 +1209,16 @@ pub fn create_pane(
     }
     {
         let pw = outer.clone();
-        let cb = callbacks.clone();
         split_h_btn.connect_clicked(move |_| {
             let pane_widget: gtk::Widget = pw.clone().upcast();
-            if !split_active_terminal_tab_in_pane(&pane_widget, gtk::Orientation::Horizontal) {
-                (cb.on_split)(&pane_widget, gtk::Orientation::Horizontal);
-            }
+            split_active_terminal_tab_in_pane(&pane_widget, gtk::Orientation::Horizontal);
         });
     }
     {
         let pw = outer.clone();
-        let cb = callbacks.clone();
         split_v_btn.connect_clicked(move |_| {
             let pane_widget: gtk::Widget = pw.clone().upcast();
-            if !split_active_terminal_tab_in_pane(&pane_widget, gtk::Orientation::Vertical) {
-                (cb.on_split)(&pane_widget, gtk::Orientation::Vertical);
-            }
-        });
-    }
-    {
-        let pw = outer.clone();
-        let cb = callbacks.clone();
-        close_btn.connect_clicked(move |_| {
-            (cb.on_close_pane)(&pw.clone().upcast());
+            split_active_terminal_tab_in_pane(&pane_widget, gtk::Orientation::Vertical);
         });
     }
     {
@@ -1304,7 +1237,6 @@ pub fn create_pane(
     }
 
     install_tab_strip_drop_target(&tab_overlay, &internals);
-    install_content_drop_target(&internals);
 
     register_pane(pane_id, &internals);
     unsafe {
@@ -1380,16 +1312,6 @@ pub fn focus_active_tab_in_pane(pane_widget: &gtk::Widget) -> bool {
         &tab_id,
     );
     true
-}
-
-pub fn refresh_terminal_displays_in_root(root: &gtk::Widget) {
-    for internals in pane_internals_for_root(root) {
-        for entry in &internals.tab_state.borrow().tabs {
-            if let TabKind::Terminal { state } = &entry.kind {
-                state.refresh_display();
-            }
-        }
-    }
 }
 
 pub fn activate_tab_in_pane(pane_widget: &gtk::Widget, tab_id: &str) -> bool {
@@ -1568,7 +1490,6 @@ pub struct PaneInternals {
     tab_strip: gtk::Box,
     content_stack: gtk::Stack,
     drop_indicator: gtk::Box,
-    content_drop_overlay: gtk::Box,
     pane_outer: gtk::Box,
     callbacks: Rc<PaneCallbacks>,
     working_directory: Rc<std::cell::RefCell<Option<String>>>,
@@ -1576,7 +1497,6 @@ pub struct PaneInternals {
     new_terminal_button: gtk::Button,
     split_right_button: gtk::Button,
     split_down_button: gtk::Button,
-    close_pane_button: gtk::Button,
 }
 
 impl TabState {
@@ -1775,8 +1695,6 @@ fn placeholder_terminal_callbacks() -> TerminalCallbacks {
         on_open_url: Box::new(|_, _| {}),
         on_split_right: Box::new(|| {}),
         on_split_down: Box::new(|| {}),
-        on_split_panel_right: Box::new(|| {}),
-        on_split_panel_down: Box::new(|| {}),
         on_swap: Box::new(|| {}),
     }
 }
@@ -2233,12 +2151,9 @@ fn make_terminal_callbacks(
     let callbacks_for_bell = internals.callbacks.clone();
     let callbacks_for_pwd = internals.callbacks.clone();
     let callbacks_for_close = internals.callbacks.clone();
-    let callbacks_for_split_panel_right = internals.callbacks.clone();
-    let callbacks_for_split_panel_down = internals.callbacks.clone();
     let tab_strip = internals.tab_strip.clone();
     let content_stack = internals.content_stack.clone();
     let tab_state = internals.tab_state.clone();
-    let pane_outer = internals.pane_outer.clone();
     let term_cwd_for_pwd = leaf.cwd.clone();
     let tid_for_close = tab_id.to_string();
     let tid_for_notification = tab_id.to_string();
@@ -2298,7 +2213,6 @@ fn make_terminal_callbacks(
             let content_stack = content_stack.clone();
             let tab_state = tab_state.clone();
             let callbacks = callbacks_for_close.clone();
-            let pane_outer = pane_outer.clone();
             let tab_id = tid_for_close.clone();
             let terminal_tab_state = terminal_tab_state_for_close.clone();
             let leaf_id = leaf_id.clone();
@@ -2310,15 +2224,7 @@ fn make_terminal_callbacks(
                     (callbacks.on_state_changed)();
                     return;
                 }
-                remove_tab(
-                    &tab_strip,
-                    &content_stack,
-                    &tab_state,
-                    &tab_id,
-                    &callbacks,
-                    &pane_outer,
-                    PaneEmptyReason::ClosedLastTab,
-                );
+                remove_tab(&tab_strip, &content_stack, &tab_state, &tab_id, &callbacks);
             });
         }),
         on_open_url: Box::new(|url, _| open_url_in_external_browser(url)),
@@ -2371,23 +2277,6 @@ fn make_terminal_callbacks(
                         gtk::Orientation::Vertical,
                     );
                 });
-            }
-        }),
-        on_split_panel_right: Box::new({
-            let pane_outer = internals.pane_outer.clone();
-            move || {
-                let pane_widget: gtk::Widget = pane_outer.clone().upcast();
-                (callbacks_for_split_panel_right.on_split)(
-                    &pane_widget,
-                    gtk::Orientation::Horizontal,
-                );
-            }
-        }),
-        on_split_panel_down: Box::new({
-            let pane_outer = internals.pane_outer.clone();
-            move || {
-                let pane_widget: gtk::Widget = pane_outer.clone().upcast();
-                (callbacks_for_split_panel_down.on_split)(&pane_widget, gtk::Orientation::Vertical);
             }
         }),
     }
@@ -2599,13 +2488,6 @@ pub fn refresh_shortcut_tooltips(pane_widget: &gtk::Widget, shortcuts: &Resolved
             "Split down",
             Some(ShortcutId::SplitDown),
         )));
-    internals
-        .close_pane_button
-        .set_tooltip_text(Some(&pane_action_tooltip(
-            shortcuts,
-            "Close pane",
-            Some(ShortcutId::CloseFocusedPane),
-        )));
 }
 
 pub fn snapshot_pane_state(pane_widget: &gtk::Widget) -> Option<PaneState> {
@@ -2707,7 +2589,10 @@ fn pane_internals_for_root(root: &gtk::Widget) -> Vec<Rc<PaneInternals>> {
             .borrow()
             .values()
             .filter_map(|weak| weak.upgrade())
-            .filter(|internals| internals.pane_outer.is_ancestor(root))
+            .filter(|internals| {
+                internals.pane_outer.upcast_ref::<gtk::Widget>() == root
+                    || internals.pane_outer.is_ancestor(root)
+            })
             .collect::<Vec<_>>()
     });
     panes.sort_by_key(|internals| internals.pane_id);
@@ -2760,7 +2645,6 @@ pub fn pane_summaries_for_root(root: &gtk::Widget) -> Vec<PaneSummary> {
         .collect()
 }
 
-#[allow(dead_code)]
 pub(crate) fn pane_widget_for_root(root: &gtk::Widget, pane_id: u32) -> Option<gtk::Widget> {
     pane_internals_for_root(root)
         .into_iter()
@@ -3058,11 +2942,9 @@ fn build_tab_button_from_label(
     }
     {
         let drop_indicator = internals.drop_indicator.clone();
-        let content_overlay = internals.content_drop_overlay.clone();
         drag_source.connect_drag_end(move |_, _, _| {
             set_tab_dragging(false);
             drop_indicator.set_visible(false);
-            clear_content_drop_zone(&content_overlay);
         });
     }
     tab_btn.add_controller(drag_source);
@@ -3088,7 +2970,6 @@ fn build_tab_button_from_label(
                     &tab_id,
                     &callbacks,
                     &pane_outer,
-                    PaneEmptyReason::ClosedLastTab,
                 );
             }
         });
@@ -3168,15 +3049,7 @@ fn show_tab_context_menu(tab_btn: &gtk::Box, tab_id: &str, context: &TabContextM
         let menu_ref = menu.clone();
         close_btn.connect_clicked(move |_| {
             menu_ref.popdown();
-            request_tab_close_confirmation(
-                &ts,
-                &cs,
-                &state,
-                &tid,
-                &cb,
-                &po,
-                PaneEmptyReason::ClosedLastTab,
-            );
+            request_tab_close_confirmation(&ts, &cs, &state, &tid, &cb, &po);
         });
     }
 
@@ -3320,80 +3193,6 @@ fn next_active_after_tab_removal(
                 .nth(next_idx)
         })
         .map(ToOwned::to_owned)
-}
-
-fn classify_content_drop_zone(width: f64, height: f64, x: f64, y: f64) -> Option<ContentDropZone> {
-    if width <= 0.0 || height <= 0.0 {
-        return None;
-    }
-    if x < width * 0.25 {
-        Some(ContentDropZone::Left)
-    } else if x > width * 0.75 {
-        Some(ContentDropZone::Right)
-    } else if y < height * 0.25 {
-        Some(ContentDropZone::Top)
-    } else if y > height * 0.75 {
-        Some(ContentDropZone::Bottom)
-    } else {
-        Some(ContentDropZone::Center)
-    }
-}
-
-fn content_drop_preview_rect(zone: ContentDropZone) -> (f64, f64, f64, f64) {
-    match zone {
-        ContentDropZone::Left => (0.0, 0.0, 0.5, 1.0),
-        ContentDropZone::Right => (0.5, 0.0, 0.5, 1.0),
-        ContentDropZone::Top => (0.0, 0.0, 1.0, 0.5),
-        ContentDropZone::Bottom => (0.0, 0.5, 1.0, 0.5),
-        ContentDropZone::Center => (0.25, 0.25, 0.5, 0.5),
-    }
-}
-
-fn effective_drop_target_dimensions(
-    preview_width: i32,
-    preview_height: i32,
-    content_width: i32,
-    content_height: i32,
-) -> Option<(f64, f64)> {
-    let width = preview_width.max(content_width);
-    let height = preview_height.max(content_height);
-    if width <= 0 || height <= 0 {
-        return None;
-    }
-    Some((width as f64, height as f64))
-}
-
-fn clear_content_drop_zone(overlay: &gtk::Box) {
-    overlay.remove_css_class("limux-drop-preview");
-    overlay.remove_css_class("limux-drop-preview-center");
-    overlay.set_size_request(-1, -1);
-    overlay.set_margin_start(0);
-    overlay.set_margin_top(0);
-}
-
-fn highlight_content_drop_zone(overlay: &gtk::Box, zone: ContentDropZone) {
-    clear_content_drop_zone(overlay);
-    overlay.add_css_class("limux-drop-preview");
-    if zone == ContentDropZone::Center {
-        overlay.add_css_class("limux-drop-preview-center");
-    }
-    let (x_frac, y_frac, width_frac, height_frac) = content_drop_preview_rect(zone);
-    let total_width = overlay
-        .parent()
-        .map(|parent| parent.allocation().width())
-        .unwrap_or_else(|| overlay.width())
-        .max(1);
-    let total_height = overlay
-        .parent()
-        .map(|parent| parent.allocation().height())
-        .unwrap_or_else(|| overlay.height())
-        .max(1);
-    overlay.set_margin_start((total_width as f64 * x_frac).round() as i32);
-    overlay.set_margin_top((total_height as f64 * y_frac).round() as i32);
-    overlay.set_size_request(
-        (total_width as f64 * width_frac).round() as i32,
-        (total_height as f64 * height_frac).round() as i32,
-    );
 }
 
 fn position_indicator(tab_state: &Rc<RefCell<TabState>>, indicator: &gtk::Box, x: f64) {
@@ -3545,10 +3344,7 @@ fn transfer_tab_between_panes(
 
     let source_empty = source.tab_state.borrow().tabs.is_empty();
     if source_empty {
-        (source.callbacks.on_empty)(
-            &source.pane_outer.clone().upcast(),
-            PaneEmptyReason::MovedLastTabOut,
-        );
+        (source.callbacks.on_empty)();
     } else if let Some(next_active) = source_next_active {
         activate_tab(
             &source.tab_strip,
@@ -3625,118 +3421,6 @@ fn install_tab_strip_drop_target(tab_overlay: &gtk::Overlay, internals: &Rc<Pane
     tab_overlay.add_controller(drop_target);
 }
 
-fn install_content_drop_target(internals: &Rc<PaneInternals>) {
-    let drop_target = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::MOVE);
-    drop_target.set_preload(true);
-    {
-        let overlay = internals.content_drop_overlay.clone();
-        let content_stack = internals.content_stack.clone();
-        let workspace_dragging = internals.workspace_dragging.clone();
-        drop_target.connect_motion(move |_, x, y| {
-            if workspace_dragging.get() || !is_tab_dragging() {
-                clear_content_drop_zone(&overlay);
-                return gtk::gdk::DragAction::empty();
-            }
-            let Some((width, height)) = effective_drop_target_dimensions(
-                overlay.width(),
-                overlay.height(),
-                content_stack.allocation().width(),
-                content_stack.allocation().height(),
-            ) else {
-                clear_content_drop_zone(&overlay);
-                return gtk::gdk::DragAction::empty();
-            };
-            let Some(zone) = classify_content_drop_zone(width, height, x, y) else {
-                clear_content_drop_zone(&overlay);
-                return gtk::gdk::DragAction::empty();
-            };
-            highlight_content_drop_zone(&overlay, zone);
-            gtk::gdk::DragAction::MOVE
-        });
-    }
-    {
-        let overlay = internals.content_drop_overlay.clone();
-        drop_target.connect_leave(move |_| {
-            clear_content_drop_zone(&overlay);
-        });
-    }
-    {
-        let target = internals.clone();
-        let overlay = internals.content_drop_overlay.clone();
-        let content_stack = internals.content_stack.clone();
-        drop_target.connect_drop(move |_, value, x, y| {
-            clear_content_drop_zone(&overlay);
-            let Ok(raw) = value.get::<String>() else {
-                return false;
-            };
-            let Some(payload) = TabDragPayload::decode(&raw) else {
-                return false;
-            };
-            let Some((width, height)) = effective_drop_target_dimensions(
-                overlay.width(),
-                overlay.height(),
-                content_stack.allocation().width(),
-                content_stack.allocation().height(),
-            ) else {
-                return false;
-            };
-            let Some(zone) = classify_content_drop_zone(width, height, x, y) else {
-                return false;
-            };
-            match zone {
-                ContentDropZone::Center => {
-                    if payload.pane_id == target.pane_id {
-                        return false;
-                    }
-                    let Some(source) = lookup_pane_internals(payload.pane_id) else {
-                        return false;
-                    };
-                    let insert_idx = target.tab_state.borrow().tabs.len();
-                    transfer_tab_between_panes(&source, &target, &payload.tab_id, insert_idx)
-                }
-                ContentDropZone::Left
-                | ContentDropZone::Top
-                | ContentDropZone::Right
-                | ContentDropZone::Bottom => {
-                    let Some(source_widget) = find_pane_widget_by_id(payload.pane_id) else {
-                        return false;
-                    };
-                    let target_widget: gtk::Widget = target.pane_outer.clone().upcast();
-                    let (orientation, new_pane_first) = match zone {
-                        ContentDropZone::Left => (gtk::Orientation::Horizontal, true),
-                        ContentDropZone::Right => (gtk::Orientation::Horizontal, false),
-                        ContentDropZone::Top => (gtk::Orientation::Vertical, true),
-                        ContentDropZone::Bottom => (gtk::Orientation::Vertical, false),
-                        ContentDropZone::Center => unreachable!(),
-                    };
-                    (target.callbacks.on_split_with_tab)(
-                        &source_widget,
-                        &target_widget,
-                        orientation,
-                        payload.tab_id.clone(),
-                        new_pane_first,
-                    );
-                    true
-                }
-            }
-        });
-    }
-    internals.content_stack.add_controller(drop_target);
-
-    let overlay = internals.content_drop_overlay.clone();
-    let workspace_dragging = internals.workspace_dragging.clone();
-    let listener_id = on_tab_drag_change(move |dragging| {
-        let visible = dragging && !workspace_dragging.get();
-        overlay.set_visible(visible);
-        if !visible {
-            clear_content_drop_zone(&overlay);
-        }
-    });
-    internals.pane_outer.connect_destroy(move |_| {
-        remove_tab_drag_listener(listener_id);
-    });
-}
-
 // ---------------------------------------------------------------------------
 // Tab activation / removal
 // ---------------------------------------------------------------------------
@@ -3797,7 +3481,6 @@ fn request_tab_close_confirmation(
     tab_id: &str,
     callbacks: &Rc<PaneCallbacks>,
     pane_outer: &gtk::Box,
-    empty_reason: PaneEmptyReason,
 ) {
     let dialog = gtk::AlertDialog::builder()
         .modal(true)
@@ -3822,15 +3505,7 @@ fn request_tab_close_confirmation(
         None::<&gtk::gio::Cancellable>,
         move |response| {
             if response.ok() == Some(1) {
-                remove_tab(
-                    &tab_strip,
-                    &content_stack,
-                    &tab_state,
-                    &tab_id,
-                    &callbacks,
-                    &pane_outer,
-                    empty_reason,
-                );
+                remove_tab(&tab_strip, &content_stack, &tab_state, &tab_id, &callbacks);
             }
         },
     );
@@ -3842,8 +3517,6 @@ fn remove_tab(
     tab_state: &Rc<RefCell<TabState>>,
     tab_id: &str,
     callbacks: &Rc<PaneCallbacks>,
-    pane_outer: &gtk::Box,
-    empty_reason: PaneEmptyReason,
 ) {
     let mut ts = tab_state.borrow_mut();
     let Some(idx) = ts.tabs.iter().position(|e| e.id == tab_id) else {
@@ -3863,7 +3536,7 @@ fn remove_tab(
 
     if ts.tabs.is_empty() {
         drop(ts);
-        (callbacks.on_empty)(&pane_outer.clone().upcast(), empty_reason);
+        (callbacks.on_empty)();
         return;
     }
 
@@ -3882,10 +3555,9 @@ fn remove_tab(
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_content_drop_zone, content_drop_preview_rect, effective_drop_target_dimensions,
         next_active_after_tab_removal, normalize_reorder_insert_index, pane_action_tooltip,
         resolve_terminal_working_directory, surface_hint_matches, terminal_focus_index,
-        ContentDropZone, TabDragPayload, TerminalFocusDirection,
+        TabDragPayload, TerminalFocusDirection,
     };
     use crate::shortcut_config::{default_shortcuts, resolve_shortcuts_from_str, ShortcutId};
 
@@ -3920,19 +3592,6 @@ mod tests {
         assert_eq!(
             pane_action_tooltip(&remapped, "Split right", Some(ShortcutId::SplitRight)),
             "Split right (Ctrl+Alt+H)"
-        );
-
-        let unbound = resolve_shortcuts_from_str(
-            r#"{
-                "shortcuts": {
-                    "close_focused_pane": null
-                }
-            }"#,
-        )
-        .unwrap();
-        assert_eq!(
-            pane_action_tooltip(&unbound, "Close pane", Some(ShortcutId::CloseFocusedPane)),
-            "Close pane"
         );
     }
 
@@ -4036,87 +3695,5 @@ mod tests {
             next_active_after_tab_removal(&["only"], Some("only"), 0),
             None
         );
-    }
-
-    #[test]
-    fn classify_content_drop_zone_prefers_edges_before_center() {
-        assert_eq!(
-            classify_content_drop_zone(100.0, 80.0, 10.0, 40.0),
-            Some(ContentDropZone::Left)
-        );
-        assert_eq!(
-            classify_content_drop_zone(100.0, 80.0, 90.0, 40.0),
-            Some(ContentDropZone::Right)
-        );
-        assert_eq!(
-            classify_content_drop_zone(100.0, 80.0, 50.0, 5.0),
-            Some(ContentDropZone::Top)
-        );
-        assert_eq!(
-            classify_content_drop_zone(100.0, 80.0, 50.0, 75.0),
-            Some(ContentDropZone::Bottom)
-        );
-        assert_eq!(
-            classify_content_drop_zone(100.0, 80.0, 50.0, 40.0),
-            Some(ContentDropZone::Center)
-        );
-        assert_eq!(classify_content_drop_zone(0.0, 80.0, 50.0, 40.0), None);
-    }
-
-    #[test]
-    fn classify_content_drop_zone_uses_quarter_bands_not_thirds() {
-        assert_eq!(
-            classify_content_drop_zone(100.0, 100.0, 24.0, 50.0),
-            Some(ContentDropZone::Left)
-        );
-        assert_eq!(
-            classify_content_drop_zone(100.0, 100.0, 26.0, 50.0),
-            Some(ContentDropZone::Center)
-        );
-        assert_eq!(
-            classify_content_drop_zone(100.0, 100.0, 50.0, 24.0),
-            Some(ContentDropZone::Top)
-        );
-        assert_eq!(
-            classify_content_drop_zone(100.0, 100.0, 50.0, 26.0),
-            Some(ContentDropZone::Center)
-        );
-    }
-
-    #[test]
-    fn content_drop_preview_rect_uses_even_halves() {
-        assert_eq!(
-            content_drop_preview_rect(ContentDropZone::Left),
-            (0.0, 0.0, 0.5, 1.0)
-        );
-        assert_eq!(
-            content_drop_preview_rect(ContentDropZone::Right),
-            (0.5, 0.0, 0.5, 1.0)
-        );
-        assert_eq!(
-            content_drop_preview_rect(ContentDropZone::Top),
-            (0.0, 0.0, 1.0, 0.5)
-        );
-        assert_eq!(
-            content_drop_preview_rect(ContentDropZone::Bottom),
-            (0.0, 0.5, 1.0, 0.5)
-        );
-        assert_eq!(
-            content_drop_preview_rect(ContentDropZone::Center),
-            (0.25, 0.25, 0.5, 0.5)
-        );
-    }
-
-    #[test]
-    fn effective_drop_target_dimensions_fall_back_to_content_area() {
-        assert_eq!(
-            effective_drop_target_dimensions(0, 0, 320, 180),
-            Some((320.0, 180.0))
-        );
-        assert_eq!(
-            effective_drop_target_dimensions(120, 60, 320, 180),
-            Some((320.0, 180.0))
-        );
-        assert_eq!(effective_drop_target_dimensions(0, 0, 0, 180), None);
     }
 }

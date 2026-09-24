@@ -1,5 +1,9 @@
 # Terminal In-Tab Split Plan
 
+Historical design plan. The outer GTK pane tree and embedded browser described
+below have since been removed; workspaces now contain one tabbed container,
+and terminal tabs own their Ghostty surface split trees.
+
 ## Goal
 
 Add a new terminal feature, "Split within", that creates splits inside the

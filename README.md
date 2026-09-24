@@ -10,8 +10,8 @@ https://github.com/user-attachments/assets/6f3047c2-e2b6-49f2-b536-570a1570d0f8
 
 - **GPU-rendered terminals** via embedded Ghostty (OpenGL)
 - **Workspaces** with folder-based naming, persistence across restarts, and sidebar management
-- **Split panes** (horizontal/vertical) with keyboard navigation
-- **Tabbed terminals** within each pane
+- **Ghostty surface splits** (horizontal/vertical) with keyboard navigation
+- **Tabbed terminals** within each workspace
 - **Right-click context menu** with copy, paste, split, clear
 - **Drag-and-drop** workspace reordering with favorites/pinning
 - **Animated sidebar** collapse/expand
@@ -131,16 +131,15 @@ limux skill setup codex
 echo '{"event":"stop"}' | limux claude-hook --event stop
 echo '{"event":"finished"}' | limux gemini-hook --event finished
 
-# Spin up a multi-agent collaboration team — one workspace per agent,
+# Spin up a multi-agent collaboration team in the current tab,
 # launches each agent's CLI, and writes AGENTS.md describing the
 # <agent-msg> XML protocol so peers can talk to each other:
 limux agent-team --agents codex,claude --cwd "$PWD"
 # → Codex and Claude can now do:
 #   limux send --workspace claude $'<agent-msg from="codex" to="claude" id="…" ts="…">…</agent-msg>\n'
 
-# Or split the current agent's pane and launch another terminal agent.
-# Inside Limux, workspace/surface/pane default from LIMUX_*:
-limux new-pane --direction right --command claude
+# Or launch another terminal agent beside the caller:
+limux add-surface --cmd claude
 
 # Add a visible process to the agent's current terminal tab. Limux owns the
 # layout: the agent starts on the left and up to three added surfaces stack on
@@ -151,11 +150,7 @@ limux run --surface "$surface" --cmd 'npm run dev'
 # Stop the foreground process with Ctrl+C, then remove the added surface:
 limux close-surface --surface "$surface"
 
-# Explicit source targets are also accepted and serialized unchanged:
-limux new-pane --workspace "$LIMUX_WORKSPACE_ID" --surface "$LIMUX_SURFACE_ID" \
-  --pane "$LIMUX_PANE_ID" --direction down --command "codex"
-
-# Keep both agents in the same workspace on separate splits/tabs:
+# Keep both agents in the same workspace on separate surfaces:
 limux identify --json
 limux list-panels --workspace "$LIMUX_WORKSPACE_ID"
 limux send --workspace "$LIMUX_WORKSPACE_ID" --surface "<peer-surface-id>" \
@@ -207,23 +202,21 @@ Most default shortcuts use `Ctrl`. Fullscreen defaults to `F11`. Custom remaps m
 | `Ctrl+-` | Decrease font size |
 | `Ctrl+Shift+0` | Reset font size |
 
-### Workspace And Pane
+### Workspace And Terminal Surfaces
 
 | Shortcut | Action |
 |---|---|
 | `Ctrl+Shift+N` | New workspace (folder picker) |
 | `Ctrl+Shift+W` | Close workspace |
-| `Ctrl+Shift+Left/Right` | Cycle tabs in focused pane |
-| `Ctrl+Shift+D` | Split down |
-| `Ctrl+Shift+T` | New terminal tab in the focused pane |
-| `Ctrl+D` | Split right |
+| `Ctrl+Shift+Left/Right` | Cycle terminal tabs |
+| `Ctrl+Shift+D` | Split terminal down |
+| `Ctrl+Shift+T` | New terminal tab |
+| `Ctrl+D` | Split terminal right |
 | `Ctrl+Shift+S` | Swap terminal surfaces in the focused tab |
-| `Ctrl+W` | Close focused pane |
-| `Ctrl+Shift+Z` | Toggle focused pane zoom |
 | `Ctrl+M` | Toggle sidebar |
 | `Ctrl+Shift+M` | Toggle top bar |
 | `Ctrl+T` | New terminal tab |
-| `Ctrl+Arrow` | Focus pane in direction |
+| `Ctrl+Shift+,/.` | Focus surface left or right |
 | `Ctrl+PageDown/Up` | Next or previous workspace |
 | `Ctrl+1-9` | Switch to workspace by number |
 

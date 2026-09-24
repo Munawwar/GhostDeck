@@ -30,7 +30,6 @@ const COMMANDS: &[&str] = &[
     "workspace.action",
     "pane.list",
     "pane.surfaces",
-    "pane.create",
     "pane.focus",
     "pane.swap",
     "pane.break",
@@ -916,25 +915,6 @@ impl ControlState {
                 .map(|surface| surface.info(pane.id))
                 .collect(),
         )
-    }
-
-    fn create_pane(&mut self, title: Option<String>) -> Option<PaneInfo> {
-        let pane = self.make_pane(title);
-        let info = pane.info();
-
-        let workspace_idx = self.current_workspace_idx()?;
-        let window_idx = self.current_window_idx(workspace_idx)?;
-        let window = self
-            .workspaces
-            .get_mut(workspace_idx)?
-            .windows
-            .get_mut(window_idx)?;
-
-        window.last_pane_id = window.current_pane_id;
-        window.current_pane_id = Some(pane.id);
-        window.panes.push(pane);
-
-        Some(info)
     }
 
     fn focus_pane(&mut self, pane_id: u64) -> Option<PaneInfo> {
@@ -2349,46 +2329,6 @@ fn optional_string_param(
 fn required_string_param(params: &Map<String, Value>, key: &str) -> Result<String, CommandError> {
     optional_string_param(params, key)?.ok_or_else(|| {
         CommandError::invalid_params(format!("{key} is required and must be a string"))
-    })
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct PaneCreateContract {
-    workspace_id: Option<u64>,
-    source_pane_id: Option<u64>,
-    source_surface_id: Option<u64>,
-    direction: String,
-    command: Option<String>,
-}
-
-fn parse_pane_create_contract(
-    params: &Map<String, Value>,
-) -> Result<PaneCreateContract, CommandError> {
-    let direction =
-        optional_string_param(params, "direction")?.unwrap_or_else(|| "right".to_string());
-    if !matches!(direction.as_str(), "left" | "right" | "up" | "down") {
-        return Err(CommandError::invalid_params(
-            "pane.create direction must be one of left|right|up|down",
-        ));
-    }
-
-    if optional_string_param(params, "type")?.is_some_and(|pane_type| pane_type != "terminal") {
-        return Err(CommandError::invalid_params(
-            "pane.create type must be terminal",
-        ));
-    }
-    if optional_string_param(params, "url")?.is_some() {
-        return Err(CommandError::invalid_params(
-            "pane.create does not accept url",
-        ));
-    }
-
-    Ok(PaneCreateContract {
-        workspace_id: optional_u64_param_any(params, &["workspace_id"])?,
-        source_pane_id: optional_u64_param_any(params, &["pane_id"])?,
-        source_surface_id: optional_u64_param_any(params, &["surface_id"])?,
-        direction,
-        command: optional_string_param(params, "command")?,
     })
 }
 
@@ -4021,37 +3961,6 @@ fn handle_command(
                 Ok(json!({ "surfaces": rows }))
             })
         }
-        "pane.create" => {
-            let params = params_object(params)?;
-            let contract = parse_pane_create_contract(params)?;
-            let title = optional_string_param(params, "surface_title")?;
-
-            // The standalone dispatcher accepts the live-host self-split
-            // contract for compatibility, but only the GTK host can honor
-            // source pane targeting, directional placement, or terminal command
-            // injection. Core still creates a pane in the selected workspace
-            // and preserves the shared response fields.
-            let _host_only_fields = (
-                contract.source_pane_id,
-                contract.source_surface_id,
-                contract.direction.clone(),
-                contract.command.clone(),
-            );
-
-            with_workspace_scope(state, contract.workspace_id, |scoped| {
-                let pane = scoped
-                    .create_pane(title)
-                    .ok_or_else(|| CommandError::not_found("no active window"))?;
-                let surface_id = pane.current_surface_id.unwrap_or_default();
-                Ok(json!({
-                    "pane_id": encode_handle_id(pane.id),
-                    "pane_ref": pane_ref(pane.id),
-                    "surface_id": encode_handle_id(surface_id),
-                    "surface_ref": surface_ref(surface_id),
-                    "pane": pane
-                }))
-            })
-        }
         "pane.focus" => {
             let params = params_object(params)?;
             let pane_id = optional_u64_param_any(params, &["pane_id", "id"])?
@@ -5065,104 +4974,6 @@ mod tests {
         assert_eq!(notification.surface_id, Some(surface_id));
         assert_eq!(notification.workspace_id, Some(workspace_id));
         assert!(notification.unread);
-    }
-
-    #[tokio::test]
-    async fn dispatcher_pane_create_rejects_invalid_contract_values() {
-        let dispatcher = Dispatcher::new();
-
-        let bad_direction = dispatcher
-            .dispatch(request("pane.create", json!({ "direction": "diagonal" })))
-            .await;
-        let error = bad_direction.error.expect("direction error");
-        assert_eq!(error.code, -32602);
-
-        let bad_type = dispatcher
-            .dispatch(request("pane.create", json!({ "type": "webview" })))
-            .await;
-        let error = bad_type.error.expect("type error");
-        assert_eq!(error.code, -32602);
-    }
-
-    #[tokio::test]
-    async fn dispatcher_pane_create_accepts_self_split_contract_refs() {
-        let dispatcher = Dispatcher::new();
-
-        let current = dispatcher
-            .dispatch(request("system.identify", json!({})))
-            .await
-            .result
-            .expect("identify result");
-        let workspace_ref = current["workspace_ref"].clone();
-        let pane_ref = current["pane_ref"].clone();
-        let surface_ref = current["surface_ref"].clone();
-
-        let created = dispatcher
-            .dispatch(request(
-                "pane.create",
-                json!({
-                    "workspace_id": workspace_ref,
-                    "pane_id": pane_ref,
-                    "surface_id": surface_ref,
-                    "direction": "up",
-                    "type": "terminal",
-                    "command": "printf core-contract\\n"
-                }),
-            ))
-            .await;
-        let result = created.result.expect("pane.create result");
-        assert!(result["pane_id"].as_str().is_some());
-        assert!(result["pane_ref"]
-            .as_str()
-            .expect("pane ref")
-            .starts_with("pane:"));
-        assert!(result["surface_id"].as_str().is_some());
-        assert!(result["surface_ref"]
-            .as_str()
-            .expect("surface ref")
-            .starts_with("surface:"));
-    }
-
-    #[tokio::test]
-    async fn dispatcher_shortcut_simulate_moves_focus_right() {
-        let dispatcher = Dispatcher::new();
-
-        let created = dispatcher
-            .dispatch(request("pane.create", json!({ "direction": "right" })))
-            .await;
-        assert!(created.result.is_some());
-
-        let panes_before = dispatcher.dispatch(request("pane.list", json!({}))).await;
-        let panes_before_result = panes_before.result.expect("pane list before");
-        let panes_before = panes_before_result["panes"]
-            .as_array()
-            .expect("pane rows before");
-        assert!(panes_before.len() >= 2);
-        let first_pane_id = panes_before[0]["id"].clone();
-        let second_pane_id = panes_before[1]["id"].clone();
-
-        let _ = dispatcher
-            .dispatch(request("pane.focus", json!({ "pane_id": first_pane_id })))
-            .await;
-
-        let simulated = dispatcher
-            .dispatch(request(
-                "debug.shortcut.simulate",
-                json!({ "combo": "cmd+opt+right" }),
-            ))
-            .await;
-        assert_eq!(simulated.result.expect("simulate")["ok"], true);
-
-        let panes_after = dispatcher.dispatch(request("pane.list", json!({}))).await;
-        let panes_after_result = panes_after.result.expect("pane list after");
-        let panes_after = panes_after_result["panes"]
-            .as_array()
-            .expect("pane rows after");
-        let focused = panes_after
-            .iter()
-            .find(|pane| pane["focused"].as_bool().unwrap_or(false))
-            .expect("focused pane");
-        assert_eq!(focused["id"], second_pane_id);
     }
 
     #[tokio::test]
