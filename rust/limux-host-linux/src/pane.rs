@@ -251,6 +251,9 @@ struct TerminalTabInner {
     root: gtk::Box,
     rebuild_source: RefCell<Option<glib::SourceId>>,
     focus_after_rebuild: Cell<bool>,
+    swap_source: RefCell<Option<String>>,
+    swap_buttons: RefCell<Vec<(String, gtk::Button)>>,
+    on_state_changed: RefCell<Option<std::rc::Weak<PaneCallbacks>>>,
 }
 
 #[derive(Clone)]
@@ -424,7 +427,6 @@ impl TerminalTabState {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.set_hexpand(true);
         root.set_vexpand(true);
-        root.append(&build_terminal_split_widget_tree(&tree, &root));
         let active_leaf_id = active_leaf_id.unwrap_or_else(|| tree.first_leaf().leaf_id.clone());
         let state = Self {
             inner: Rc::new(TerminalTabInner {
@@ -433,8 +435,48 @@ impl TerminalTabState {
                 root,
                 rebuild_source: RefCell::new(None),
                 focus_after_rebuild: Cell::new(false),
+                swap_source: RefCell::new(None),
+                swap_buttons: RefCell::new(Vec::new()),
+                on_state_changed: RefCell::new(None),
             }),
         };
+        state.inner.root.append(&build_terminal_split_widget_tree(
+            &state.inner.tree.borrow(),
+            &state,
+        ));
+        let key_controller = gtk::EventControllerKey::new();
+        key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak = Rc::downgrade(&state.inner);
+        key_controller.connect_key_pressed(move |_, key, _, modifiers| {
+            let Some(inner) = weak.upgrade() else {
+                return glib::Propagation::Proceed;
+            };
+            let state = TerminalTabState { inner };
+            if state.inner.swap_source.borrow().is_none() {
+                return glib::Propagation::Proceed;
+            }
+            if key == gtk::gdk::Key::Escape {
+                state.cancel_swap();
+            } else if modifiers.is_empty() {
+                let index = key.to_unicode().and_then(|digit| digit.to_digit(10));
+                if let Some(target) = index.and_then(|index| {
+                    state
+                        .inner
+                        .swap_buttons
+                        .borrow()
+                        .get(index.checked_sub(1)? as usize)
+                        .map(|(id, _)| id.clone())
+                }) {
+                    state.finish_swap(&target);
+                } else {
+                    return glib::Propagation::Proceed;
+                }
+            } else {
+                return glib::Propagation::Proceed;
+            }
+            glib::Propagation::Stop
+        });
+        state.inner.root.add_controller(key_controller);
         state.sync_split_dimming();
         state
     }
@@ -482,6 +524,86 @@ impl TerminalTabState {
 
     fn leaf_count(&self) -> usize {
         self.inner.tree.borrow().leaf_count()
+    }
+
+    fn start_swap(&self, source: &str) {
+        let tree = self.inner.tree.borrow();
+        let Some(handle) = tree.find_leaf(source).map(|leaf| leaf.handle.clone()) else {
+            return;
+        };
+        if tree.leaf_count() < 2 {
+            return;
+        }
+        drop(tree);
+        *self.inner.swap_source.borrow_mut() = Some(source.to_string());
+        for (index, (id, button)) in self.inner.swap_buttons.borrow().iter().enumerate() {
+            let selected = id == source;
+            button.set_label(&if selected {
+                format!("{} · Selected", index + 1)
+            } else {
+                (index + 1).to_string()
+            });
+            button.set_visible(true);
+            if selected {
+                button.add_css_class("limux-swap-source");
+            } else {
+                button.remove_css_class("limux-swap-source");
+            }
+        }
+        handle.focus_surface();
+    }
+
+    fn cancel_swap(&self) {
+        self.inner.swap_source.borrow_mut().take();
+        for (_, button) in self.inner.swap_buttons.borrow().iter() {
+            button.set_visible(false);
+        }
+    }
+
+    fn finish_swap(&self, target: &str) {
+        let Some(source) = self.inner.swap_source.borrow_mut().take() else {
+            return;
+        };
+        self.cancel_swap();
+        if source == target {
+            return;
+        }
+        let mut tree = self.inner.tree.borrow_mut();
+        let (Some(source_leaf), Some(target_leaf)) = (
+            tree.find_leaf(&source).cloned(),
+            tree.find_leaf(target).cloned(),
+        ) else {
+            return;
+        };
+        let mut pending = vec![&mut *tree];
+        while let Some(node) = pending.pop() {
+            match node {
+                TerminalSplitNode::Leaf(leaf) if leaf.leaf_id == source => {
+                    *leaf = target_leaf.clone();
+                }
+                TerminalSplitNode::Leaf(leaf) if leaf.leaf_id == target => {
+                    *leaf = source_leaf.clone();
+                }
+                TerminalSplitNode::Split { start, end, .. } => {
+                    pending.push(start);
+                    pending.push(end);
+                }
+                _ => {}
+            }
+        }
+        drop(tree);
+        *self.inner.active_leaf_id.borrow_mut() = source;
+        self.sync_split_dimming();
+        self.trigger_rebuild(true);
+        if let Some(callbacks) = self
+            .inner
+            .on_state_changed
+            .borrow()
+            .as_ref()
+            .and_then(std::rc::Weak::upgrade)
+        {
+            (callbacks.on_state_changed)();
+        }
     }
 
     fn refresh_display(&self) {
@@ -563,6 +685,8 @@ impl TerminalTabState {
     }
 
     fn trigger_rebuild(&self, focus_after_rebuild: bool) {
+        self.cancel_swap();
+        self.inner.swap_buttons.borrow_mut().clear();
         self.inner.focus_after_rebuild.set(focus_after_rebuild);
         if let Some(source) = self.inner.rebuild_source.borrow_mut().take() {
             source.remove();
@@ -595,7 +719,7 @@ impl TerminalTabState {
         }
         self.inner
             .root
-            .append(&build_terminal_split_widget_tree(&tree, &self.inner.root));
+            .append(&build_terminal_split_widget_tree(&tree, self));
         drop(tree);
         self.refresh_display();
         if self.inner.focus_after_rebuild.replace(false) {
@@ -626,9 +750,34 @@ fn terminal_focus_index(
     })
 }
 
-fn build_terminal_split_widget_tree(node: &TerminalSplitNode, tab_root: &gtk::Box) -> gtk::Widget {
+fn build_terminal_split_widget_tree(
+    node: &TerminalSplitNode,
+    state: &TerminalTabState,
+) -> gtk::Widget {
     match node {
-        TerminalSplitNode::Leaf(leaf) => leaf.widget.clone(),
+        TerminalSplitNode::Leaf(leaf) => {
+            let overlay = gtk::Overlay::builder().hexpand(true).vexpand(true).build();
+            overlay.set_child(Some(&leaf.widget));
+            let button = gtk::Button::new();
+            button.add_css_class("limux-swap-target");
+            button.set_halign(gtk::Align::Fill);
+            button.set_valign(gtk::Align::Fill);
+            button.set_visible(false);
+            let weak = Rc::downgrade(&state.inner);
+            let leaf_id = leaf.leaf_id.clone();
+            button.connect_clicked(move |_| {
+                if let Some(inner) = weak.upgrade() {
+                    TerminalTabState { inner }.finish_swap(&leaf_id);
+                }
+            });
+            state
+                .inner
+                .swap_buttons
+                .borrow_mut()
+                .push((leaf.leaf_id.clone(), button.clone()));
+            overlay.add_overlay(&button);
+            overlay.upcast()
+        }
         TerminalSplitNode::Split {
             orientation,
             ratio,
@@ -667,9 +816,9 @@ fn build_terminal_split_widget_tree(node: &TerminalSplitNode, tab_root: &gtk::Bo
                 (overlay, label, revealer)
             };
             let (start_region, start_label, start_revealer) =
-                resize_region(build_terminal_split_widget_tree(start, tab_root));
+                resize_region(build_terminal_split_widget_tree(start, state));
             let (end_region, end_label, end_revealer) =
-                resize_region(build_terminal_split_widget_tree(end, tab_root));
+                resize_region(build_terminal_split_widget_tree(end, state));
             paned.set_start_child(Some(&start_region));
             paned.set_end_child(Some(&end_region));
 
@@ -679,7 +828,7 @@ fn build_terminal_split_widget_tree(node: &TerminalSplitNode, tab_root: &gtk::Bo
             let shared_ratio = ratio.clone();
             let orientation_for_notify = *orientation;
             let applying_for_notify = applying.clone();
-            let tab_root = tab_root.downgrade();
+            let tab_root = state.inner.root.downgrade();
             let hide_source = Rc::new(RefCell::new(None::<glib::SourceId>));
             paned.connect_position_notify(move |paned| {
                 if applying_for_notify.get() {
@@ -922,6 +1071,21 @@ pub const PANE_CSS: &str = r#"
     padding: 6px 10px;
     font-size: 16px;
     font-weight: 700;
+}
+.limux-swap-target {
+    background: alpha(@window_bg_color, 0.7);
+    color: @window_fg_color;
+    border: 2px solid @accent_color;
+    border-radius: 0;
+    font-size: 32px;
+    font-weight: 700;
+}
+.limux-swap-target:hover {
+    background: alpha(@accent_bg_color, 0.35);
+}
+.limux-swap-target.limux-swap-source {
+    background: alpha(@window_bg_color, 0.45);
+    border-color: alpha(@window_fg_color, 0.4);
 }
 .limux-split-icon {
     border: 1px solid alpha(@window_fg_color, 0.4);
@@ -1681,6 +1845,7 @@ fn placeholder_terminal_callbacks() -> TerminalCallbacks {
         on_split_down: Box::new(|| {}),
         on_split_panel_right: Box::new(|| {}),
         on_split_panel_down: Box::new(|| {}),
+        on_swap: Box::new(|| {}),
     }
 }
 
@@ -1854,6 +2019,31 @@ pub fn split_active_terminal_tab_in_pane(
     )
 }
 
+pub fn start_swap_in_active_terminal_tab(pane_widget: &gtk::Widget) -> bool {
+    let Some(internals) = find_pane_internals(pane_widget) else {
+        return false;
+    };
+    let state = {
+        let tab_state = internals.tab_state.borrow();
+        let Some(active_id) = tab_state.active_tab.as_deref() else {
+            return false;
+        };
+        let Some(entry) = tab_state.tabs.iter().find(|entry| entry.id == active_id) else {
+            return false;
+        };
+        let TabKind::Terminal { state } = &entry.kind else {
+            return false;
+        };
+        state.clone()
+    };
+    if state.leaf_count() < 2 {
+        return false;
+    }
+    let source = state.active_leaf_id();
+    state.start_swap(&source);
+    true
+}
+
 fn terminal_tab_context(
     pane_widget: &gtk::Widget,
     tab_id: &str,
@@ -1895,7 +2085,7 @@ pub fn add_surface_to_terminal_tab(
     {
         let tree = terminal_tab_state.inner.tree.borrow();
         let valid = match (&*tree, leaf_count) {
-            (TerminalSplitNode::Leaf(leaf), 1) => leaf.leaf_id == source_leaf.leaf_id,
+            (TerminalSplitNode::Leaf(_), 1) => true,
             (
                 TerminalSplitNode::Split {
                     orientation,
@@ -1906,7 +2096,7 @@ pub fn add_surface_to_terminal_tab(
                 2,
             ) => {
                 *orientation == gtk::Orientation::Horizontal
-                    && matches!(start.as_ref(), TerminalSplitNode::Leaf(leaf) if leaf.leaf_id == source_leaf.leaf_id)
+                    && matches!(start.as_ref(), TerminalSplitNode::Leaf(_))
                     && matches!(end.as_ref(), TerminalSplitNode::Leaf(_))
             }
             (
@@ -1919,7 +2109,7 @@ pub fn add_surface_to_terminal_tab(
                 3,
             ) => {
                 *orientation == gtk::Orientation::Horizontal
-                    && matches!(start.as_ref(), TerminalSplitNode::Leaf(leaf) if leaf.leaf_id == source_leaf.leaf_id)
+                    && matches!(start.as_ref(), TerminalSplitNode::Leaf(_))
                     && matches!(end.as_ref(), TerminalSplitNode::Split { orientation, start, end, .. }
                         if *orientation == gtk::Orientation::Vertical
                             && matches!(start.as_ref(), TerminalSplitNode::Leaf(_))
@@ -2103,6 +2293,8 @@ fn make_terminal_callbacks(
     title_label: &gtk::Label,
     leaf: &TerminalLeafState,
 ) -> TerminalCallbacks {
+    *terminal_tab_state.inner.on_state_changed.borrow_mut() =
+        Some(Rc::downgrade(&internals.callbacks));
     let tid_for_title = tab_id.to_string();
     let leaf_id = leaf.leaf_id.clone();
     let title_label_for_title = title_label.clone();
@@ -2209,6 +2401,11 @@ fn make_terminal_callbacks(
                 let pane_widget: gtk::Widget = pane_outer.clone().upcast();
                 add_browser_tab_to_pane_with_uri(&pane_widget, Some(url));
             }
+        }),
+        on_swap: Box::new({
+            let state = terminal_tab_state.clone();
+            let leaf_id = leaf.leaf_id.clone();
+            move || state.start_swap(&leaf_id)
         }),
         on_split_right: Box::new({
             let internals = internals.clone();
@@ -3783,6 +3980,16 @@ fn activate_tab(
     tab_id: &str,
 ) {
     let mut ts = tab_state.borrow_mut();
+    if ts.active_tab.as_deref() != Some(tab_id) {
+        if let Some(TabKind::Terminal { state }) = ts
+            .tabs
+            .iter()
+            .find(|entry| Some(entry.id.as_str()) == ts.active_tab.as_deref())
+            .map(|entry| &entry.kind)
+        {
+            state.cancel_swap();
+        }
+    }
     ts.active_tab = Some(tab_id.to_string());
 
     // Update visual state on all tabs

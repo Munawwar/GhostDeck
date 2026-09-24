@@ -1150,6 +1150,7 @@ pub struct TerminalCallbacks {
     pub on_split_down: Box<VoidCallback>,
     pub on_split_panel_right: Box<VoidCallback>,
     pub on_split_panel_down: Box<VoidCallback>,
+    pub on_swap: Box<VoidCallback>,
 }
 
 pub struct TerminalOptions {
@@ -2027,6 +2028,7 @@ fn show_terminal_context_menu(
         ("Split Right", true),
         ("Split Down", true),
         ("Split Panel", true),
+        ("Swap", true),
         ("---", false),
         ("Clear", true),
     ];
@@ -2105,6 +2107,7 @@ fn show_terminal_context_menu(
                         let callbacks = cb.borrow();
                         (callbacks.on_split_down)();
                     }
+                    "Swap" => (cb.borrow().on_swap)(),
                     "Clear" => surface_action(surface, "clear_screen"),
                     _ => {}
                 }

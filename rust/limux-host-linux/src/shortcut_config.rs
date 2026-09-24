@@ -29,6 +29,7 @@ pub enum ShortcutId {
     SplitPanelDown,
     NewTerminalInFocusedPane,
     SplitRight,
+    SwapSurfaces,
     SplitPanelRight,
     CloseFocusedPane,
     ToggleFocusedPaneZoom,
@@ -85,6 +86,7 @@ pub enum ShortcutCommand {
     SplitPanelDown,
     NewTerminal,
     SplitRight,
+    SwapSurfaces,
     SplitPanelRight,
     CloseFocusedPane,
     ToggleFocusedPaneZoom,
@@ -319,7 +321,7 @@ struct ShortcutConfigFile {
     shortcuts: HashMap<String, serde_json::Value>,
 }
 
-const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 52] = [
+const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 53] = [
     ShortcutDefinition {
         id: ShortcutId::NewWorkspace,
         config_key: "new_workspace",
@@ -482,6 +484,17 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 52] = [
         label: "Split Right",
         registers_gtk_accel: false,
         command: ShortcutCommand::SplitRight,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::SwapSurfaces,
+        config_key: "swap_surfaces",
+        action_name: "win.swap-surfaces",
+        default_accel: "<Ctrl><Shift>s",
+        label: "Swap Surfaces",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::SwapSurfaces,
         scope: ShortcutScope::Window,
         editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },

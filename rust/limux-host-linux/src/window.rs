@@ -2290,6 +2290,12 @@ fn dispatch_shortcut_command(state: &State, command: ShortcutCommand) -> bool {
             split_focused_terminal(state, gtk::Orientation::Horizontal);
             true
         }
+        ShortcutCommand::SwapSurfaces => {
+            if let Some((_, pane_widget)) = find_focused_pane(state) {
+                pane::start_swap_in_active_terminal_tab(&pane_widget);
+            }
+            true
+        }
         ShortcutCommand::SplitPanelDown => {
             split_focused_panel(state, gtk::Orientation::Vertical);
             true
