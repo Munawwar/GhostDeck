@@ -424,7 +424,7 @@ impl TerminalTabState {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.set_hexpand(true);
         root.set_vexpand(true);
-        root.append(&build_terminal_split_widget_tree(&tree));
+        root.append(&build_terminal_split_widget_tree(&tree, &root));
         let active_leaf_id = active_leaf_id.unwrap_or_else(|| tree.first_leaf().leaf_id.clone());
         let state = Self {
             inner: Rc::new(TerminalTabInner {
@@ -595,7 +595,7 @@ impl TerminalTabState {
         }
         self.inner
             .root
-            .append(&build_terminal_split_widget_tree(&tree));
+            .append(&build_terminal_split_widget_tree(&tree, &self.inner.root));
         drop(tree);
         self.refresh_display();
         if self.inner.focus_after_rebuild.replace(false) {
@@ -626,7 +626,7 @@ fn terminal_focus_index(
     })
 }
 
-fn build_terminal_split_widget_tree(node: &TerminalSplitNode) -> gtk::Widget {
+fn build_terminal_split_widget_tree(node: &TerminalSplitNode, tab_root: &gtk::Box) -> gtk::Widget {
     match node {
         TerminalSplitNode::Leaf(leaf) => leaf.widget.clone(),
         TerminalSplitNode::Split {
@@ -648,16 +648,46 @@ fn build_terminal_split_widget_tree(node: &TerminalSplitNode) -> gtk::Widget {
             paned.set_resize_start_child(true);
             paned.set_resize_end_child(true);
 
+            let resize_region = |child: gtk::Widget| {
+                let overlay = gtk::Overlay::builder().hexpand(true).vexpand(true).build();
+                overlay.set_child(Some(&child));
+                let label = gtk::Label::new(None);
+                label.add_css_class("limux-resize-share");
+                label.set_halign(gtk::Align::Center);
+                label.set_valign(gtk::Align::Center);
+                label.set_can_target(false);
+                let revealer = gtk::Revealer::builder()
+                    .transition_type(gtk::RevealerTransitionType::Crossfade)
+                    .halign(gtk::Align::Center)
+                    .valign(gtk::Align::Center)
+                    .build();
+                revealer.set_can_target(false);
+                revealer.set_child(Some(&label));
+                overlay.add_overlay(&revealer);
+                (overlay, label, revealer)
+            };
+            let (start_region, start_label, start_revealer) =
+                resize_region(build_terminal_split_widget_tree(start, tab_root));
+            let (end_region, end_label, end_revealer) =
+                resize_region(build_terminal_split_widget_tree(end, tab_root));
+            paned.set_start_child(Some(&start_region));
+            paned.set_end_child(Some(&end_region));
+
             // Ignore early position-notify churn until the first restored ratio
             // has actually been applied with a real allocation.
             let applying = Rc::new(Cell::new(true));
             let shared_ratio = ratio.clone();
             let orientation_for_notify = *orientation;
             let applying_for_notify = applying.clone();
+            let tab_root = tab_root.downgrade();
+            let hide_source = Rc::new(RefCell::new(None::<glib::SourceId>));
             paned.connect_position_notify(move |paned| {
                 if applying_for_notify.get() {
                     return;
                 }
+                let Some(tab_root) = tab_root.upgrade() else {
+                    return;
+                };
                 let allocation = paned.allocation();
                 let size = if orientation_for_notify == gtk::Orientation::Horizontal {
                     allocation.width()
@@ -667,10 +697,55 @@ fn build_terminal_split_widget_tree(node: &TerminalSplitNode) -> gtk::Widget {
                 let stored_ratio = *shared_ratio.borrow();
                 *shared_ratio.borrow_mut() =
                     layout_state::snapshot_split_ratio(paned.position(), size, Some(stored_ratio));
+
+                let (total, glyph, axis) = if orientation_for_notify == gtk::Orientation::Horizontal
+                {
+                    (tab_root.allocated_width(), "↔", "width")
+                } else {
+                    (tab_root.allocated_height(), "↕", "height")
+                };
+                if total <= 0 {
+                    return;
+                }
+                let dimension = |region: &gtk::Overlay| {
+                    if orientation_for_notify == gtk::Orientation::Horizontal {
+                        region.allocated_width()
+                    } else {
+                        region.allocated_height()
+                    }
+                };
+                start_label.set_label(&format!(
+                    "{glyph} {}% {axis}",
+                    (dimension(&start_region) as f64 * 100.0 / total as f64).round()
+                ));
+                end_label.set_label(&format!(
+                    "{glyph} {}% {axis}",
+                    (dimension(&end_region) as f64 * 100.0 / total as f64).round()
+                ));
+                start_revealer.set_transition_duration(0);
+                end_revealer.set_transition_duration(0);
+                start_revealer.set_reveal_child(true);
+                end_revealer.set_reveal_child(true);
+
+                if let Some(source) = hide_source.borrow_mut().take() {
+                    source.remove();
+                }
+                let start_revealer_for_hide = start_revealer.clone();
+                let end_revealer_for_hide = end_revealer.clone();
+                let hide_source_for_timeout = hide_source.clone();
+                let source = glib::timeout_add_local_once(
+                    std::time::Duration::from_millis(1_500),
+                    move || {
+                        start_revealer_for_hide.set_transition_duration(700);
+                        end_revealer_for_hide.set_transition_duration(700);
+                        start_revealer_for_hide.set_reveal_child(false);
+                        end_revealer_for_hide.set_reveal_child(false);
+                        hide_source_for_timeout.borrow_mut().take();
+                    },
+                );
+                hide_source.borrow_mut().replace(source);
             });
 
-            paned.set_start_child(Some(&build_terminal_split_widget_tree(start)));
-            paned.set_end_child(Some(&build_terminal_split_widget_tree(end)));
             window::apply_split_ratio_after_layout(
                 &paned,
                 split_orientation,
@@ -707,6 +782,10 @@ fn detach_terminal_tree_widgets(node: &TerminalSplitNode) {
                     }
                 } else if let Some(container) = parent.downcast_ref::<gtk::Box>() {
                     container.remove(&leaf.widget);
+                } else if let Some(overlay) = parent.downcast_ref::<gtk::Overlay>() {
+                    if overlay.child().as_ref() == Some(&leaf.widget) {
+                        overlay.set_child(gtk::Widget::NONE);
+                    }
                 }
             }
         }
@@ -834,6 +913,15 @@ pub const PANE_CSS: &str = r#"
 .limux-pane-action:hover {
     background: alpha(@window_fg_color, 0.08);
     color: alpha(@window_fg_color, 0.8);
+}
+.limux-resize-share {
+    background: alpha(@window_bg_color, 0.9);
+    color: @window_fg_color;
+    border: 1px solid alpha(@window_fg_color, 0.2);
+    border-radius: 999px;
+    padding: 6px 10px;
+    font-size: 16px;
+    font-weight: 700;
 }
 .limux-split-icon {
     border: 1px solid alpha(@window_fg_color, 0.4);
