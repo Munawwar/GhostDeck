@@ -182,14 +182,11 @@ build_ghostty_resources() {
     remove_tree "$GHOSTTY_INSTALL_ROOT"
     mkdir -p "$GHOSTTY_INSTALL_ROOT"
 
-    (
-        cd "${ROOT_DIR}/ghostty"
-        DESTDIR="$GHOSTTY_INSTALL_ROOT" \
-            zig build \
-            --prefix /usr \
-            "${GHOSTTY_ZIG_ARGS[@]}" \
-            -Demit-docs=false
-    )
+    DESTDIR="$GHOSTTY_INSTALL_ROOT" \
+        "$ROOT_DIR/scripts/build-ghostty.sh" \
+        --prefix /usr \
+        "${GHOSTTY_ZIG_ARGS[@]}" \
+        -Demit-docs=false
 }
 
 echo "=== Limux Packager ==="
@@ -220,7 +217,7 @@ fi
 # that do not expose the builder's ISA extensions, such as AVX-512.
 configure_ghostty_build_args
 echo "Building libghostty (ReleaseFast, cpu=baseline)..."
-(cd "${ROOT_DIR}/ghostty" && zig build -Dapp-runtime=none "${GHOSTTY_ZIG_ARGS[@]}")
+"$ROOT_DIR/scripts/build-ghostty.sh" -Dapp-runtime=none "${GHOSTTY_ZIG_ARGS[@]}"
 build_ghostty_resources
 
 if [ ! -f "$GHOSTTY_SO" ]; then

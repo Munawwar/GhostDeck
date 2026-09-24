@@ -79,15 +79,15 @@ sudo apt install libgtk-4-1 libadwaita-1-0
 # Install dev dependencies (Ubuntu/Debian)
 sudo apt install libgtk-4-dev libadwaita-1-dev pkg-config build-essential
 
-# Initialize the Ghostty submodule and build the embedded library
+# Initialize Ghostty and build the embedded library with Limux's Linux patch
 git submodule update --init --recursive
-(cd ghostty && zig build -Dapp-runtime=none -Doptimize=ReleaseFast)
+./scripts/build-ghostty.sh -Dapp-runtime=none -Doptimize=ReleaseFast
 
 # Build limux
 cargo build --release
 
 # Run (point to libghostty.so location)
-LD_LIBRARY_PATH=../ghostty/zig-out/lib:$LD_LIBRARY_PATH ./target/release/limux
+LD_LIBRARY_PATH=ghostty/zig-out/lib:$LD_LIBRARY_PATH ./target/release/limux
 ```
 
 ### Package a release tarball
@@ -97,7 +97,7 @@ LD_LIBRARY_PATH=../ghostty/zig-out/lib:$LD_LIBRARY_PATH ./target/release/limux
 ```
 
 This builds the binary, bundles `libghostty.so`, icons, and an install script into a tarball.
-`package.sh` also rebuilds `libghostty.so` with `ReleaseFast` and `-Dcpu=baseline`, so Zig and the initialized Ghostty submodule must be present.
+`package.sh` also rebuilds `libghostty.so` with `ReleaseFast` and `-Dcpu=baseline`, applying Limux's Linux embedded patch in a temporary worktree.
 
 ## Development
 
@@ -232,7 +232,7 @@ rust/
   limux-cli/           # CLI client
 ```
 
-The terminal rendering is handled entirely by Ghostty's embedded library (`libghostty.so`), which provides GPU-accelerated OpenGL rendering. The UI layer is native GTK4 with libadwaita.
+The terminal rendering is handled by Ghostty 1.3.1's embedded library (`libghostty.so`) with Limux's Linux patch. The UI layer is native GTK4 with libadwaita.
 
 ## License
 

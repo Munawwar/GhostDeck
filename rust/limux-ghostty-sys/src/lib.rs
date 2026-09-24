@@ -78,15 +78,16 @@ pub const GHOSTTY_ACTION_SCROLLBAR: c_int = 26;
 pub const GHOSTTY_ACTION_RENDER: c_int = 27;
 pub const GHOSTTY_ACTION_DESKTOP_NOTIFICATION: c_int = 31;
 pub const GHOSTTY_ACTION_SET_TITLE: c_int = 32;
-pub const GHOSTTY_ACTION_PWD: c_int = 34;
-pub const GHOSTTY_ACTION_MOUSE_SHAPE: c_int = 35;
-pub const GHOSTTY_ACTION_COLOR_CHANGE: c_int = 45;
-pub const GHOSTTY_ACTION_RELOAD_CONFIG: c_int = 46;
-pub const GHOSTTY_ACTION_CONFIG_CHANGE: c_int = 47;
-pub const GHOSTTY_ACTION_CLOSE_WINDOW: c_int = 48;
-pub const GHOSTTY_ACTION_RING_BELL: c_int = 49;
-pub const GHOSTTY_ACTION_OPEN_URL: c_int = 53;
-pub const GHOSTTY_ACTION_SHOW_CHILD_EXITED: c_int = 54;
+pub const GHOSTTY_ACTION_SET_TAB_TITLE: c_int = 33;
+pub const GHOSTTY_ACTION_PWD: c_int = 35;
+pub const GHOSTTY_ACTION_MOUSE_SHAPE: c_int = 36;
+pub const GHOSTTY_ACTION_COLOR_CHANGE: c_int = 46;
+pub const GHOSTTY_ACTION_RELOAD_CONFIG: c_int = 47;
+pub const GHOSTTY_ACTION_CONFIG_CHANGE: c_int = 48;
+pub const GHOSTTY_ACTION_CLOSE_WINDOW: c_int = 49;
+pub const GHOSTTY_ACTION_RING_BELL: c_int = 50;
+pub const GHOSTTY_ACTION_OPEN_URL: c_int = 54;
+pub const GHOSTTY_ACTION_SHOW_CHILD_EXITED: c_int = 55;
 
 // Key codes (W3C UIEvents, subset)
 pub const GHOSTTY_KEY_UNIDENTIFIED: c_int = 0;
@@ -235,8 +236,6 @@ pub struct ghostty_input_key_s {
     pub composing: bool,
 }
 
-pub type ghostty_io_write_cb = unsafe extern "C" fn(*mut c_void, *const c_char, usize);
-
 #[repr(C)]
 pub struct ghostty_surface_config_s {
     pub platform_tag: c_int,
@@ -251,9 +250,6 @@ pub struct ghostty_surface_config_s {
     pub initial_input: *const c_char,
     pub wait_after_command: bool,
     pub context: c_int, // ghostty_surface_context_e
-    pub io_mode: c_int, // ghostty_surface_io_mode_e (0 = exec)
-    pub io_write_cb: Option<ghostty_io_write_cb>,
-    pub io_write_userdata: *mut c_void,
 }
 
 #[repr(C)]
@@ -387,8 +383,8 @@ pub struct ghostty_surface_message_childexited_s {
 pub type ghostty_runtime_wakeup_cb = unsafe extern "C" fn(*mut c_void);
 pub type ghostty_runtime_action_cb =
     unsafe extern "C" fn(ghostty_app_t, ghostty_target_s, ghostty_action_s) -> bool;
-pub type ghostty_runtime_clipboard_has_text_cb = unsafe extern "C" fn(*mut c_void, c_int) -> bool;
-pub type ghostty_runtime_read_clipboard_cb = unsafe extern "C" fn(*mut c_void, c_int, *mut c_void);
+pub type ghostty_runtime_read_clipboard_cb =
+    unsafe extern "C" fn(*mut c_void, c_int, *mut c_void) -> bool;
 pub type ghostty_runtime_confirm_read_clipboard_cb =
     unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_void, c_int);
 pub type ghostty_runtime_write_clipboard_cb =
@@ -401,7 +397,6 @@ pub struct ghostty_runtime_config_s {
     pub supports_selection_clipboard: bool,
     pub wakeup_cb: ghostty_runtime_wakeup_cb,
     pub action_cb: ghostty_runtime_action_cb,
-    pub clipboard_has_text_cb: ghostty_runtime_clipboard_has_text_cb,
     pub read_clipboard_cb: ghostty_runtime_read_clipboard_cb,
     pub confirm_read_clipboard_cb: ghostty_runtime_confirm_read_clipboard_cb,
     pub write_clipboard_cb: ghostty_runtime_write_clipboard_cb,

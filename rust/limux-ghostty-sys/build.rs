@@ -7,7 +7,7 @@ fn main() {
     let ghostty_lib = ghostty_root
         .join("zig-out/lib")
         .canonicalize()
-        .expect("libghostty not found — run: cd ghostty && zig build -Dapp-runtime=none -Doptimize=ReleaseFast");
+        .expect("libghostty not found — run: ./scripts/build-ghostty.sh -Dapp-runtime=none -Doptimize=ReleaseFast");
 
     println!("cargo:rustc-link-search=native={}", ghostty_lib.display());
     println!("cargo:rustc-link-lib=dylib=ghostty");

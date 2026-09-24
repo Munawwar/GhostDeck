@@ -123,7 +123,9 @@ name addressing, and by-name send path.
 
 ## Repository Rules
 
-- Treat vendored `ghostty/` as read-only from the Limux layer; use the C API.
+- Treat the `ghostty/` submodule as read-only. Build through
+  `scripts/build-ghostty.sh`, which applies the Linux embedded patch in a
+  temporary worktree.
 - Keep command metadata, flags, validation, and policy in one canonical path.
 - Prefer small domain modules over monolithic files.
 - Do not commit generated artifacts, build output, or caches.
