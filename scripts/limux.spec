@@ -9,12 +9,11 @@ URL:        https://github.com/am-will/limux
 Vendor:     Will R <will@limux.dev>
 ExclusiveArch: x86_64 aarch64
 AutoReq:    yes
-Requires:   webkitgtk6.0
 Source0:    limux-%{version}.tar.gz
 
 %description
 Limux is a terminal workspace manager powered by Ghostty's GPU-rendered
-terminal engine, with split panes, tabbed workspaces, and a built-in browser.
+terminal engine, with split surfaces and tabbed workspaces.
 
 %prep
 %setup -q

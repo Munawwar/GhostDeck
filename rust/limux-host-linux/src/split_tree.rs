@@ -352,7 +352,7 @@ impl SplitTreeContainer {
         refresh_terminal_displays_after_rebuild(self.bin.upcast_ref());
 
         // Newly created panes are tracked as pane containers rather than the
-        // inner terminal/browser widget, so restore through the pane helper
+        // inner terminal widget, so restore through the pane helper
         // when possible and fall back to plain widget focus otherwise.
         if let Some(focused) = self.last_focused.borrow().as_ref() {
             if !pane::focus_active_tab_in_pane(focused) {

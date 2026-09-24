@@ -13,8 +13,7 @@ use libadwaita as adw;
 
 use crate::app_config;
 use crate::control_bridge::{
-    BridgeError, ControlCommand, PaneCreateDirection as BridgePaneCreateDirection, PaneCreateType,
-    WorkspaceTarget,
+    BridgeError, ControlCommand, PaneCreateDirection as BridgePaneCreateDirection, WorkspaceTarget,
 };
 use crate::keybind_editor;
 use crate::layout_state::{
@@ -399,9 +398,6 @@ fn focused_surface_payload(state: &State) -> Option<serde_json::Value> {
     if let Some(cwd) = surface.cwd.filter(|cwd| !cwd.is_empty()) {
         payload.insert("cwd".to_string(), serde_json::Value::String(cwd));
     }
-    if let Some(uri) = surface.uri.filter(|uri| !uri.is_empty()) {
-        payload.insert("uri".to_string(), serde_json::Value::String(uri));
-    }
     Some(serde_json::Value::Object(payload))
 }
 
@@ -706,9 +702,6 @@ fn surface_list_payload(
             );
             if let Some(cwd) = surface.cwd.filter(|cwd| !cwd.is_empty()) {
                 row.insert("cwd".to_string(), serde_json::Value::String(cwd));
-            }
-            if let Some(uri) = surface.uri.filter(|uri| !uri.is_empty()) {
-                row.insert("uri".to_string(), serde_json::Value::String(uri));
             }
             serde_json::Value::Object(row)
         })
@@ -2109,7 +2102,7 @@ fn install_key_capture(window: &adw::ApplicationWindow, state: &State) {
             let context = controller
                 .widget()
                 .and_then(|widget| widget.downcast::<gtk::Window>().ok())
-                .map(|window| focused_editable_capture_context(&state, &window))
+                .map(|window| focused_editable_capture_context(&window))
                 .unwrap_or_default();
             !shortcut_blocked_by_editable(matched.command, matched.editable_capture_policy, context)
         })
@@ -2147,32 +2140,14 @@ fn focused_widget_is_editable(window: &gtk::Window) -> bool {
     false
 }
 
-fn focused_editable_capture_context(state: &State, window: &gtk::Window) -> EditableCaptureContext {
-    let gtk_editable = focused_widget_is_editable(window);
-    match focused_shortcut_target(state) {
-        pane::FocusedShortcutTarget::Browser(target) => EditableCaptureContext {
-            gtk_editable,
-            browser_dom_editable: target.is_page_editable(),
-            browser_find_active: target.is_find_active(),
-        },
-        _ => EditableCaptureContext {
-            gtk_editable,
-            ..EditableCaptureContext::default()
-        },
+fn focused_editable_capture_context(window: &gtk::Window) -> EditableCaptureContext {
+    EditableCaptureContext {
+        gtk_editable: focused_widget_is_editable(window),
     }
 }
 
-fn shortcut_allowed_while_browser_find_active(command: ShortcutCommand) -> bool {
-    matches!(
-        command,
-        ShortcutCommand::SurfaceFindNext
-            | ShortcutCommand::SurfaceFindPrevious
-            | ShortcutCommand::SurfaceFindHide
-    )
-}
-
 fn shortcut_blocked_by_editable(
-    command: ShortcutCommand,
+    _command: ShortcutCommand,
     policy: EditableCapturePolicy,
     context: EditableCaptureContext,
 ) -> bool {
@@ -2180,11 +2155,7 @@ fn shortcut_blocked_by_editable(
         return false;
     }
 
-    if context.browser_find_active && shortcut_allowed_while_browser_find_active(command) {
-        return false;
-    }
-
-    context.gtk_editable || context.browser_dom_editable
+    context.gtk_editable
 }
 
 fn shortcut_dispatch_propagation(matched: bool) -> glib::Propagation {
@@ -2214,8 +2185,6 @@ struct MatchedShortcut {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct EditableCaptureContext {
     gtk_editable: bool,
-    browser_dom_editable: bool,
-    browser_find_active: bool,
 }
 
 fn shortcut_match_from_key_press(
@@ -2283,7 +2252,7 @@ fn dispatch_shortcut_command(state: &State, command: ShortcutCommand) -> bool {
             true
         }
         ShortcutCommand::NewTerminal => {
-            add_tab_to_focused_pane(state, false);
+            add_tab_to_focused_pane(state);
             true
         }
         ShortcutCommand::SplitRight => {
@@ -2372,20 +2341,11 @@ fn dispatch_shortcut_command(state: &State, command: ShortcutCommand) -> bool {
             activate_last_workspace_shortcut(state);
             true
         }
-        ShortcutCommand::OpenBrowserInSplit
-        | ShortcutCommand::BrowserFocusLocation
-        | ShortcutCommand::BrowserBack
-        | ShortcutCommand::BrowserForward
-        | ShortcutCommand::BrowserReload
-        | ShortcutCommand::BrowserInspector
-        | ShortcutCommand::BrowserConsole => dispatch_browser_command(state, command),
         ShortcutCommand::SurfaceFind
         | ShortcutCommand::SurfaceFindNext
         | ShortcutCommand::SurfaceFindPrevious
         | ShortcutCommand::SurfaceFindHide
-        | ShortcutCommand::SurfaceUseSelectionForFind => {
-            dispatch_terminal_command(state, command) || dispatch_browser_command(state, command)
-        }
+        | ShortcutCommand::SurfaceUseSelectionForFind => dispatch_terminal_command(state, command),
         ShortcutCommand::TerminalClearScrollback
         | ShortcutCommand::TerminalCopy
         | ShortcutCommand::TerminalPaste
@@ -4183,13 +4143,6 @@ fn handle_control_command(state: &State, command: ControlCommand) {
             let _ = reply.send(Ok(result));
         }
         ControlCommand::CreatePane { request, reply } => {
-            if !matches!(request.pane_type, PaneCreateType::Terminal) {
-                let _ = reply.send(Err(BridgeError::invalid_params(
-                    "pane.create live GTK bridge supports type=terminal only",
-                )));
-                return;
-            }
-
             let source_pane_id = request
                 .source_pane_id
                 .as_deref()
@@ -5689,46 +5642,6 @@ fn broadcast_font_size(size: f32) {
     crate::terminal::broadcast_binding_action(&action);
 }
 
-fn dispatch_browser_command(state: &State, command: ShortcutCommand) -> bool {
-    let pane::FocusedShortcutTarget::Browser(target) = focused_shortcut_target(state) else {
-        return false;
-    };
-
-    match command {
-        ShortcutCommand::BrowserFocusLocation => target.focus_location(),
-        ShortcutCommand::BrowserBack => target.go_back(),
-        ShortcutCommand::BrowserForward => target.go_forward(),
-        ShortcutCommand::BrowserReload => target.reload(),
-        ShortcutCommand::BrowserInspector => target.show_inspector(),
-        ShortcutCommand::BrowserConsole => target.show_console(),
-        ShortcutCommand::SurfaceFind => target.show_find(),
-        ShortcutCommand::SurfaceFindNext => target.find_next(),
-        ShortcutCommand::SurfaceFindPrevious => target.find_previous(),
-        ShortcutCommand::SurfaceFindHide => target.hide_find(),
-        ShortcutCommand::SurfaceUseSelectionForFind => target.use_selection_for_find(),
-        ShortcutCommand::OpenBrowserInSplit => {
-            let uri = target.current_uri();
-            let Some((ws_id, pane_widget)) = find_leaf_focused_pane(state) else {
-                return false;
-            };
-            split_pane(
-                state,
-                &ws_id,
-                &pane_widget,
-                gtk::Orientation::Horizontal,
-                SplitPaneOptions {
-                    initial_state: Some(PaneState::browser_only(uri.as_deref())),
-                    skip_default_tab: false,
-                    new_pane_first: false,
-                    persist: true,
-                },
-            )
-            .is_some()
-        }
-        _ => false,
-    }
-}
-
 fn split_focused_terminal(state: &State, orientation: gtk::Orientation) {
     if let Some((ws_id, pane_widget)) = find_focused_pane(state) {
         if pane::split_active_terminal_tab_in_pane(&pane_widget, orientation) {
@@ -5801,13 +5714,9 @@ fn toggle_focused_pane_zoom(state: &State) {
     }
 }
 
-fn add_tab_to_focused_pane(_state: &State, _browser: bool) {
-    if let Some((_ws_id, pane_widget)) = find_focused_pane(_state) {
-        if _browser {
-            pane::add_browser_tab_to_pane(&pane_widget);
-        } else {
-            pane::add_terminal_tab_to_pane(&pane_widget);
-        }
+fn add_tab_to_focused_pane(state: &State) {
+    if let Some((_, pane_widget)) = find_focused_pane(state) {
+        pane::add_terminal_tab_to_pane(&pane_widget);
     }
 }
 
@@ -6272,8 +6181,7 @@ mod tests {
         directional_neighbor_score, favorites_prefix_len, font_size_after_delta,
         ghostty_prefers_dark, gtk_system_prefers_dark_from_raw, next_active_workspace_index,
         pane_create_split_placement, queue_session_save_request, resolve_pane_create_source_id,
-        resolved_system_prefers_dark, sanitize_background_opacity,
-        shortcut_allowed_while_browser_find_active, shortcut_blocked_by_editable,
+        resolved_system_prefers_dark, sanitize_background_opacity, shortcut_blocked_by_editable,
         shortcut_command_from_key_event, shortcut_dispatch_propagation,
         should_emit_desktop_notification, tab_drag_workspace_seed, use_opaque_window_background,
         validate_workspace_folder_input_with_dirs, window_close_state_from_response,
@@ -6927,81 +6835,17 @@ mod tests {
         assert!(shortcut_blocked_by_editable(
             ShortcutCommand::SurfaceFind,
             EditableCapturePolicy::BypassInEditable,
-            EditableCaptureContext {
-                gtk_editable: true,
-                ..EditableCaptureContext::default()
-            }
+            EditableCaptureContext { gtk_editable: true }
         ));
         assert!(!shortcut_blocked_by_editable(
             ShortcutCommand::SurfaceFind,
             EditableCapturePolicy::AlwaysCapture,
-            EditableCaptureContext {
-                gtk_editable: true,
-                ..EditableCaptureContext::default()
-            }
+            EditableCaptureContext { gtk_editable: true }
         ));
         assert!(!shortcut_blocked_by_editable(
             ShortcutCommand::SurfaceFind,
             EditableCapturePolicy::BypassInEditable,
             EditableCaptureContext::default()
-        ));
-    }
-
-    #[test]
-    fn shortcut_blocked_by_editable_blocks_dom_editable_browser_content() {
-        assert!(shortcut_blocked_by_editable(
-            ShortcutCommand::BrowserReload,
-            EditableCapturePolicy::BypassInEditable,
-            EditableCaptureContext {
-                browser_dom_editable: true,
-                ..EditableCaptureContext::default()
-            }
-        ));
-    }
-
-    #[test]
-    fn browser_find_navigation_shortcuts_are_allowed_while_find_ui_is_active() {
-        let context = EditableCaptureContext {
-            gtk_editable: true,
-            browser_find_active: true,
-            ..EditableCaptureContext::default()
-        };
-
-        assert!(!shortcut_blocked_by_editable(
-            ShortcutCommand::SurfaceFindNext,
-            EditableCapturePolicy::BypassInEditable,
-            context
-        ));
-        assert!(!shortcut_blocked_by_editable(
-            ShortcutCommand::SurfaceFindPrevious,
-            EditableCapturePolicy::BypassInEditable,
-            context
-        ));
-        assert!(!shortcut_blocked_by_editable(
-            ShortcutCommand::SurfaceFindHide,
-            EditableCapturePolicy::BypassInEditable,
-            context
-        ));
-        assert!(shortcut_blocked_by_editable(
-            ShortcutCommand::SurfaceFind,
-            EditableCapturePolicy::BypassInEditable,
-            context
-        ));
-    }
-
-    #[test]
-    fn browser_find_active_exception_is_limited_to_navigation_shortcuts() {
-        assert!(shortcut_allowed_while_browser_find_active(
-            ShortcutCommand::SurfaceFindNext
-        ));
-        assert!(shortcut_allowed_while_browser_find_active(
-            ShortcutCommand::SurfaceFindPrevious
-        ));
-        assert!(shortcut_allowed_while_browser_find_active(
-            ShortcutCommand::SurfaceFindHide
-        ));
-        assert!(!shortcut_allowed_while_browser_find_active(
-            ShortcutCommand::SurfaceFind
         ));
     }
 
@@ -7060,11 +6904,11 @@ mod tests {
                 workspace_cwd: Some("/workspace-cwd".to_string()),
                 workspace_folder_path: Some("/workspace-folder".to_string()),
             },
-            "Browser",
+            "Keybinds",
             None,
         );
 
-        assert_eq!(seed.name, "Browser");
+        assert_eq!(seed.name, "Keybinds");
         assert_eq!(seed.cwd.as_deref(), Some("/workspace-folder"));
         assert_eq!(seed.folder_path.as_deref(), Some("/workspace-folder"));
     }

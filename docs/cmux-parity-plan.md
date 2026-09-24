@@ -17,7 +17,7 @@ Limux has **two control servers**:
    in caller-created surfaces, `surface.close` for removing those surfaces,
    `surface.send_key`,
    `surface.read_text`, `surface.health`, and
-   `notification.create`. It still does **NOT** support browser commands.
+   `notification.create`.
 
 When the GUI is running, the CLI targets the bridge via the runtime
 socket. `list-panes` / `list-panels`, terminal `new-pane --command ...`,
@@ -42,8 +42,7 @@ variants that interrogate the live state. The cleanest path:
   notification.create) remain as `ControlCommand` variants.
 
 The terminal introspection path is now bridged directly against live GTK state.
-Remaining proxy work is for deferred browser surface commands and broader
-dispatcher parity.
+Remaining proxy work is for broader dispatcher parity.
 
 **Shipped so far (in 6b8eb1a and follow-up bridge work):**
 
@@ -65,10 +64,6 @@ dispatcher parity.
 - `surface.add` adds up to three terminal surfaces to the caller's exact tab.
   Limux keeps the caller on the left and owns the fixed vertical stack on the
   right; the caller cannot provide a direction or target.
-
-**Still open (priority order):**
-
-- Browser command bridge parity.
 
 ### Phase 3 — `limux notify` + GUI toast/sidebar integration ✅
 `ControlCommand::CreateNotification` wired through the bridge into

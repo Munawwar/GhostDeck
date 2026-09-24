@@ -15,8 +15,7 @@
   <description>
     <p>
       Limux is a terminal workspace manager powered by Ghostty&apos;s
-      GPU-rendered terminal engine, with split panes, tabbed workspaces,
-      and a built-in browser.
+      GPU-rendered terminal engine, with split surfaces and tabbed workspaces.
     </p>
   </description>
   <recommends>

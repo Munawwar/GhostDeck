@@ -45,7 +45,7 @@ leaves `config.json` untouched.
 - Host shortcuts must use `Ctrl`, `Alt`, or `Cmd` as the base modifier unless the shortcut explicitly allows a bare function key, such as the default `F11` fullscreen binding. `Shift` can be added on top of a modified shortcut.
 - Most default shortcuts use `Ctrl`; fullscreen defaults to `F11`.
 - `Cmd` is a logical Limux modifier that matches either Linux `Meta` or Linux `Super` for custom remaps.
-- App-global shortcuts still fire inside editable widgets, but surface and browser shortcuts bypass editable widgets so native text editing keeps working.
+- App-global shortcuts still fire inside editable widgets, but surface shortcuts bypass editable widgets so native text editing keeps working.
 
 ## Keybinds Editor
 
@@ -133,13 +133,6 @@ These are the current supported config keys and defaults:
 | `activate_workspace_7` | `<Ctrl>7` |
 | `activate_workspace_8` | `<Ctrl>8` |
 | `activate_last_workspace` | `<Ctrl>9` |
-| `open_browser_in_split` | `<Ctrl><Shift>l` |
-| `browser_focus_location` | `<Ctrl>l` |
-| `browser_back` | `<Ctrl>bracketleft` |
-| `browser_forward` | `<Ctrl>bracketright` |
-| `browser_reload` | `<Ctrl>r` |
-| `browser_inspector` | `<Ctrl><Alt>i` |
-| `browser_console` | `<Ctrl><Alt>c` |
 | `surface_find` | `<Ctrl>f` |
 | `surface_find_next` | `<Ctrl>g` |
 | `surface_find_previous` | `<Ctrl><Shift>g` |
@@ -171,7 +164,6 @@ There are two host shortcut paths, both driven by the same resolved registry:
    - Used for everything in the table above, including the GTK-backed actions
    - Surface commands resolve the focused pane target first:
      - terminal target for Ghostty binding actions
-     - browser target for WebKit navigation, find, and inspector actions
      - `None` when focus is outside a usable pane
 
 That means a remap changes both the GTK accelerator registration and the capture-phase match.
@@ -188,14 +180,6 @@ That means terminal-native combos like these should pass through unless you expl
 - plain typing
 - `Enter`
 
-Editable browser fields should also retain native behavior for:
-
-- `Ctrl+C`
-- `Ctrl+V`
-- `Ctrl+F`
-- `Ctrl+L`
-- `Ctrl+R`
-
 This is the behavior you want when testing that unbound shortcuts stop being stolen by the host.
 
 ## Visible Tooltip Behavior
@@ -210,12 +194,6 @@ These UI surfaces currently reflect shortcut overrides:
   - split down
   - close pane
 
-These surfaces do not currently show a shortcut suffix:
-
-- new browser tab button
-- browser navigation buttons (`Back`, `Forward`, `Reload`)
-- browser find bar controls
-
 Note:
 
 - `new_terminal` and `new_terminal_in_focused_pane` both dispatch to the same terminal-tab creation command today.
@@ -227,7 +205,7 @@ From the repo root:
 
 ```bash
 cargo test -p limux-host-linux
-cargo build -p limux-host-linux --features webkit
+cargo build -p limux-host-linux
 cargo build -p limux-host-linux --no-default-features
 ```
 
@@ -235,7 +213,7 @@ Run the app for manual testing:
 
 ```bash
 LD_LIBRARY_PATH="/home/willr/Applications/cmux-linux/cmux/ghostty/zig-out/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-cargo run -p limux-host-linux --features webkit --bin limux
+cargo run -p limux-host-linux --bin limux
 ```
 
 ## Manual Test Plan
@@ -416,25 +394,19 @@ Create:
 ```json
 {
   "shortcuts": {
-    "browser_focus_location": "<Super>l"
+    "new_terminal": "<Super>t"
   }
 }
 ```
 
 Restart Limux and verify:
 
-- the keybind editor displays `Cmd+L`
-- either the physical `Meta+L` or `Super+L` combination focuses the browser address bar
+- the keybind editor displays `Cmd+T`
+- either the physical `Meta+T` or `Super+T` combination opens a terminal tab
 
 ### 12. Editable Widget Bypass
 
-Launch a browser tab and verify:
-
-- `Ctrl+L` focuses the address bar when the page has focus
-- `Ctrl+L` is not stolen once the address bar already has focus
-- `Ctrl+R` reloads only when the page has focus
-- `Ctrl+C` and `Ctrl+V` keep native copy and paste inside the address bar and browser find field
-- sidebar rename entries keep native text-editing behavior for `Ctrl+C` and `Ctrl+V`
+Verify sidebar rename entries keep native text editing for `Ctrl+C` and `Ctrl+V`.
 
 ### 13. Focused Surface Dispatch
 
@@ -444,25 +416,6 @@ Verify with a terminal tab focused:
 - `Ctrl+G` and `Ctrl+Shift+G` move through terminal search results
 - `Ctrl+E` uses the current terminal selection for search
 - `Ctrl+K`, `Ctrl+Shift+C`, `Ctrl+Shift+V`, `Ctrl++`, `Ctrl+-`, and `Ctrl+Shift+0` affect only the terminal
-
-Verify with a browser tab focused:
-
-- `Ctrl+F` opens the browser find bar
-- `Ctrl+G` and `Ctrl+Shift+G` move through browser find results
-- `Ctrl+Shift+F` hides the browser find bar and returns focus to the page
-- `Ctrl+E` seeds browser find from the current DOM selection when page text is selected
-- terminal shortcuts like `Ctrl+K` do not fire on the browser
-
-### 14. Browser Navigation And Devtools
-
-Verify with a browser tab focused:
-
-- `Ctrl+[` navigates back
-- `Ctrl+]` navigates forward
-- `Ctrl+R` reloads
-- `Ctrl+Alt+I` opens Web Inspector
-- `Ctrl+Alt+C` also opens Web Inspector because WebKitGTK does not expose a console-only shortcut target
-- `Ctrl+Shift+L` opens a new split with a browser tab
 
 ## Good Test Cases
 

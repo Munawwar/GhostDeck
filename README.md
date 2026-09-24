@@ -12,7 +12,6 @@ https://github.com/user-attachments/assets/6f3047c2-e2b6-49f2-b536-570a1570d0f8
 - **Workspaces** with folder-based naming, persistence across restarts, and sidebar management
 - **Split panes** (horizontal/vertical) with keyboard navigation
 - **Tabbed terminals** within each pane
-- **Built-in browser** (WebKitGTK)
 - **Right-click context menu** with copy, paste, split, clear
 - **Drag-and-drop** workspace reordering with favorites/pinning
 - **Animated sidebar** collapse/expand
@@ -33,7 +32,7 @@ chmod +x Limux-0.1.19-x86_64.AppImage
 ```
 
 Release AppImages are built and checked on the Ubuntu 24.04 `GLIBC_2.39`
-floor. Limux still uses the host GTK4, libadwaita, and WebKitGTK runtime
+floor. Limux still uses the host GTK4 and libadwaita runtime
 libraries, so older distributions may need the `.deb`, tarball, or a source
 build with matching system packages instead.
 
@@ -64,7 +63,7 @@ sudo ./install.sh --uninstall
 
 ```bash
 # Ubuntu/Debian
-sudo apt install libgtk-4-1 libadwaita-1-0 libwebkitgtk-6.0-4
+sudo apt install libgtk-4-1 libadwaita-1-0
 ```
 
 ## Build from source
@@ -73,12 +72,12 @@ sudo apt install libgtk-4-1 libadwaita-1-0 libwebkitgtk-6.0-4
 
 - Rust toolchain (stable)
 - Zig
-- GTK4, libadwaita, WebKitGTK dev packages
+- GTK4 and libadwaita dev packages
 - Initialized Ghostty submodule
 
 ```bash
 # Install dev dependencies (Ubuntu/Debian)
-sudo apt install libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev pkg-config build-essential
+sudo apt install libgtk-4-dev libadwaita-1-dev pkg-config build-essential
 
 # Initialize the Ghostty submodule and build the embedded library
 git submodule update --init --recursive
@@ -142,7 +141,6 @@ limux agent-team --agents codex,claude --cwd "$PWD"
 # Or split the current agent's pane and launch another terminal agent.
 # Inside Limux, workspace/surface/pane default from LIMUX_*:
 limux new-pane --direction right --command claude
-# Live GTK self-spawn currently supports terminal panes only.
 
 # Add a visible process to the agent's current terminal tab. Limux owns the
 # layout: the agent starts on the left and up to three added surfaces stack on
@@ -188,23 +186,11 @@ Most default shortcuts use `Ctrl`. Fullscreen defaults to `F11`. Custom remaps m
 | `Ctrl+Alt+N` | Open a new Limux instance |
 | `F11` | Toggle fullscreen |
 
-### Browser
-
-| Shortcut | Action |
-|---|---|
-| `Ctrl+Shift+L` | Open the focused browser page in a new split |
-| `Ctrl+L` | Focus browser address bar |
-| `Ctrl+[` | Browser back |
-| `Ctrl+]` | Browser forward |
-| `Ctrl+R` | Browser reload |
-| `Ctrl+Alt+I` | Open Web Inspector |
-| `Ctrl+Alt+C` | Open Web Inspector (console-only targeting is not exposed by WebKitGTK) |
-
 ### Find
 
 | Shortcut | Action |
 |---|---|
-| `Ctrl+F` | Open find on the focused terminal or browser |
+| `Ctrl+F` | Open find on the focused terminal |
 | `Ctrl+G` | Find next |
 | `Ctrl+Shift+G` | Find previous |
 | `Ctrl+Shift+F` | Hide find |

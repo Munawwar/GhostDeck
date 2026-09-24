@@ -195,6 +195,7 @@ pub enum TabContentState {
         #[serde(default)]
         active_leaf_id: Option<String>,
     },
+    /// Accepted only while reading sessions created before browser removal.
     Browser {
         #[serde(default)]
         uri: Option<String>,
@@ -271,15 +272,6 @@ impl PaneState {
             tabs: vec![tab],
         }
     }
-
-    pub fn browser_only(uri: Option<&str>) -> Self {
-        let tab = TabState::browser(default_tab_id("browser"), uri);
-        Self {
-            pane_id: None,
-            active_tab_id: Some(tab.id.clone()),
-            tabs: vec![tab],
-        }
-    }
 }
 
 impl TabState {
@@ -293,17 +285,6 @@ impl TabState {
                 agent: None,
                 tree: Some(Box::new(TerminalTreeState::single_leaf(cwd, None))),
                 active_leaf_id: Some(default_terminal_leaf_id()),
-            },
-        }
-    }
-
-    pub fn browser(id: impl Into<String>, uri: Option<&str>) -> Self {
-        Self {
-            id: id.into(),
-            custom_name: None,
-            pinned: false,
-            content: TabContentState::Browser {
-                uri: uri.map(|value| value.to_string()),
             },
         }
     }
@@ -534,6 +515,8 @@ pub fn normalize_session(mut state: AppSessionState) -> AppSessionState {
 pub fn normalize_layout(layout: &mut LayoutNodeState, working_directory: Option<&str>) {
     match layout {
         LayoutNodeState::Pane(pane) => {
+            pane.tabs
+                .retain(|tab| !matches!(tab.content, TabContentState::Browser { .. }));
             if pane.tabs.is_empty() {
                 *pane = PaneState::fallback(working_directory);
                 return;
@@ -1784,8 +1767,6 @@ mod tests {
             tabs: vec![
                 TabState::terminal("terminal-0", Some("/tmp/project-a")),
                 TabState::terminal("terminal-0", Some("/tmp/project-b")),
-                TabState::browser("browser-0", Some("https://example.com")),
-                TabState::browser("browser-0", Some("https://example.org")),
             ],
         });
 
@@ -1800,7 +1781,7 @@ mod tests {
                 .iter()
                 .map(|tab| tab.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["terminal-0", "terminal-1", "browser-0", "browser-1"]
+            vec!["terminal-0", "terminal-1"]
         );
     }
 
@@ -1996,12 +1977,10 @@ mod tests {
             pane_id: None,
             active_tab_id: Some("missing".to_string()),
             tabs: vec![TabState {
-                id: "browser-1".to_string(),
+                id: "keybinds-1".to_string(),
                 custom_name: None,
                 pinned: false,
-                content: TabContentState::Browser {
-                    uri: Some("https://example.com".to_string()),
-                },
+                content: TabContentState::Keybinds {},
             }],
         });
 
@@ -2010,7 +1989,7 @@ mod tests {
         let LayoutNodeState::Pane(pane) = layout else {
             panic!("expected pane");
         };
-        assert_eq!(pane.active_tab_id.as_deref(), Some("browser-1"));
+        assert_eq!(pane.active_tab_id.as_deref(), Some("keybinds-1"));
     }
 
     #[test]
@@ -2032,20 +2011,6 @@ mod tests {
                 assert_eq!(cwd.as_deref(), Some("/tmp/project"));
             }
             other => panic!("expected terminal fallback, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn browser_only_pane_creates_a_single_browser_tab() {
-        let pane = PaneState::browser_only(Some("https://example.com"));
-
-        assert_eq!(pane.tabs.len(), 1);
-        assert_eq!(pane.active_tab_id.as_deref(), Some("browser-0"));
-        match &pane.tabs[0].content {
-            TabContentState::Browser { uri } => {
-                assert_eq!(uri.as_deref(), Some("https://example.com"));
-            }
-            other => panic!("expected browser tab, got {other:?}"),
         }
     }
 

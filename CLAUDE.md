@@ -55,7 +55,7 @@ rg -n "PaneCallbacks \{"                           rust/limux-host-linux/src/win
 | Full-vocabulary control (no GUI) | `limux-core::Dispatcher` + `ControlState` |
 | Pane / surface UI state | `rust/limux-host-linux/src/window.rs` (`PaneCallbacks`) |
 | Agent-hook installers + templates | `hooks/` + `limux hooks setup` |
-| Packaging (AppImage / AUR) | `scripts/package.sh`, `scripts/appimage-webkit.sh`, `PKGBUILD.template` |
+| Packaging (AppImage / AUR) | `scripts/package.sh`, `scripts/appimage-libs.sh`, `PKGBUILD.template` |
 
 ## Pitfalls
 

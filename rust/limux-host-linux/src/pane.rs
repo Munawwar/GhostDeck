@@ -1,6 +1,6 @@
 //! PaneWidget: a tabbed container with action icons in the tab bar.
 //!
-//! Layout: [tab1 x] [tab2 x] ... ←spacer→ [terminal] [browser] [split-h] [split-v] [close]
+//! Layout: [tab1 x] [tab2 x] ... ←spacer→ [terminal] [split-h] [split-v] [close]
 //!
 //! All on one line. Tabs left-justified, icons right-justified.
 
@@ -12,8 +12,6 @@ use gtk::glib;
 #[allow(unused_imports)]
 use gtk::prelude::*;
 use gtk4 as gtk;
-#[cfg(feature = "webkit")]
-use webkit6::prelude::*;
 
 use crate::app_config::AppConfig;
 use crate::keybind_editor;
@@ -113,14 +111,6 @@ pub enum PaneEmptyReason {
 const HOST_ENTRY_CSS_CLASS: &str = "limux-host-entry";
 const TAB_RENAME_ENTRY_CSS_CLASS: &str = "limux-tab-rename-entry";
 const TAB_RENAME_ENTRY_CSS_CLASSES: [&str; 2] = [HOST_ENTRY_CSS_CLASS, TAB_RENAME_ENTRY_CSS_CLASS];
-const BROWSER_URL_ENTRY_CSS_CLASS: &str = "limux-browser-url-entry";
-const BROWSER_URL_ENTRY_CSS_CLASSES: [&str; 2] =
-    [HOST_ENTRY_CSS_CLASS, BROWSER_URL_ENTRY_CSS_CLASS];
-const BROWSER_SEARCH_ENTRY_CSS_CLASS: &str = "limux-browser-search-entry";
-const BROWSER_SEARCH_ENTRY_CSS_CLASSES: [&str; 2] =
-    [HOST_ENTRY_CSS_CLASS, BROWSER_SEARCH_ENTRY_CSS_CLASS];
-#[cfg(feature = "webkit")]
-const BROWSER_WEB_VIEW_CSS_CLASS: &str = "limux-browser-web-view";
 pub(crate) const MIN_PANE_WIDTH: i32 = 260;
 pub(crate) const MIN_PANE_HEIGHT: i32 = 160;
 
@@ -977,22 +967,9 @@ impl TerminalShortcutTarget {
 }
 
 #[derive(Clone)]
-struct BrowserTabState {
-    uri: Rc<RefCell<Option<String>>>,
-    handles: BrowserHandles,
-}
-
-#[derive(Clone)]
-pub struct BrowserShortcutTarget {
-    uri: Rc<RefCell<Option<String>>>,
-    handles: BrowserHandles,
-}
-
-#[derive(Clone)]
 pub enum FocusedShortcutTarget {
     None,
     Terminal(TerminalShortcutTarget),
-    Browser(BrowserShortcutTarget),
     Keybinds,
 }
 
@@ -1125,19 +1102,6 @@ pub const PANE_CSS: &str = r#"
     min-height: 0;
     font-size: 12px;
 }
-.limux-browser-url-entry {
-    min-height: 0;
-    font-size: 12px;
-}
-.limux-browser-search-entry {
-    min-height: 0;
-    font-size: 12px;
-}
-.limux-browser,
-.limux-browser-web-view {
-    min-width: 0;
-    min-height: 0;
-}
 .limux-tab-drop-indicator {
     background-color: @accent_bg_color;
     min-width: 2px;
@@ -1231,10 +1195,6 @@ pub fn create_pane(
             Some(ShortcutId::NewTerminal),
         ),
     );
-    let new_browser_btn = icon_button(
-        "limux-globe-symbolic",
-        &pane_action_tooltip(&shortcuts, "New browser tab", None),
-    );
     let split_h_btn = icon_button(
         "limux-split-horizontal-symbolic",
         &pane_action_tooltip(&shortcuts, "Split right", Some(ShortcutId::SplitRight)),
@@ -1250,7 +1210,6 @@ pub fn create_pane(
     );
 
     actions.append(&new_term_btn);
-    actions.append(&new_browser_btn);
     actions.append(&split_h_btn);
     actions.append(&split_v_btn);
     actions.append(&settings_btn);
@@ -1300,12 +1259,6 @@ pub fn create_pane(
         new_term_btn.connect_clicked(move |_| {
             let dir = wd.borrow().clone();
             add_terminal_tab_inner(&internals, dir.as_deref(), None);
-        });
-    }
-    {
-        let internals = internals.clone();
-        new_browser_btn.connect_clicked(move |_| {
-            add_browser_tab_inner(&internals, None);
         });
     }
     {
@@ -1561,13 +1514,11 @@ pub fn exact_terminal_handle_for_surface(
 #[derive(Clone)]
 enum TabKind {
     Terminal { state: TerminalTabState },
-    Browser { state: BrowserTabState },
     Keybinds,
 }
 
 enum TabFocusTarget {
     Terminal(terminal::TerminalHandle),
-    Browser(BrowserHandles),
     Widget(gtk::Widget),
 }
 
@@ -1575,7 +1526,6 @@ impl TabFocusTarget {
     fn from_entry(entry: &TabEntry) -> Self {
         match &entry.kind {
             TabKind::Terminal { state } => Self::Terminal(state.active_handle()),
-            TabKind::Browser { state } => Self::Browser(state.handles.clone()),
             TabKind::Keybinds => Self::Widget(entry.content.clone()),
         }
     }
@@ -1584,9 +1534,6 @@ impl TabFocusTarget {
         match self {
             Self::Terminal(handle) => {
                 handle.focus_surface();
-            }
-            Self::Browser(handles) => {
-                handles.focus_content();
             }
             Self::Widget(widget) => {
                 if widget.is_focus() || widget.can_focus() {
@@ -1707,13 +1654,6 @@ struct TerminalTabOptions<'a> {
     active_leaf_id: Option<&'a str>,
 }
 
-struct BrowserTabOptions<'a> {
-    id: Option<&'a str>,
-    custom_name: Option<&'a str>,
-    pinned: bool,
-    uri: Option<&'a str>,
-}
-
 struct KeybindsTabOptions<'a> {
     id: Option<&'a str>,
     custom_name: Option<&'a str>,
@@ -1756,15 +1696,7 @@ fn restore_tabs_from_state(
                     active_leaf_id: active_leaf_id.as_deref(),
                 }),
             ),
-            TabContentState::Browser { uri } => add_browser_tab_inner(
-                internals,
-                Some(BrowserTabOptions {
-                    id: Some(saved_tab.id.as_str()),
-                    custom_name: saved_tab.custom_name.as_deref(),
-                    pinned: saved_tab.pinned,
-                    uri: uri.as_deref(),
-                }),
-            ),
+            TabContentState::Browser { .. } => {}
             TabContentState::Keybinds {} => add_keybind_editor_tab_inner(
                 internals,
                 KeybindsTabInput {
@@ -2178,7 +2110,6 @@ pub fn add_surface_to_terminal_tab(
         kind: "terminal".to_string(),
         selected: false,
         cwd,
-        uri: None,
     })
 }
 
@@ -2390,18 +2321,7 @@ fn make_terminal_callbacks(
                 );
             });
         }),
-        on_open_url: Box::new({
-            let pane_outer = internals.pane_outer.clone();
-            move |url, external| {
-                if external {
-                    open_url_in_external_browser(url);
-                    return;
-                }
-
-                let pane_widget: gtk::Widget = pane_outer.clone().upcast();
-                add_browser_tab_to_pane_with_uri(&pane_widget, Some(url));
-            }
-        }),
+        on_open_url: Box::new(|url, _| open_url_in_external_browser(url)),
         on_swap: Box::new({
             let state = terminal_tab_state.clone();
             let leaf_id = leaf.leaf_id.clone();
@@ -2572,82 +2492,6 @@ fn add_terminal_tab_inner(
     }
 }
 
-fn add_browser_tab_inner(internals: &Rc<PaneInternals>, options: Option<BrowserTabOptions<'_>>) {
-    let tab_id = options
-        .as_ref()
-        .and_then(|value| value.id.map(|id| id.to_string()))
-        .unwrap_or_else(next_tab_id);
-    let saved_uri = Rc::new(RefCell::new(
-        options
-            .as_ref()
-            .and_then(|value| value.uri.map(|uri| uri.to_string())),
-    ));
-    let (widget, title, handles) = create_browser_widget(
-        options.as_ref().and_then(|value| value.uri),
-        saved_uri.clone(),
-        internals.callbacks.clone(),
-    );
-
-    let (tab_btn, title_label) = build_tab_button(&title, &tab_id, internals);
-
-    internals.content_stack.add_named(&widget, Some(&tab_id));
-
-    {
-        let mut ts = internals.tab_state.borrow_mut();
-        ts.tabs.push(TabEntry {
-            id: tab_id.clone(),
-            tab_button: tab_btn,
-            title_label: title_label.clone(),
-            content: widget,
-            custom_name: options
-                .as_ref()
-                .and_then(|value| value.custom_name.map(|name| name.to_string())),
-            pinned: options.as_ref().map(|value| value.pinned).unwrap_or(false),
-            kind: TabKind::Browser {
-                state: BrowserTabState {
-                    uri: saved_uri.clone(),
-                    handles,
-                },
-            },
-        });
-    }
-    internals.tab_strip.append(
-        &internals
-            .tab_state
-            .borrow()
-            .tabs
-            .iter()
-            .find(|entry| entry.id == tab_id)
-            .expect("browser tab inserted")
-            .tab_button,
-    );
-
-    if let Some(custom_name) = options.as_ref().and_then(|value| value.custom_name) {
-        title_label.set_label(custom_name);
-    }
-    if options.as_ref().map(|value| value.pinned).unwrap_or(false) {
-        if let Some(entry) = internals
-            .tab_state
-            .borrow()
-            .tabs
-            .iter()
-            .find(|entry| entry.id == tab_id)
-        {
-            apply_pin_visuals(&entry.tab_button, true);
-        }
-    }
-
-    activate_tab(
-        &internals.tab_strip,
-        &internals.content_stack,
-        &internals.tab_state,
-        &tab_id,
-    );
-    if options.is_none() {
-        (internals.callbacks.on_state_changed)();
-    }
-}
-
 fn add_keybind_editor_tab_inner(internals: &Rc<PaneInternals>, input: KeybindsTabInput<'_>) {
     let tab_id = input
         .options
@@ -2729,24 +2573,6 @@ pub fn add_terminal_tab_to_pane(pane_widget: &gtk::Widget) {
     }
 }
 
-#[allow(dead_code)]
-pub fn add_browser_tab_to_pane(pane_widget: &gtk::Widget) {
-    add_browser_tab_to_pane_with_uri(pane_widget, None);
-}
-
-#[allow(dead_code)]
-pub fn add_browser_tab_to_pane_with_uri(pane_widget: &gtk::Widget, uri: Option<&str>) {
-    if let Some(internals) = find_pane_internals(pane_widget) {
-        let options = uri.map(|uri| BrowserTabOptions {
-            id: None,
-            custom_name: None,
-            pinned: false,
-            uri: Some(uri),
-        });
-        add_browser_tab_inner(&internals, options);
-    }
-}
-
 pub fn refresh_shortcut_tooltips(pane_widget: &gtk::Widget, shortcuts: &ResolvedShortcutConfig) {
     let Some(internals) = find_pane_internals(pane_widget) else {
         return;
@@ -2799,9 +2625,6 @@ pub fn snapshot_pane_state(pane_widget: &gtk::Widget) -> Option<PaneState> {
                         active_leaf_id: Some(state.active_leaf_id()),
                     }
                 }
-                TabKind::Browser { state } => TabContentState::Browser {
-                    uri: state.uri.borrow().clone(),
-                },
                 TabKind::Keybinds => TabContentState::Keybinds {},
             };
             SavedTabState {
@@ -2857,7 +2680,7 @@ pub fn tab_working_directory(pane_widget: &gtk::Widget, tab_id: &str) -> Option<
     let entry = tab_state.tabs.iter().find(|entry| entry.id == tab_id)?;
     match &entry.kind {
         TabKind::Terminal { state } => state.active_cwd(),
-        TabKind::Browser { .. } | TabKind::Keybinds => None,
+        TabKind::Keybinds => None,
     }
 }
 
@@ -2876,7 +2699,6 @@ pub struct SurfaceSummary {
     pub kind: String,
     pub selected: bool,
     pub cwd: Option<String>,
-    pub uri: Option<String>,
 }
 
 fn pane_internals_for_root(root: &gtk::Widget) -> Vec<Rc<PaneInternals>> {
@@ -2903,7 +2725,7 @@ pub fn pane_summaries_for_root(root: &gtk::Widget) -> Vec<PaneSummary> {
                 .iter()
                 .map(|entry| match &entry.kind {
                     TabKind::Terminal { state } => state.leaf_count(),
-                    TabKind::Browser { .. } | TabKind::Keybinds => 1,
+                    TabKind::Keybinds => 1,
                 })
                 .sum();
             let active_surface_id = tab_state
@@ -2918,9 +2740,7 @@ pub fn pane_summaries_for_root(root: &gtk::Widget) -> Vec<PaneSummary> {
                             TabKind::Terminal { state } => {
                                 terminal_surface_id(pane_id, &entry.id, &state.active_leaf_id())
                             }
-                            TabKind::Browser { .. } | TabKind::Keybinds => {
-                                composite_surface_id(pane_id, &entry.id)
-                            }
+                            TabKind::Keybinds => composite_surface_id(pane_id, &entry.id),
                         })
                 })
                 .or_else(|| {
@@ -2928,9 +2748,7 @@ pub fn pane_summaries_for_root(root: &gtk::Widget) -> Vec<PaneSummary> {
                         TabKind::Terminal { state } => {
                             terminal_surface_id(pane_id, &entry.id, &state.active_leaf_id())
                         }
-                        TabKind::Browser { .. } | TabKind::Keybinds => {
-                            composite_surface_id(pane_id, &entry.id)
-                        }
+                        TabKind::Keybinds => composite_surface_id(pane_id, &entry.id),
                     })
                 });
             PaneSummary {
@@ -2977,19 +2795,7 @@ pub fn surface_summaries_for_root(root: &gtk::Widget) -> Vec<SurfaceSummary> {
                             kind: "terminal".to_string(),
                             selected: tab_selected && leaf.leaf_id == active_leaf_id,
                             cwd: leaf.cwd.borrow().clone(),
-                            uri: None,
                         });
-                    });
-                }
-                TabKind::Browser { state } => {
-                    surfaces.push(SurfaceSummary {
-                        pane_id,
-                        surface_id: composite_surface_id(pane_id, &entry.id),
-                        title: entry.title_label.label().to_string(),
-                        kind: "browser".to_string(),
-                        selected: tab_selected,
-                        cwd: None,
-                        uri: state.uri.borrow().clone(),
                     });
                 }
                 TabKind::Keybinds => {
@@ -3000,7 +2806,6 @@ pub fn surface_summaries_for_root(root: &gtk::Widget) -> Vec<SurfaceSummary> {
                         kind: "keybinds".to_string(),
                         selected: tab_selected,
                         cwd: None,
-                        uri: None,
                     });
                 }
             }
@@ -3033,16 +2838,6 @@ pub fn active_surface_summary(pane_widget: &gtk::Widget) -> Option<SurfaceSummar
             kind: "terminal".to_string(),
             selected: true,
             cwd: state.active_cwd(),
-            uri: None,
-        },
-        TabKind::Browser { state } => SurfaceSummary {
-            pane_id,
-            surface_id: composite_surface_id(pane_id, &entry.id),
-            title: entry.title_label.label().to_string(),
-            kind: "browser".to_string(),
-            selected: true,
-            cwd: None,
-            uri: state.uri.borrow().clone(),
         },
         TabKind::Keybinds => SurfaceSummary {
             pane_id,
@@ -3051,7 +2846,6 @@ pub fn active_surface_summary(pane_widget: &gtk::Widget) -> Option<SurfaceSummar
             kind: "keybinds".to_string(),
             selected: true,
             cwd: None,
-            uri: None,
         },
     })
 }
@@ -3113,13 +2907,6 @@ pub fn focused_shortcut_target(pane_widget: &gtk::Widget) -> FocusedShortcutTarg
                 ..
             }) => FocusedShortcutTarget::Terminal(TerminalShortcutTarget {
                 handle: state.active_handle(),
-            }),
-            Some(TabEntry {
-                kind: TabKind::Browser { state },
-                ..
-            }) => FocusedShortcutTarget::Browser(BrowserShortcutTarget {
-                uri: state.uri.clone(),
-                handles: state.handles.clone(),
             }),
             Some(TabEntry {
                 kind: TabKind::Keybinds,
@@ -3838,23 +3625,6 @@ fn install_tab_strip_drop_target(tab_overlay: &gtk::Overlay, internals: &Rc<Pane
     tab_overlay.add_controller(drop_target);
 }
 
-fn set_browser_targeting_enabled(content_stack: &gtk::Stack, enabled: bool) {
-    let mut child = content_stack.first_child();
-    while let Some(widget) = child {
-        child = widget.next_sibling();
-        if !widget.has_css_class("limux-browser") {
-            continue;
-        }
-        let webview = widget
-            .first_child()
-            .and_then(|child| child.next_sibling())
-            .and_then(|child| child.next_sibling());
-        if let Some(webview) = webview {
-            webview.set_can_target(enabled);
-        }
-    }
-}
-
 fn install_content_drop_target(internals: &Rc<PaneInternals>) {
     let drop_target = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::MOVE);
     drop_target.set_preload(true);
@@ -3954,7 +3724,6 @@ fn install_content_drop_target(internals: &Rc<PaneInternals>) {
     internals.content_stack.add_controller(drop_target);
 
     let overlay = internals.content_drop_overlay.clone();
-    let content_stack = internals.content_stack.clone();
     let workspace_dragging = internals.workspace_dragging.clone();
     let listener_id = on_tab_drag_change(move |dragging| {
         let visible = dragging && !workspace_dragging.get();
@@ -3962,7 +3731,6 @@ fn install_content_drop_target(internals: &Rc<PaneInternals>) {
         if !visible {
             clear_content_drop_zone(&overlay);
         }
-        set_browser_targeting_enabled(&content_stack, !dragging);
     });
     internals.pane_outer.connect_destroy(move |_| {
         remove_tab_drag_listener(listener_id);
@@ -4015,7 +3783,7 @@ fn activate_tab(
     if let Some(target) = focus_target {
         // Mouse-initiated tab switches can leave focus on the click target if we
         // refocus synchronously. Deferring to the next idle tick makes the newly
-        // active surface or webview the final focus owner.
+        // active surface the final focus owner.
         glib::idle_add_local_once(move || {
             target.focus();
         });
@@ -4111,666 +3879,14 @@ fn remove_tab(
     (callbacks.on_state_changed)();
 }
 
-// ---------------------------------------------------------------------------
-// Browser widget
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "webkit")]
-#[derive(Clone)]
-struct BrowserHandles {
-    webview: webkit6::WebView,
-    url_entry: gtk::Entry,
-    search_bar: gtk::SearchBar,
-    search_entry: gtk::SearchEntry,
-    find_controller: webkit6::FindController,
-    dom_editable: Rc<Cell<bool>>,
-}
-
-#[cfg(not(feature = "webkit"))]
-#[derive(Clone)]
-struct BrowserHandles;
-
-impl BrowserShortcutTarget {
-    pub fn current_uri(&self) -> Option<String> {
-        self.uri.borrow().clone()
-    }
-
-    pub fn focus_location(&self) -> bool {
-        self.handles.focus_location()
-    }
-
-    pub fn go_back(&self) -> bool {
-        self.handles.go_back()
-    }
-
-    pub fn go_forward(&self) -> bool {
-        self.handles.go_forward()
-    }
-
-    pub fn reload(&self) -> bool {
-        self.handles.reload()
-    }
-
-    pub fn show_inspector(&self) -> bool {
-        self.handles.show_inspector()
-    }
-
-    pub fn show_console(&self) -> bool {
-        self.handles.show_console()
-    }
-
-    pub fn show_find(&self) -> bool {
-        self.handles.show_find()
-    }
-
-    pub fn find_next(&self) -> bool {
-        self.handles.find_next()
-    }
-
-    pub fn find_previous(&self) -> bool {
-        self.handles.find_previous()
-    }
-
-    pub fn hide_find(&self) -> bool {
-        self.handles.hide_find()
-    }
-
-    pub fn use_selection_for_find(&self) -> bool {
-        self.handles.use_selection_for_find()
-    }
-
-    pub fn is_find_active(&self) -> bool {
-        self.handles.is_find_active()
-    }
-
-    pub fn is_page_editable(&self) -> bool {
-        self.handles.is_page_editable()
-    }
-}
-
-#[cfg(feature = "webkit")]
-impl BrowserHandles {
-    fn is_find_active(&self) -> bool {
-        self.search_bar.is_search_mode()
-    }
-
-    fn focus_content(&self) -> bool {
-        if self.is_find_active() {
-            self.search_entry.grab_focus();
-            self.search_entry.select_region(0, -1);
-        } else {
-            self.webview.grab_focus();
-        }
-        true
-    }
-
-    fn is_page_editable(&self) -> bool {
-        self.dom_editable.get()
-    }
-
-    fn focus_location(&self) -> bool {
-        self.url_entry.grab_focus();
-        self.url_entry.select_region(0, -1);
-        true
-    }
-
-    fn go_back(&self) -> bool {
-        self.webview.go_back();
-        true
-    }
-
-    fn go_forward(&self) -> bool {
-        self.webview.go_forward();
-        true
-    }
-
-    fn reload(&self) -> bool {
-        self.webview.reload();
-        true
-    }
-
-    fn show_inspector(&self) -> bool {
-        if let Some(inspector) = self.webview.inspector() {
-            inspector.show();
-            return true;
-        }
-        false
-    }
-
-    fn show_console(&self) -> bool {
-        self.show_inspector()
-    }
-
-    fn show_find(&self) -> bool {
-        self.search_bar.set_search_mode(true);
-        self.search_entry.grab_focus();
-        self.search_entry.select_region(0, -1);
-        if !self.search_entry.text().is_empty() {
-            self.search_for_entry_text();
-        }
-        true
-    }
-
-    fn find_next(&self) -> bool {
-        if self.is_find_active() {
-            self.find_controller.search_next();
-            return true;
-        }
-        false
-    }
-
-    fn find_previous(&self) -> bool {
-        if self.is_find_active() {
-            self.find_controller.search_previous();
-            return true;
-        }
-        false
-    }
-
-    fn hide_find(&self) -> bool {
-        if !self.is_find_active() {
-            return false;
-        }
-        self.find_controller.search_finish();
-        self.search_bar.set_search_mode(false);
-        self.webview.grab_focus();
-        true
-    }
-
-    fn use_selection_for_find(&self) -> bool {
-        let search_entry = self.search_entry.clone();
-        let search_bar = self.search_bar.clone();
-        let find_controller = self.find_controller.clone();
-        let webview = self.webview.clone();
-        self.webview.evaluate_javascript(
-            "window.getSelection ? window.getSelection().toString() : '';",
-            None,
-            None,
-            None::<&gtk::gio::Cancellable>,
-            move |result| {
-                let Ok(value) = result else {
-                    return;
-                };
-                let selection = value.to_str();
-                if selection.is_empty() {
-                    return;
-                }
-                search_bar.set_search_mode(true);
-                search_entry.set_text(selection.as_str());
-                find_controller.search(
-                    selection.as_str(),
-                    webkit6::FindOptions::CASE_INSENSITIVE.bits()
-                        | webkit6::FindOptions::WRAP_AROUND.bits(),
-                    u32::MAX,
-                );
-                search_entry.grab_focus();
-                search_entry.select_region(0, -1);
-                webview.queue_draw();
-            },
-        );
-        true
-    }
-
-    fn search_for_entry_text(&self) {
-        let query = self.search_entry.text();
-        if query.is_empty() {
-            self.find_controller.search_finish();
-            return;
-        }
-        self.find_controller.search(
-            query.as_str(),
-            webkit6::FindOptions::CASE_INSENSITIVE.bits()
-                | webkit6::FindOptions::WRAP_AROUND.bits(),
-            u32::MAX,
-        );
-    }
-}
-
-#[cfg(not(feature = "webkit"))]
-impl BrowserHandles {
-    fn is_find_active(&self) -> bool {
-        false
-    }
-
-    fn focus_content(&self) -> bool {
-        false
-    }
-
-    fn is_page_editable(&self) -> bool {
-        false
-    }
-
-    fn focus_location(&self) -> bool {
-        false
-    }
-
-    fn go_back(&self) -> bool {
-        false
-    }
-
-    fn go_forward(&self) -> bool {
-        false
-    }
-
-    fn reload(&self) -> bool {
-        false
-    }
-
-    fn show_inspector(&self) -> bool {
-        false
-    }
-
-    fn show_console(&self) -> bool {
-        false
-    }
-
-    fn show_find(&self) -> bool {
-        false
-    }
-
-    fn find_next(&self) -> bool {
-        false
-    }
-
-    fn find_previous(&self) -> bool {
-        false
-    }
-
-    fn hide_find(&self) -> bool {
-        false
-    }
-
-    fn use_selection_for_find(&self) -> bool {
-        false
-    }
-}
-
-#[cfg(feature = "webkit")]
-const LIMUX_BROWSER_EDITABLE_STATE_HANDLER: &str = "limuxEditableState";
-
-#[cfg(feature = "webkit")]
-fn env_value_contains_token(value: &str, token: &str) -> bool {
-    value
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .any(|part| part.eq_ignore_ascii_case(token))
-}
-
-#[cfg(feature = "webkit")]
-fn is_kde_wayland_session_from_env<'a>(
-    values: impl IntoIterator<Item = (&'a str, &'a str)>,
-) -> bool {
-    let mut is_wayland = false;
-    let mut is_kde = false;
-
-    for (key, value) in values {
-        match key {
-            "WAYLAND_DISPLAY" if !value.trim().is_empty() => is_wayland = true,
-            "XDG_SESSION_TYPE" if value.eq_ignore_ascii_case("wayland") => is_wayland = true,
-            "XDG_CURRENT_DESKTOP" | "XDG_SESSION_DESKTOP" | "DESKTOP_SESSION" => {
-                is_kde |= env_value_contains_token(value, "kde")
-                    || env_value_contains_token(value, "plasma");
-            }
-            "KDE_FULL_SESSION" if value.eq_ignore_ascii_case("true") || value == "1" => {
-                is_kde = true;
-            }
-            _ => {}
-        }
-    }
-
-    is_wayland && is_kde
-}
-
-#[cfg(feature = "webkit")]
-fn is_kde_wayland_session() -> bool {
-    let keys = [
-        "WAYLAND_DISPLAY",
-        "XDG_SESSION_TYPE",
-        "XDG_CURRENT_DESKTOP",
-        "XDG_SESSION_DESKTOP",
-        "DESKTOP_SESSION",
-        "KDE_FULL_SESSION",
-    ];
-    let values = keys
-        .into_iter()
-        .filter_map(|key| std::env::var(key).ok().map(|value| (key, value)))
-        .collect::<Vec<_>>();
-
-    is_kde_wayland_session_from_env(values.iter().map(|(key, value)| (*key, value.as_str())))
-}
-
-#[cfg(feature = "webkit")]
-fn configure_browser_settings(settings: &webkit6::Settings) {
-    settings.set_enable_developer_extras(true);
-    settings.set_javascript_can_open_windows_automatically(true);
-
-    if is_kde_wayland_session() {
-        settings.set_hardware_acceleration_policy(webkit6::HardwareAccelerationPolicy::Never);
-    }
-}
-
-#[cfg(feature = "webkit")]
-const LIMUX_BROWSER_EDITABLE_STATE_SCRIPT: &str = r#"
-(() => {
-  const handler = globalThis.webkit?.messageHandlers?.limuxEditableState;
-  if (!handler || typeof handler.postMessage !== 'function') {
-    return;
-  }
-
-  const nonTextInputTypes = new Set([
-    'button',
-    'checkbox',
-    'color',
-    'file',
-    'hidden',
-    'image',
-    'radio',
-    'range',
-    'reset',
-    'submit'
-  ]);
-
-  const isEditableElement = (element) => {
-    if (!element) {
-      return false;
-    }
-    if (element.isContentEditable) {
-      return true;
-    }
-
-    const tagName = (element.tagName || '').toUpperCase();
-    if (tagName === 'TEXTAREA') {
-      return !element.readOnly && !element.disabled;
-    }
-    if (tagName === 'SELECT') {
-      return !element.disabled;
-    }
-    if (tagName !== 'INPUT') {
-      return false;
-    }
-
-    const type = (element.type || '').toLowerCase();
-    return !nonTextInputTypes.has(type) && !element.readOnly && !element.disabled;
-  };
-
-  const publish = () => {
-    handler.postMessage(Boolean(isEditableElement(document.activeElement)));
-  };
-
-  publish();
-  document.addEventListener('focusin', publish, true);
-  document.addEventListener('focusout', () => queueMicrotask(publish), true);
-  window.addEventListener('pageshow', publish, true);
-})();
-"#;
-
-#[cfg(feature = "webkit")]
-fn create_browser_widget(
-    initial_uri: Option<&str>,
-    saved_uri: Rc<RefCell<Option<String>>>,
-    callbacks: Rc<PaneCallbacks>,
-) -> (gtk::Widget, String, BrowserHandles) {
-    use webkit6::prelude::*;
-
-    // Use a NetworkSession to avoid sandbox issues
-    let network_session = webkit6::NetworkSession::default();
-    let web_context = webkit6::WebContext::default();
-    let user_content_manager = webkit6::UserContentManager::new();
-    let dom_editable = Rc::new(Cell::new(false));
-    let _ = user_content_manager
-        .register_script_message_handler(LIMUX_BROWSER_EDITABLE_STATE_HANDLER, None);
-    user_content_manager.add_script(&webkit6::UserScript::new(
-        LIMUX_BROWSER_EDITABLE_STATE_SCRIPT,
-        webkit6::UserContentInjectedFrames::AllFrames,
-        webkit6::UserScriptInjectionTime::Start,
-        &[],
-        &[],
-    ));
-    {
-        let dom_editable = dom_editable.clone();
-        user_content_manager.connect_script_message_received(
-            Some(LIMUX_BROWSER_EDITABLE_STATE_HANDLER),
-            move |_, value| {
-                dom_editable.set(if value.is_boolean() {
-                    value.to_boolean()
-                } else {
-                    value.to_str().as_str() == "true"
-                });
-            },
-        );
-    }
-
-    let webview = webkit6::WebView::builder()
-        .user_content_manager(&user_content_manager)
-        .hexpand(true)
-        .vexpand(true)
-        .build();
-    webview.add_css_class(BROWSER_WEB_VIEW_CSS_CLASS);
-    webview.set_halign(gtk::Align::Fill);
-    webview.set_valign(gtk::Align::Fill);
-    webview.set_overflow(gtk::Overflow::Hidden);
-
-    if let Some(settings) = webkit6::prelude::WebViewExt::settings(&webview) {
-        configure_browser_settings(&settings);
-    }
-
-    let url_entry = gtk::Entry::builder()
-        .placeholder_text("Enter URL...")
-        .hexpand(true)
-        .build();
-    for css_class in BROWSER_URL_ENTRY_CSS_CLASSES {
-        url_entry.add_css_class(css_class);
-    }
-
-    let back_btn = icon_button("go-previous-symbolic", "Back");
-    let fwd_btn = icon_button("go-next-symbolic", "Forward");
-    let reload_btn = icon_button("view-refresh-symbolic", "Reload");
-
-    let nav_bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    nav_bar.add_css_class("limux-pane-header");
-    nav_bar.append(&back_btn);
-    nav_bar.append(&fwd_btn);
-    nav_bar.append(&reload_btn);
-    nav_bar.append(&url_entry);
-
-    {
-        let wv = webview.clone();
-        back_btn.connect_clicked(move |_| {
-            wv.go_back();
-        });
-    }
-    {
-        let wv = webview.clone();
-        fwd_btn.connect_clicked(move |_| {
-            wv.go_forward();
-        });
-    }
-    {
-        let wv = webview.clone();
-        reload_btn.connect_clicked(move |_| {
-            wv.reload();
-        });
-    }
-    {
-        let wv = webview.clone();
-        url_entry.connect_activate(move |entry| {
-            let url = normalize_browser_entry_input(&entry.text());
-            wv.load_uri(&url);
-        });
-    }
-    {
-        let entry = url_entry.clone();
-        let saved_uri = saved_uri.clone();
-        let callbacks = callbacks.clone();
-        let restoring = Rc::new(std::cell::Cell::new(initial_uri.is_some()));
-        let restoring_flag = restoring.clone();
-        webview.connect_uri_notify(move |wv| {
-            if let Some(uri) = wv.uri() {
-                let uri_str: String = uri.into();
-                entry.set_text(&uri_str);
-                if restoring_flag.get() && (uri_str.is_empty() || uri_str == "about:blank") {
-                    return;
-                }
-                restoring_flag.set(false);
-                *saved_uri.borrow_mut() = Some(uri_str);
-                (callbacks.on_state_changed)();
-            }
-        });
-    }
-
-    let find_controller = webview
-        .find_controller()
-        .expect("webkit webview should expose a find controller");
-    let search_entry = gtk::SearchEntry::builder()
-        .hexpand(true)
-        .placeholder_text("Find in page")
-        .build();
-    for css_class in BROWSER_SEARCH_ENTRY_CSS_CLASSES {
-        search_entry.add_css_class(css_class);
-    }
-    let search_bar = gtk::SearchBar::new();
-    search_bar.set_show_close_button(true);
-    search_bar.connect_entry(&search_entry);
-    search_bar.set_child(Some(&search_entry));
-    {
-        let search_bar = search_bar.clone();
-        let find_controller = find_controller.clone();
-        let webview = webview.clone();
-        search_entry.connect_stop_search(move |_| {
-            find_controller.search_finish();
-            search_bar.set_search_mode(false);
-            webview.grab_focus();
-        });
-    }
-    {
-        let dom_editable = dom_editable.clone();
-        webview.connect_load_changed(move |_, _| {
-            dom_editable.set(false);
-        });
-    }
-
-    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    vbox.append(&nav_bar);
-    vbox.append(&search_bar);
-    vbox.append(&webview.clone());
-    vbox.set_hexpand(true);
-    vbox.set_vexpand(true);
-    vbox.set_halign(gtk::Align::Fill);
-    vbox.set_valign(gtk::Align::Fill);
-    vbox.set_overflow(gtk::Overflow::Hidden);
-    vbox.add_css_class("limux-browser");
-
-    let browser_handles = BrowserHandles {
-        webview: webview.clone(),
-        url_entry: url_entry.clone(),
-        search_bar: search_bar.clone(),
-        search_entry: search_entry.clone(),
-        find_controller: find_controller.clone(),
-        dom_editable,
-    };
-
-    {
-        let browser_handles = browser_handles.clone();
-        search_entry.connect_search_changed(move |_| {
-            browser_handles.search_for_entry_text();
-        });
-    }
-
-    // Load default URL only on the first map. The WebView preserves its
-    // page and history across reparenting (splits), so we must not reload.
-    {
-        let wv = webview.clone();
-        let loaded = std::cell::Cell::new(false);
-        let initial_uri = initial_uri.map(|value| value.to_string());
-        vbox.connect_map(move |_| {
-            if !loaded.get() {
-                loaded.set(true);
-                if let Some(uri) = &initial_uri {
-                    wv.load_uri(uri);
-                } else {
-                    wv.load_uri("https://google.com");
-                }
-            }
-        });
-    }
-
-    // Suppress unused variable warnings
-    let _ = network_session;
-    let _ = web_context;
-
-    (vbox.upcast(), "Browser".to_string(), browser_handles)
-}
-
-fn normalize_browser_entry_input(input: &str) -> String {
-    if input.starts_with("http://") || input.starts_with("https://") {
-        return input.to_string();
-    }
-
-    if is_localhost_input(input) {
-        format!("http://{input}")
-    } else if input.contains('.') {
-        format!("https://{input}")
-    } else {
-        format!(
-            "https://www.google.com/search?q={}",
-            input.replace(' ', "+")
-        )
-    }
-}
-
-fn is_localhost_input(input: &str) -> bool {
-    input == "localhost"
-        || input
-            .strip_prefix("localhost")
-            .and_then(|rest| rest.chars().next())
-            .is_some_and(|ch| matches!(ch, ':' | '/' | '?' | '#'))
-}
-
-#[cfg(not(feature = "webkit"))]
-fn create_browser_widget(
-    initial_uri: Option<&str>,
-    saved_uri: Rc<RefCell<Option<String>>>,
-    _callbacks: Rc<PaneCallbacks>,
-) -> (gtk::Widget, String, BrowserHandles) {
-    *saved_uri.borrow_mut() = initial_uri.map(|value| value.to_string());
-    let placeholder = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .halign(gtk::Align::Center)
-        .valign(gtk::Align::Center)
-        .spacing(12)
-        .build();
-
-    let msg = gtk::Label::builder()
-        .label("Browser requires webkit6")
-        .build();
-    msg.set_css_classes(&["dim-label"]);
-
-    let hint = gtk::Label::builder()
-        .label("sudo apt install libwebkitgtk-6.0-dev\ncargo build --features webkit")
-        .justify(gtk::Justification::Center)
-        .build();
-    hint.set_css_classes(&["dim-label"]);
-
-    placeholder.append(&msg);
-    placeholder.append(&hint);
-    placeholder.set_hexpand(true);
-    placeholder.set_vexpand(true);
-
-    let handles = BrowserHandles;
-
-    (placeholder.upcast(), "Browser".to_string(), handles)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         classify_content_drop_zone, content_drop_preview_rect, effective_drop_target_dimensions,
-        is_localhost_input, next_active_after_tab_removal, normalize_browser_entry_input,
-        normalize_reorder_insert_index, pane_action_tooltip, resolve_terminal_working_directory,
-        surface_hint_matches, terminal_focus_index, ContentDropZone, TabDragPayload,
-        TerminalFocusDirection,
+        next_active_after_tab_removal, normalize_reorder_insert_index, pane_action_tooltip,
+        resolve_terminal_working_directory, surface_hint_matches, terminal_focus_index,
+        ContentDropZone, TabDragPayload, TerminalFocusDirection,
     };
-    #[cfg(feature = "webkit")]
-    use super::{env_value_contains_token, is_kde_wayland_session_from_env};
     use crate::shortcut_config::{default_shortcuts, resolve_shortcuts_from_str, ShortcutId};
 
     #[test]
@@ -4791,10 +3907,6 @@ mod tests {
         assert_eq!(
             pane_action_tooltip(&defaults, "New terminal tab", Some(ShortcutId::NewTerminal)),
             "New terminal tab (Ctrl+T)"
-        );
-        assert_eq!(
-            pane_action_tooltip(&defaults, "New browser tab", None),
-            "New browser tab"
         );
 
         let remapped = resolve_shortcuts_from_str(
@@ -4846,37 +3958,6 @@ mod tests {
             terminal_focus_index(0, 1, TerminalFocusDirection::Right),
             None
         );
-    }
-
-    #[cfg(feature = "webkit")]
-    #[test]
-    fn browser_environment_token_matching_requires_real_tokens() {
-        assert!(env_value_contains_token("KDE", "kde"));
-        assert!(env_value_contains_token("GNOME:KDE", "kde"));
-        assert!(env_value_contains_token("plasma-wayland", "plasma"));
-        assert!(!env_value_contains_token("notkde", "kde"));
-        assert!(!env_value_contains_token("kdevelopment", "kde"));
-    }
-
-    #[cfg(feature = "webkit")]
-    #[test]
-    fn kde_wayland_detection_matches_reported_browser_corruption_environment() {
-        assert!(is_kde_wayland_session_from_env([
-            ("XDG_CURRENT_DESKTOP", "KDE"),
-            ("XDG_SESSION_TYPE", "wayland"),
-        ]));
-        assert!(is_kde_wayland_session_from_env([
-            ("DESKTOP_SESSION", "plasma"),
-            ("WAYLAND_DISPLAY", "wayland-0"),
-        ]));
-        assert!(!is_kde_wayland_session_from_env([
-            ("XDG_CURRENT_DESKTOP", "KDE"),
-            ("XDG_SESSION_TYPE", "x11"),
-        ]));
-        assert!(!is_kde_wayland_session_from_env([
-            ("XDG_CURRENT_DESKTOP", "GNOME"),
-            ("WAYLAND_DISPLAY", "wayland-0"),
-        ]));
     }
 
     #[test]
@@ -5037,54 +4118,5 @@ mod tests {
             Some((320.0, 180.0))
         );
         assert_eq!(effective_drop_target_dimensions(0, 0, 0, 180), None);
-    }
-
-    #[test]
-    fn localhost_inputs_only_match_real_localhost_hosts() {
-        for input in [
-            "localhost",
-            "localhost:3000",
-            "localhost/path",
-            "localhost?q=1",
-        ] {
-            assert!(is_localhost_input(input), "{input} should be localhost");
-        }
-
-        for input in [
-            "localhost.run",
-            "localhost.example.com",
-            "localhost docs",
-            "mylocalhost:3000",
-        ] {
-            assert!(
-                !is_localhost_input(input),
-                "{input} should not be treated as localhost"
-            );
-        }
-    }
-
-    #[test]
-    fn normalize_browser_entry_input_preserves_search_and_domain_behavior() {
-        let cases = [
-            ("https://example.com", "https://example.com"),
-            ("localhost", "http://localhost"),
-            ("localhost:3000", "http://localhost:3000"),
-            ("localhost/path", "http://localhost/path"),
-            ("localhost.run", "https://localhost.run"),
-            ("localhost.example.com", "https://localhost.example.com"),
-            (
-                "localhost docs",
-                "https://www.google.com/search?q=localhost+docs",
-            ),
-            ("example.com", "https://example.com"),
-            (
-                "example search",
-                "https://www.google.com/search?q=example+search",
-            ),
-        ];
-
-        for (input, expected) in cases {
-            assert_eq!(normalize_browser_entry_input(input), expected, "{input}");
-        }
     }
 }

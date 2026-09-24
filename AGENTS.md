@@ -75,8 +75,7 @@ There are two control-server paths:
 When fixing user-visible CLI behavior, verify the production GTK bridge path,
 not only the standalone dispatcher. The live bridge supports workspace, pane,
 surface, terminal send/key/read/health, notification, and terminal pane-create
-commands. Browser command bridge parity remains separate work; check
-`docs/cmux-parity-plan.md` before changing agent or browser automation.
+commands. Check `docs/cmux-parity-plan.md` before changing agent automation.
 
 ## IDs And Env
 

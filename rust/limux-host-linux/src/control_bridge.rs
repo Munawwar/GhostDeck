@@ -64,12 +64,6 @@ pub enum PaneCreateDirection {
     Down,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PaneCreateType {
-    Terminal,
-    Browser,
-}
-
 /// Parser-level contract for the live-GTK `pane.create` route.
 ///
 /// Request fields accepted by the bridge:
@@ -81,14 +75,13 @@ pub enum PaneCreateType {
 ///   precedence as explicit surface, explicit pane, then safe workspace-local
 ///   fallback.
 /// - `direction` is one of `left|right|up|down`, defaulting to `right`.
-/// - `type` is one of `terminal|browser`, defaulting to `terminal`.
+/// - `type`, when supplied, must be `terminal`.
 /// - `command` is a terminal-only host extension: the host injects it into the
 ///   newly-created surface after creation. The standalone core dispatcher may
 ///   accept the field for compatibility but does not launch a process.
 ///
-/// This delivery only implements live-GTK terminal panes. Browser pane support
-/// remains a follow-up, so `type=browser` and `url` fail at parse time before
-/// any GTK work is scheduled. Responses must keep the existing core/CLI field
+/// Nonterminal types and `url` fail at parse time before GTK work is scheduled.
+/// Responses keep the existing core/CLI field
 /// names: `pane_id`, `pane_ref`, `surface_id`, and `surface_ref`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreatePaneRequest {
@@ -96,7 +89,6 @@ pub struct CreatePaneRequest {
     pub source_pane_id: Option<String>,
     pub source_surface_id: Option<String>,
     pub direction: PaneCreateDirection,
-    pub pane_type: PaneCreateType,
     pub command: Option<String>,
 }
 
@@ -446,27 +438,14 @@ fn parse_create_pane_request(
         }
     };
 
-    let pane_type = match optional_string(params, &["type"])
-        .unwrap_or_else(|| "terminal".to_string())
-        .as_str()
-    {
-        "terminal" => PaneCreateType::Terminal,
-        "browser" => PaneCreateType::Browser,
-        _ => {
-            return Err(BridgeError::invalid_params(
-                "pane.create type must be one of terminal|browser",
-            ));
-        }
-    };
-
-    if matches!(pane_type, PaneCreateType::Browser) {
+    if optional_string(params, &["type"]).is_some_and(|pane_type| pane_type != "terminal") {
         return Err(BridgeError::invalid_params(
-            "pane.create live GTK bridge supports type=terminal only",
+            "pane.create type must be terminal",
         ));
     }
     if optional_string(params, &["url"]).is_some() {
         return Err(BridgeError::invalid_params(
-            "pane.create url is only supported for browser panes",
+            "pane.create does not accept url",
         ));
     }
 
@@ -475,7 +454,6 @@ fn parse_create_pane_request(
         source_pane_id: optional_ref_handle(params, &["pane_id"], "pane:")?,
         source_surface_id: optional_ref_handle(params, &["surface_id"], "surface:")?,
         direction,
-        pane_type,
         command: optional_string(params, &["command"]),
     })
 }
@@ -1097,7 +1075,6 @@ mod tests {
         assert_eq!(request.source_surface_id, Some("11".to_string()));
         assert_eq!(request.source_pane_id, Some("12".to_string()));
         assert_eq!(request.direction, PaneCreateDirection::Left);
-        assert_eq!(request.pane_type, PaneCreateType::Terminal);
         assert_eq!(request.command, Some("claude".to_string()));
     }
 
@@ -1115,15 +1092,15 @@ mod tests {
     }
 
     #[test]
-    fn pane_create_contract_rejects_deferred_browser_fields() {
+    fn pane_create_contract_rejects_nonterminal_type_and_url() {
         let browser = json!({ "type": "browser" });
         let error = parse_create_pane_request(browser.as_object().expect("object params"))
-            .expect_err("browser panes are deferred");
+            .expect_err("nonterminal type must fail");
         assert_eq!(error.code, INVALID_PARAMS_CODE);
 
         let url = json!({ "url": "https://example.com" });
         let error = parse_create_pane_request(url.as_object().expect("object params"))
-            .expect_err("url is browser-only");
+            .expect_err("url must fail");
         assert_eq!(error.code, INVALID_PARAMS_CODE);
     }
 
