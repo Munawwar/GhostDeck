@@ -274,20 +274,36 @@ impl TerminalHandle {
             return false;
         };
 
-        let press = translate_key_event(
+        let display = self.gl_area.display();
+        let mapping = display
+            .map_keyval(keyval)
+            .and_then(|mappings| mappings.into_iter().next());
+        let keycode = mapping.as_ref().map(|key| key.keycode()).unwrap_or(0);
+        let text_keyval = mapping
+            .and_then(|key| {
+                display
+                    .translate_key(keycode, modifier, key.group())
+                    .map(|(translated, _, _, _)| translated)
+            })
+            .unwrap_or(keyval);
+        let text = key_event_text(text_keyval);
+        let mut press = translate_key_event(
             GHOSTTY_ACTION_PRESS,
             Some(self.gl_area.upcast_ref()),
             None,
             keyval,
-            0,
+            keycode,
             modifier,
         );
+        if let Some(text) = text.as_ref() {
+            press.text = text.as_ptr();
+        }
         let release = translate_key_event(
             GHOSTTY_ACTION_RELEASE,
             Some(self.gl_area.upcast_ref()),
             None,
             keyval,
-            0,
+            keycode,
             modifier,
         );
 
