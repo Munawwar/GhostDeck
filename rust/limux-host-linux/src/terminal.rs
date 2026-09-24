@@ -189,6 +189,7 @@ thread_local! {
 #[derive(Clone)]
 pub struct TerminalHandle {
     surface_cell: Rc<RefCell<Option<ghostty_surface_t>>>,
+    clipboard_context_cell: Rc<Cell<*mut ClipboardContext>>,
     gl_area: gtk::GLArea,
     split_dim_overlay: gtk::Widget,
     search_bar: gtk::SearchBar,
@@ -211,12 +212,7 @@ impl TerminalHandle {
         let Some(surface) = self.surface_cell.borrow_mut().take() else {
             return;
         };
-        SURFACE_MAP.with(|map| {
-            if let Some(entry) = map.borrow_mut().remove(&(surface as usize)) {
-                unsafe { drop(Box::from_raw(entry.clipboard_context)) };
-            }
-        });
-        unsafe { ghostty_surface_free(surface) };
+        free_terminal_surface(surface, &self.clipboard_context_cell, &self.gl_area);
     }
 
     pub fn replace_callbacks(&self, callbacks: TerminalCallbacks) {
@@ -1191,6 +1187,28 @@ pub(crate) fn default_font_size() -> f32 {
     *SIZE.get_or_init(crate::ghostty_config::read_font_size)
 }
 
+fn free_terminal_surface(
+    surface: ghostty_surface_t,
+    clipboard_context_cell: &Cell<*mut ClipboardContext>,
+    gl_area: &gtk::GLArea,
+) {
+    let entry = SURFACE_MAP.with(|map| map.borrow_mut().remove(&(surface as usize)));
+    let clipboard_context = entry
+        .as_ref()
+        .map(|entry| entry.clipboard_context)
+        .unwrap_or_else(|| clipboard_context_cell.get());
+    clipboard_context_cell.set(ptr::null_mut());
+
+    if gl_area.is_realized() {
+        gl_area.make_current();
+    }
+    unsafe { ghostty_surface_free(surface) };
+    if !clipboard_context.is_null() {
+        unsafe { drop(Box::from_raw(clipboard_context)) };
+    }
+    drop(entry);
+}
+
 /// Create a new Ghostty-powered terminal widget.
 /// Returns an Overlay (GLArea + toast layer) for embedding in the pane.
 pub fn create_terminal(
@@ -1272,6 +1290,7 @@ pub fn create_terminal(
 
     let handle = TerminalHandle {
         surface_cell: surface_cell.clone(),
+        clipboard_context_cell: clipboard_context_cell.clone(),
         gl_area: gl_area.clone(),
         split_dim_overlay: split_dim_overlay.upcast(),
         search_bar: search_bar.clone(),
@@ -1926,18 +1945,11 @@ pub fn create_terminal(
         let surface_cell = surface_cell.clone();
         let clipboard_context_cell = clipboard_context_cell.clone();
         let im_context = im_context.clone();
+        let gl_area = gl_area.clone();
         overlay.connect_destroy(move |_| {
             im_context.set_client_widget(gtk::Widget::NONE);
             if let Some(surface) = surface_cell.borrow_mut().take() {
-                let surface_key = surface as usize;
-                SURFACE_MAP.with(|map| {
-                    if let Some(entry) = map.borrow_mut().remove(&surface_key) {
-                        unsafe {
-                            drop(Box::from_raw(entry.clipboard_context));
-                        }
-                    }
-                });
-                unsafe { ghostty_surface_free(surface) };
+                free_terminal_surface(surface, &clipboard_context_cell, &gl_area);
             } else {
                 let clipboard_context = clipboard_context_cell.replace(ptr::null_mut());
                 if !clipboard_context.is_null() {
