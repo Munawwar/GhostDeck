@@ -2328,10 +2328,10 @@ fn make_terminal_callbacks(
             if has_custom || title.is_empty() {
                 return;
             }
-            let display = if title.len() > 22 {
-                format!("{}…", &title[..21])
-            } else {
-                title.to_string()
+            let mut chars = title.char_indices();
+            let display = match chars.nth(21) {
+                Some((end, _)) if chars.next().is_some() => format!("{}…", &title[..end]),
+                _ => title.to_string(),
             };
             title_label_for_title.set_label(&display);
         }),
