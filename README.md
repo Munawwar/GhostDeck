@@ -147,7 +147,11 @@ limux new-pane --direction right --command claude
 # Add a visible process to the agent's current terminal tab. Limux owns the
 # layout: the agent starts on the left and up to three added surfaces stack on
 # the right. No direction or target flags are accepted.
-limux add-surface -- npm run dev
+created="$(limux --json add-surface --cwd apps/web)"
+surface="$(printf '%s\n' "$created" | jq -r '.surface_id')"
+limux run --surface "$surface" --cmd 'npm run dev'
+# Stop the foreground process with Ctrl+C, then remove the added surface:
+limux close-surface --surface "$surface"
 
 # Explicit source targets are also accepted and serialized unchanged:
 limux new-pane --workspace "$LIMUX_WORKSPACE_ID" --surface "$LIMUX_SURFACE_ID" \

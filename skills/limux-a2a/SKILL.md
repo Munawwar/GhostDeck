@@ -10,18 +10,24 @@ Use inherited `LIMUX_*` identity. Do not discover or guess targets unless an ID 
 ## Visible process
 
 ```bash
-created="$(limux --json add-surface -- npm run dev)"
+created="$(limux --json add-surface --cwd apps/web --cmd 'npm run dev')"
 surface="$(printf '%s\n' "$created" | jq -r '.surface_id')"
 ```
 
-`add-surface` accepts no target or direction. Limux stacks at most three added surfaces to the right in the caller's tab.
+Relative `--cwd` paths use your current directory. `--cmd` is sent verbatim to the configured shell. Limux stacks at most three added surfaces to the right in the caller's tab.
+
+Run another command in an added surface after its shell prompt returns:
+
+```bash
+limux run --surface "$surface" --cmd 'npm test'
+```
 
 For durable output:
 
 ```bash
-mkdir -p .limux/logs
-limux --json add-surface -- bash -lc \
-  'set -o pipefail; npm run dev 2>&1 | tee -a .limux/logs/dev.log'
+mkdir -p apps/web/.limux/logs
+limux --json add-surface --cwd apps/web \
+  --cmd 'npm run dev 2>&1 | tee -a .limux/logs/dev.log'
 ```
 
 ## Control
@@ -30,7 +36,10 @@ limux --json add-surface -- bash -lc \
 limux read-screen --surface "$surface"
 limux send-key --surface "$surface" '<Ctrl>c'
 limux notify --body "short status" "Input needed"
+limux close-surface --surface "$surface"
 ```
+
+`close-surface` closes a surface created by this agent in its current tab and shuts down its terminal session. It cannot close the caller surface.
 
 ## Peer agent
 

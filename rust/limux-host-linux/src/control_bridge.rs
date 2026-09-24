@@ -30,6 +30,8 @@ const METHODS: &[&str] = &[
     "pane.create",
     "surface.list",
     "surface.add",
+    "surface.run",
+    "surface.close",
     "surface.health",
     "surface.read_text",
     "surface.send_text",
@@ -103,7 +105,25 @@ pub struct AddSurfaceRequest {
     pub target: WorkspaceTarget,
     pub tab_id: String,
     pub source_surface_id: String,
-    pub argv: Vec<String>,
+    pub cwd: Option<String>,
+    pub command: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SurfaceCommandRequest {
+    pub target: WorkspaceTarget,
+    pub tab_id: String,
+    pub source_surface_id: String,
+    pub surface_id: String,
+    pub command: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CloseSurfaceRequest {
+    pub target: WorkspaceTarget,
+    pub tab_id: String,
+    pub source_surface_id: String,
+    pub surface_id: String,
 }
 
 #[derive(Debug)]
@@ -133,6 +153,14 @@ pub enum ControlCommand {
     },
     AddSurface {
         request: AddSurfaceRequest,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    RunSurfaceCommand {
+        request: SurfaceCommandRequest,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    CloseSurface {
+        request: CloseSurfaceRequest,
         reply: mpsc::Sender<BridgeResult>,
     },
     ListSurfaces {
@@ -202,6 +230,8 @@ impl ControlCommand {
             | Self::ListPaneSurfaces { reply, .. }
             | Self::CreatePane { reply, .. }
             | Self::AddSurface { reply, .. }
+            | Self::RunSurfaceCommand { reply, .. }
+            | Self::CloseSurface { reply, .. }
             | Self::ListSurfaces { reply, .. }
             | Self::SurfaceHealth { reply, .. }
             | Self::ReadSurfaceText { reply, .. }
@@ -434,6 +464,25 @@ fn parse_create_pane_request(
     })
 }
 
+fn parse_surface_scope(
+    params: &Map<String, Value>,
+    method: &str,
+) -> Result<(WorkspaceTarget, String, String, String), BridgeError> {
+    let target = parse_required_workspace_target(params, false, method)?;
+    let tab_id = optional_string(params, &["tab_id"])
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| BridgeError::invalid_params(format!("{method} requires tab_id")))?;
+    let source_surface_id = optional_ref_handle(params, &["source_surface_id"], "surface:")?
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            BridgeError::invalid_params(format!("{method} requires source_surface_id"))
+        })?;
+    let surface_id = optional_ref_handle(params, &["surface_id"], "surface:")?
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| BridgeError::invalid_params(format!("{method} requires surface_id")))?;
+    Ok((target, tab_id, source_surface_id, surface_id))
+}
+
 fn parse_required_workspace_target(
     params: &Map<String, Value>,
     allow_name: bool,
@@ -536,29 +585,26 @@ fn handle_method(
                     }
                     Err(error) => return error_response(id, error),
                 };
-            let argv = match params.get("argv") {
-                None => Vec::new(),
-                Some(Value::Array(argv)) => {
-                    let Some(argv) = argv
-                        .iter()
-                        .map(Value::as_str)
-                        .map(|arg| arg.map(ToOwned::to_owned))
-                        .collect::<Option<Vec<_>>>()
-                    else {
-                        return error_response(
-                            id,
-                            BridgeError::invalid_params(
-                                "surface.add argv must contain only strings",
-                            ),
-                        );
-                    };
-                    argv
-                }
-                Some(_) => {
+            let cwd = match params.get("cwd") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(cwd)) if !cwd.trim().is_empty() => Some(cwd.clone()),
+                _ => {
                     return error_response(
                         id,
-                        BridgeError::invalid_params("surface.add argv must be an array"),
-                    );
+                        BridgeError::invalid_params("surface.add cwd must be a nonempty string"),
+                    )
+                }
+            };
+            let command = match params.get("command") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(command)) if !command.trim().is_empty() => Some(command.clone()),
+                _ => {
+                    return error_response(
+                        id,
+                        BridgeError::invalid_params(
+                            "surface.add command must be a nonempty string",
+                        ),
+                    )
                 }
             };
             let (reply, rx) = mpsc::channel();
@@ -568,7 +614,58 @@ fn handle_method(
                         target,
                         tab_id,
                         source_surface_id,
-                        argv,
+                        cwd,
+                        command,
+                    },
+                    reply,
+                },
+                rx,
+            )
+        }
+        "surface.run" | "run-surface" => {
+            let (target, tab_id, source_surface_id, surface_id) =
+                match parse_surface_scope(params, "surface.run") {
+                    Ok(scope) => scope,
+                    Err(error) => return error_response(id, error),
+                };
+            let command = match params.get("command") {
+                Some(Value::String(command)) if !command.trim().is_empty() => command.clone(),
+                _ => {
+                    return error_response(
+                        id,
+                        BridgeError::invalid_params("surface.run requires a nonempty command"),
+                    )
+                }
+            };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::RunSurfaceCommand {
+                    request: SurfaceCommandRequest {
+                        target,
+                        tab_id,
+                        source_surface_id,
+                        surface_id,
+                        command,
+                    },
+                    reply,
+                },
+                rx,
+            )
+        }
+        "surface.close" | "close-surface" => {
+            let (target, tab_id, source_surface_id, surface_id) =
+                match parse_surface_scope(params, "surface.close") {
+                    Ok(scope) => scope,
+                    Err(error) => return error_response(id, error),
+                };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::CloseSurface {
+                    request: CloseSurfaceRequest {
+                        target,
+                        tab_id,
+                        source_surface_id,
+                        surface_id,
                     },
                     reply,
                 },

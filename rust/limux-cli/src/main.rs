@@ -203,8 +203,9 @@ fn print_help() {
         "limux CLI\n\nUsage: limux [--socket <path>] [--json] [--id-format refs|both|uuids] <command> [args...]\n       limux\n\nRunning `limux` with no arguments launches the GTK app.\n\nCommon commands:\n  identify [--workspace <id|ref>] [--surface <id|ref>]\n  list-panels [--workspace <id|ref>]\n  list-panes [--workspace <id|ref>]\n  list-workspaces\n  surface-health [--workspace <id|ref>]\n  send [--workspace <id|ref>] [--surface <id|ref>] <text>\n  send-key [--workspace <id|ref>] [--surface <id|ref>] <key>\n  new-workspace [--cwd <path>] [--command <text>]\n  close-workspace --workspace <id|ref>\n  sidebar-state --workspace <id|ref>\n  new-surface [--workspace <id|ref>]\n  new-pane [--workspace <id|ref>] [--pane <id|ref>] [--surface <id|ref>] [--direction <left|right|up|down>] [--type <terminal|browser>] [--command <text>] [--url <url>]\n      Live GTK self-spawn currently supports terminal panes only; browser panes remain deferred.\n  rename-workspace [--workspace <id|ref>] <title>\n  rename-window [--workspace <id|ref>] <title>\n  rename-tab [--workspace <id|ref>] [--tab <id|ref>] <title>\n  read-screen [--workspace <id|ref>] [--surface <id|ref>] [--scrollback] [--lines <n>]\n  capture-pane (alias of read-screen)\n  tab-action --action <name> [--workspace <id|ref>] [--tab <id|ref>] [--title <text>] [--url <url>]\n  browser [--surface <id|ref>|<surface>] <subcommand> ...\n\nAgent integrations:\n  notify [--workspace <id|ref>] [--subtitle <text>] [--body <text>] <title>\n  hooks setup [agent] | hooks uninstall [agent] | hooks <agent> <event>\n  claude-hook | opencode-hook | gemini-hook --event <name> [--subtitle <text>] [--body <text>] [--title <text>]\n  agent-team [--agents codex,claude[,opencode,gemini]] [--cwd <path>] [--no-launch] [--dry-run]\n      Splits the active workspace into one pane per agent (caller's pane stays\n      as the orchestrator on the left, peers stack down the right), launches\n      each CLI in its pane, and writes AGENTS.md describing the <agent-msg>\n      XML protocol so peers can talk via\n      `limux send --surface <peer-surface-id> <envelope>`.\n"
     );
     println!(
-        "  add-surface [-- <command> [args...]]\n      Adds up to 3 terminal surfaces to the caller's tab using Limux's fixed layout."
+        "  add-surface [--cwd <directory>] [--cmd <shell-command>]\n      Adds up to 3 terminal surfaces to the caller's tab using Limux's fixed layout."
     );
+    println!("  run --surface <id> --cmd <shell-command> | close-surface --surface <id>");
     println!("  skill setup [codex] | skill uninstall [codex]");
 }
 
@@ -2346,13 +2347,21 @@ fn build_agents_md(
          visible to the human:\n\n",
     );
     out.push_str("```bash\n");
-    out.push_str("limux add-surface -- npm run dev\n");
+    out.push_str("limux add-surface --cwd apps/web --cmd 'npm run dev'\n");
     out.push_str("```\n\n");
     out.push_str(
-        "Limux keeps your agent surface on the left and stacks up to three\n\
-         added surfaces on the right. The command accepts no direction or\n\
-         target flags and uses your inherited workspace, tab, and surface IDs.\n\n",
+        "Limux starts your agent surface on the left and stacks up to three\n\
+         added surfaces in the right column. Relative --cwd paths use your\n\
+         current directory; --cmd is sent to the terminal's configured shell.\n\n",
     );
+    out.push_str(
+        "Run another foreground command in an added surface after its shell prompt returns:\n\n",
+    );
+    out.push_str("```bash\nlimux run --surface <surface-id> --cmd 'npm test'\n```\n\n");
+    out.push_str(
+        "Close a surface you created when finished; this shuts down its terminal session:\n\n",
+    );
+    out.push_str("```bash\nlimux close-surface --surface <surface-id>\n```\n\n");
 
     out.push_str("## Splitting your own pane\n\n");
     out.push_str("If you need a scratch terminal next to you, split your own pane:\n\n");
@@ -2451,24 +2460,36 @@ async fn run_new_surface(client: &mut Client, args: &[String]) -> Result<Value> 
 async fn run_add_surface(client: &mut Client, args: &[String]) -> Result<Value> {
     if args == ["--help"] {
         return Ok(json!({
-            "help": "Usage: limux add-surface [-- <command> [args...]]\nAdds a terminal surface to the calling agent's tab. Limux places up to three added surfaces in a fixed vertical stack to the right of the caller."
+            "help": "Usage: limux add-surface [--cwd <directory>] [--cmd <shell-command>]\nAdds a terminal surface to the calling agent's tab. Relative --cwd paths resolve from the CLI's current directory. --cmd is sent verbatim to the terminal's configured shell."
         }));
     }
-    let argv = match args {
-        [] => Vec::new(),
-        [separator, argv @ ..] if separator == "--" => argv.to_vec(),
-        _ => bail!(
-            "add-surface accepts no placement options; use `limux add-surface -- <command> [args...]`"
-        ),
-    };
-    let workspace_id = nonempty(env::var("LIMUX_WORKSPACE_ID").ok()).ok_or_else(|| {
-        anyhow!("add-surface must run inside a Limux terminal with LIMUX_WORKSPACE_ID")
-    })?;
-    let tab_id = nonempty(env::var("LIMUX_TAB_ID").ok())
-        .ok_or_else(|| anyhow!("add-surface must run inside a Limux terminal with LIMUX_TAB_ID"))?;
-    let source_surface_id = nonempty(env::var("LIMUX_SURFACE_ID").ok()).ok_or_else(|| {
-        anyhow!("add-surface must run inside a Limux terminal with LIMUX_SURFACE_ID")
-    })?;
+    let mut cwd = None;
+    let mut command = None;
+    let mut pairs = args.chunks_exact(2);
+    for pair in &mut pairs {
+        match pair[0].as_str() {
+            "--cwd" if cwd.is_none() => {
+                let path = fs::canonicalize(&pair[1])
+                    .with_context(|| format!("invalid working directory: {}", pair[1]))?;
+                if !path.is_dir() {
+                    bail!("working directory is not a directory: {}", path.display());
+                }
+                cwd = Some(
+                    path.to_str()
+                        .ok_or_else(|| anyhow!("working directory is not UTF-8"))?
+                        .to_string(),
+                );
+            }
+            "--cmd" if command.is_none() && !pair[1].trim().is_empty() => {
+                command = Some(pair[1].clone());
+            }
+            _ => bail!("Usage: limux add-surface [--cwd <directory>] [--cmd <shell-command>]"),
+        }
+    }
+    if !pairs.remainder().is_empty() {
+        bail!("Usage: limux add-surface [--cwd <directory>] [--cmd <shell-command>]");
+    }
+    let (workspace_id, tab_id, source_surface_id) = caller_terminal_identity()?;
 
     client
         .call(
@@ -2477,8 +2498,70 @@ async fn run_add_surface(client: &mut Client, args: &[String]) -> Result<Value> 
                 "workspace_id": workspace_id,
                 "tab_id": tab_id,
                 "source_surface_id": source_surface_id,
-                "argv": argv,
+                "cwd": cwd,
+                "command": command,
             }),
+        )
+        .await
+}
+
+fn caller_terminal_identity() -> Result<(String, String, String)> {
+    let read = |name| {
+        nonempty(env::var(name).ok()).ok_or_else(|| {
+        anyhow!("agent surface commands require LIMUX_WORKSPACE_ID, LIMUX_TAB_ID and LIMUX_SURFACE_ID")
+    })
+    };
+    Ok((
+        read("LIMUX_WORKSPACE_ID")?,
+        read("LIMUX_TAB_ID")?,
+        read("LIMUX_SURFACE_ID")?,
+    ))
+}
+
+async fn run_surface_action(client: &mut Client, action: &str, args: &[String]) -> Result<Value> {
+    if args == ["--help"] {
+        return Ok(
+            json!({"help": "Usage: limux run --surface <id> --cmd <shell-command> | limux close-surface --surface <id>\nBoth commands are scoped to a surface created by you in your current tab. --cmd is sent verbatim to its configured shell."}),
+        );
+    }
+    let (surface_id, command) = match action {
+        "run" => match args {
+            [flag, surface, cmd_flag, command]
+                if flag == "--surface"
+                    && !surface.trim().is_empty()
+                    && cmd_flag == "--cmd"
+                    && !command.trim().is_empty() =>
+            {
+                (surface.clone(), Some(command.clone()))
+            }
+            _ => bail!("run requires `--surface <id> --cmd <shell-command>`"),
+        },
+        "close-surface" => match args {
+            [flag, surface] if flag == "--surface" && !surface.trim().is_empty() => {
+                (surface.clone(), None)
+            }
+            _ => bail!("close-surface requires `--surface <id>`"),
+        },
+        _ => bail!("unknown surface action: {action}"),
+    };
+    let (workspace_id, tab_id, source_surface_id) = caller_terminal_identity()?;
+    let mut params = json!({
+        "workspace_id": workspace_id,
+        "tab_id": tab_id,
+        "source_surface_id": source_surface_id,
+        "surface_id": surface_id,
+    });
+    if let Some(command) = command {
+        params["command"] = json!(command);
+    }
+    client
+        .call(
+            if action == "run" {
+                "surface.run"
+            } else {
+                "surface.close"
+            },
+            params,
         )
         .await
 }
@@ -3619,6 +3702,21 @@ async fn execute_command(client: &mut Client, opts: &GlobalOptions) -> Result<Co
             } else {
                 let handle = handle_from_payload(&payload, "surface_id", "surface_ref");
                 CommandOutput::Text(format!("OK {}", handle))
+            }
+        }
+        "run" | "close-surface" => {
+            let payload = run_surface_action(client, command, args).await?;
+            if opts.json_output {
+                CommandOutput::Json(payload)
+            } else if let Some(help) = get_string(&payload, &["help"]) {
+                CommandOutput::Text(help)
+            } else {
+                let handle = handle_from_payload(&payload, "surface_id", "surface_ref");
+                CommandOutput::Text(if command == "run" {
+                    format!("OK command sent to {handle}")
+                } else {
+                    format!("OK closed {handle}")
+                })
             }
         }
         "new-pane" => {

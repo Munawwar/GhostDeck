@@ -10,7 +10,6 @@ use gtk::glib;
 use gtk::glib::variant::ToVariant;
 use gtk4 as gtk;
 use libadwaita as adw;
-use shell_quote::Bash;
 
 use crate::app_config;
 use crate::control_bridge::{
@@ -187,6 +186,61 @@ fn pane_create_response_payload(
         "surface_type": surface.kind,
         "ok": true,
     })
+}
+
+fn terminal_pane_widget_for_tab(root: &gtk::Widget, tab_id: &str) -> Option<gtk::Widget> {
+    let pane_id = pane::surface_summaries_for_root(root)
+        .into_iter()
+        .find(|surface| surface.surface_id.split(':').nth(1) == Some(tab_id))?
+        .pane_id;
+    pane::pane_widget_for_root(root, pane_id)
+}
+
+fn terminal_tab_target(
+    state: &State,
+    target: &crate::control_bridge::WorkspaceTarget,
+    tab_id: &str,
+) -> Result<(String, String, gtk::Widget), BridgeError> {
+    let app_state = state.borrow();
+    let index = workspace_index_for_target(&app_state, target)
+        .ok_or_else(|| BridgeError::not_found("workspace not found"))?;
+    let workspace = &app_state.workspaces[index];
+    let pane_widget = terminal_pane_widget_for_tab(&workspace.root, tab_id)
+        .ok_or_else(|| BridgeError::not_found("terminal tab not found"))?;
+    Ok((workspace.id.clone(), workspace.name.clone(), pane_widget))
+}
+
+fn terminal_tab_surface_error(error: pane::TerminalTabSurfaceError) -> BridgeError {
+    match error {
+        pane::TerminalTabSurfaceError::PaneNotFound => BridgeError::not_found("pane not found"),
+        pane::TerminalTabSurfaceError::TabNotFound => {
+            BridgeError::not_found("terminal tab not found")
+        }
+        pane::TerminalTabSurfaceError::NotTerminal => {
+            BridgeError::invalid_params("surface operation requires a terminal tab")
+        }
+        pane::TerminalTabSurfaceError::SourceNotFound => {
+            BridgeError::not_found("source surface was not found in the caller tab")
+        }
+        pane::TerminalTabSurfaceError::SurfaceNotFound => {
+            BridgeError::not_found("target surface was not found in the caller tab")
+        }
+        pane::TerminalTabSurfaceError::SurfaceNotOwned => {
+            BridgeError::conflict("target surface was not created by the caller")
+        }
+        pane::TerminalTabSurfaceError::CannotCloseSource => {
+            BridgeError::invalid_params("cannot close the caller's source surface")
+        }
+        pane::TerminalTabSurfaceError::CommandNotWritable => {
+            BridgeError::conflict("target surface is not ready for input")
+        }
+        pane::TerminalTabSurfaceError::UnsupportedLayout => {
+            BridgeError::conflict("surface.add requires the caller's fixed agent layout")
+        }
+        pane::TerminalTabSurfaceError::LimitReached => {
+            BridgeError::conflict("maximum of 3 additional surfaces reached")
+        }
+    }
 }
 
 fn send_create_response_after_command(
@@ -4207,70 +4261,31 @@ fn handle_control_command(state: &State, command: ControlCommand) {
             let _ = reply.send(Ok(response));
         }
         ControlCommand::AddSurface { request, reply } => {
-            let resolved = {
-                let app_state = state.borrow();
-                workspace_index_for_target(&app_state, &request.target)
-            };
-            let Some(index) = resolved else {
-                let _ = reply.send(Err(BridgeError::not_found("workspace not found")));
-                return;
-            };
-            let (workspace_id, workspace_name, pane_widget) = {
-                let app_state = state.borrow();
-                let workspace = &app_state.workspaces[index];
-                let pane_id = pane::surface_summaries_for_root(&workspace.root)
-                    .into_iter()
-                    .find(|surface| {
-                        surface.surface_id.split(':').nth(1) == Some(request.tab_id.as_str())
-                    })
-                    .map(|surface| surface.pane_id);
-                (
-                    workspace.id.clone(),
-                    workspace.name.clone(),
-                    pane_id
-                        .and_then(|pane_id| pane::pane_widget_for_root(&workspace.root, pane_id)),
-                )
-            };
-            let Some(pane_widget) = pane_widget else {
-                let _ = reply.send(Err(BridgeError::not_found("terminal tab not found")));
-                return;
-            };
+            let (workspace_id, workspace_name, pane_widget) =
+                match terminal_tab_target(state, &request.target, &request.tab_id) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        return;
+                    }
+                };
+            if let Some(cwd) = request.cwd.as_deref() {
+                if !Path::new(cwd).is_absolute() || !Path::new(cwd).is_dir() {
+                    let _ = reply.send(Err(BridgeError::invalid_params(
+                        "surface.add cwd must be an existing absolute directory",
+                    )));
+                    return;
+                }
+            }
             let surface = match pane::add_surface_to_terminal_tab(
                 &pane_widget,
                 &request.tab_id,
                 &request.source_surface_id,
+                request.cwd.as_deref(),
             ) {
                 Ok(surface) => surface,
-                Err(pane::AddSurfaceError::PaneNotFound) => {
-                    let _ = reply.send(Err(BridgeError::not_found("pane not found")));
-                    return;
-                }
-                Err(pane::AddSurfaceError::TabNotFound) => {
-                    let _ = reply.send(Err(BridgeError::not_found("terminal tab not found")));
-                    return;
-                }
-                Err(pane::AddSurfaceError::NotTerminal) => {
-                    let _ = reply.send(Err(BridgeError::invalid_params(
-                        "surface.add requires a terminal tab",
-                    )));
-                    return;
-                }
-                Err(pane::AddSurfaceError::SourceNotFound) => {
-                    let _ = reply.send(Err(BridgeError::not_found(
-                        "source surface was not found in the caller tab",
-                    )));
-                    return;
-                }
-                Err(pane::AddSurfaceError::UnsupportedLayout) => {
-                    let _ = reply.send(Err(BridgeError::conflict(
-                        "surface.add requires the caller's fixed agent layout",
-                    )));
-                    return;
-                }
-                Err(pane::AddSurfaceError::LimitReached) => {
-                    let _ = reply.send(Err(BridgeError::conflict(
-                        "maximum of 3 additional surfaces reached",
-                    )));
+                Err(error) => {
+                    let _ = reply.send(Err(terminal_tab_surface_error(error)));
                     return;
                 }
             };
@@ -4287,20 +4302,77 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                     serde_json::Value::String(request.source_surface_id.clone()),
                 );
             }
-            if request.argv.is_empty() {
+            if let Some(command) = request.command {
+                send_create_response_after_command(
+                    pane_widget,
+                    surface_id,
+                    command,
+                    response,
+                    reply,
+                );
+            } else {
                 let _ = reply.send(Ok(response));
+            }
+        }
+        ControlCommand::RunSurfaceCommand { request, reply } => {
+            let (workspace_id, workspace_name, pane_widget) =
+                match terminal_tab_target(state, &request.target, &request.tab_id) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        return;
+                    }
+                };
+            if let Err(error) = pane::run_command_in_terminal_tab(
+                &pane_widget,
+                &request.tab_id,
+                &request.source_surface_id,
+                &request.surface_id,
+                &request.command,
+            ) {
+                let _ = reply.send(Err(terminal_tab_surface_error(error)));
                 return;
             }
-            let command = request
-                .argv
-                .iter()
-                .map(|arg| {
-                    String::from_utf8(Bash::quote_vec(arg.as_bytes()))
-                        .expect("bash quoting should preserve UTF-8 arguments")
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            send_create_response_after_command(pane_widget, surface_id, command, response, reply);
+            let _ = reply.send(Ok(serde_json::json!({
+                "workspace_id": workspace_id.as_str(),
+                "workspace_ref": workspace_ref(&workspace_id),
+                "workspace": {"name": workspace_name.as_str(), "title": workspace_name.as_str()},
+                "tab_id": request.tab_id.as_str(),
+                "source_surface_id": request.source_surface_id.as_str(),
+                "surface_id": request.surface_id.as_str(),
+                "surface_ref": surface_ref(&request.surface_id),
+                "ok": true,
+            })));
+        }
+        ControlCommand::CloseSurface { request, reply } => {
+            let (workspace_id, workspace_name, pane_widget) =
+                match terminal_tab_target(state, &request.target, &request.tab_id) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        return;
+                    }
+                };
+            if let Err(error) = pane::close_surface_in_terminal_tab(
+                &pane_widget,
+                &request.tab_id,
+                &request.source_surface_id,
+                &request.surface_id,
+            ) {
+                let _ = reply.send(Err(terminal_tab_surface_error(error)));
+                return;
+            }
+            let _ = reply.send(Ok(serde_json::json!({
+                "workspace_id": workspace_id.as_str(),
+                "workspace_ref": workspace_ref(&workspace_id),
+                "workspace": {"name": workspace_name.as_str(), "title": workspace_name.as_str()},
+                "tab_id": request.tab_id.as_str(),
+                "source_surface_id": request.source_surface_id.as_str(),
+                "surface_id": request.surface_id.as_str(),
+                "surface_ref": surface_ref(&request.surface_id),
+                "closed": true,
+                "ok": true,
+            })));
         }
         ControlCommand::ListSurfaces { target, reply } => {
             let resolved = {

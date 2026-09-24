@@ -257,6 +257,7 @@ struct TerminalTabInner {
 struct TerminalLeafState {
     leaf_id: String,
     surface_id: String,
+    creator_surface_id: Option<String>,
     cwd: Rc<RefCell<Option<String>>>,
     agent: Rc<RefCell<Option<RestorableAgentState>>>,
     handle: terminal::TerminalHandle,
@@ -288,6 +289,26 @@ impl TerminalSplitNode {
             Self::Split { start, end, .. } => {
                 start.find_leaf(leaf_id).or_else(|| end.find_leaf(leaf_id))
             }
+        }
+    }
+
+    fn find_surface(
+        &self,
+        pane_id: u32,
+        tab_id: &str,
+        surface_hint: &str,
+    ) -> Option<&TerminalLeafState> {
+        match self {
+            Self::Leaf(leaf)
+                if terminal_surface_id(pane_id, tab_id, &leaf.leaf_id)
+                    == normalize_surface_hint(surface_hint) =>
+            {
+                Some(leaf)
+            }
+            Self::Leaf(_) => None,
+            Self::Split { start, end, .. } => start
+                .find_surface(pane_id, tab_id, surface_hint)
+                .or_else(|| end.find_surface(pane_id, tab_id, surface_hint)),
         }
     }
 
@@ -352,11 +373,12 @@ impl TerminalSplitNode {
                 if let Some(cwd) = crate::process_cwd::surface_cwd(&leaf.surface_id) {
                     *leaf.cwd.borrow_mut() = Some(cwd);
                 }
-                layout_state::TerminalTreeState::Leaf(layout_state::TerminalLeafState {
+                layout_state::TerminalTreeState::Leaf(Box::new(layout_state::TerminalLeafState {
                     leaf_id: Some(leaf.leaf_id.clone()),
+                    creator_surface_id: leaf.creator_surface_id.clone(),
                     cwd: leaf.cwd.borrow().clone(),
                     agent: leaf.agent.borrow().clone(),
-                })
+                }))
             }
             Self::Split {
                 orientation,
@@ -384,11 +406,15 @@ pub enum TerminalFocusDirection {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AddSurfaceError {
+pub enum TerminalTabSurfaceError {
     PaneNotFound,
     TabNotFound,
     NotTerminal,
     SourceNotFound,
+    SurfaceNotFound,
+    SurfaceNotOwned,
+    CannotCloseSource,
+    CommandNotWritable,
     UnsupportedLayout,
     LimitReached,
 }
@@ -1628,6 +1654,7 @@ fn create_terminal_leaf(
     TerminalLeafState {
         leaf_id: leaf_id.to_string(),
         surface_id,
+        creator_surface_id: None,
         cwd: term_cwd,
         agent: term_agent,
         handle: term.handle,
@@ -1643,14 +1670,16 @@ fn runtime_terminal_tree_from_layout(
 ) -> TerminalSplitNode {
     match tree {
         layout_state::TerminalTreeState::Leaf(leaf) => {
-            TerminalSplitNode::Leaf(create_terminal_leaf(
+            let mut runtime_leaf = create_terminal_leaf(
                 internals,
                 tab_id,
                 leaf.leaf_id.as_deref().unwrap_or("leaf-0"),
                 working_directory,
                 leaf.cwd.as_deref(),
                 leaf.agent.clone(),
-            ))
+            );
+            runtime_leaf.creator_surface_id = leaf.creator_surface_id.clone();
+            TerminalSplitNode::Leaf(runtime_leaf)
         }
         layout_state::TerminalTreeState::Split(split) => TerminalSplitNode::Split {
             orientation: if split.orientation == layout_state::SplitOrientation::Horizontal {
@@ -1737,39 +1766,42 @@ pub fn split_active_terminal_tab_in_pane(
     )
 }
 
+fn terminal_tab_context(
+    pane_widget: &gtk::Widget,
+    tab_id: &str,
+) -> Result<(Rc<PaneInternals>, TerminalTabState, gtk::Label), TerminalTabSurfaceError> {
+    let internals =
+        find_pane_internals(pane_widget).ok_or(TerminalTabSurfaceError::PaneNotFound)?;
+    let tab_state = internals.tab_state.borrow();
+    let entry = tab_state
+        .tabs
+        .iter()
+        .find(|entry| entry.id == tab_id)
+        .ok_or(TerminalTabSurfaceError::TabNotFound)?;
+    let TabKind::Terminal { state } = &entry.kind else {
+        return Err(TerminalTabSurfaceError::NotTerminal);
+    };
+    let context = (internals.clone(), state.clone(), entry.title_label.clone());
+    drop(tab_state);
+    Ok(context)
+}
+
 pub fn add_surface_to_terminal_tab(
     pane_widget: &gtk::Widget,
     tab_id: &str,
     source_surface_id: &str,
-) -> Result<SurfaceSummary, AddSurfaceError> {
-    let internals = find_pane_internals(pane_widget).ok_or(AddSurfaceError::PaneNotFound)?;
-    let (terminal_tab_state, title_label) = {
-        let tab_state = internals.tab_state.borrow();
-        let entry = tab_state
-            .tabs
-            .iter()
-            .find(|entry| entry.id == tab_id)
-            .ok_or(AddSurfaceError::TabNotFound)?;
-        let TabKind::Terminal { state } = &entry.kind else {
-            return Err(AddSurfaceError::NotTerminal);
-        };
-        (state.clone(), entry.title_label.clone())
-    };
-    let requested = normalize_surface_hint(source_surface_id);
+    cwd: Option<&str>,
+) -> Result<SurfaceSummary, TerminalTabSurfaceError> {
+    let (internals, terminal_tab_state, title_label) = terminal_tab_context(pane_widget, tab_id)?;
     let source_leaf = {
         let tree = terminal_tab_state.inner.tree.borrow();
-        let mut matched = None;
-        tree.for_each_leaf(|leaf| {
-            let current_id = terminal_surface_id(internals.pane_id, tab_id, &leaf.leaf_id);
-            if requested == current_id || requested == leaf.surface_id {
-                matched = Some(leaf.clone());
-            }
-        });
-        matched.ok_or(AddSurfaceError::SourceNotFound)?
+        tree.find_surface(internals.pane_id, tab_id, source_surface_id)
+            .cloned()
+            .ok_or(TerminalTabSurfaceError::SourceNotFound)?
     };
     let leaf_count = terminal_tab_state.leaf_count();
     if leaf_count >= 4 {
-        return Err(AddSurfaceError::LimitReached);
+        return Err(TerminalTabSurfaceError::LimitReached);
     }
 
     {
@@ -1808,18 +1840,22 @@ pub fn add_surface_to_terminal_tab(
             _ => false,
         };
         if !valid {
-            return Err(AddSurfaceError::UnsupportedLayout);
+            return Err(TerminalTabSurfaceError::UnsupportedLayout);
         }
     }
 
-    let new_leaf = create_terminal_leaf(
+    let surface_cwd = cwd
+        .map(str::to_string)
+        .or_else(|| source_leaf.cwd.borrow().clone());
+    let mut new_leaf = create_terminal_leaf(
         &internals,
         tab_id,
         &next_leaf_id(),
-        source_leaf.cwd.borrow().as_deref(),
-        source_leaf.cwd.borrow().as_deref(),
+        surface_cwd.as_deref(),
+        surface_cwd.as_deref(),
         None,
     );
+    new_leaf.creator_surface_id = Some(source_leaf.surface_id.clone());
     let new_surface_id = terminal_surface_id(internals.pane_id, tab_id, &new_leaf.leaf_id);
     {
         let mut tree = terminal_tab_state.inner.tree.borrow_mut();
@@ -1866,6 +1902,64 @@ pub fn add_surface_to_terminal_tab(
         cwd,
         uri: None,
     })
+}
+
+pub fn run_command_in_terminal_tab(
+    pane_widget: &gtk::Widget,
+    tab_id: &str,
+    source_surface_id: &str,
+    surface_id: &str,
+    command: &str,
+) -> Result<(), TerminalTabSurfaceError> {
+    let (internals, terminal_tab_state, _) = terminal_tab_context(pane_widget, tab_id)?;
+    let handle = {
+        let tree = terminal_tab_state.inner.tree.borrow();
+        let source = tree
+            .find_surface(internals.pane_id, tab_id, source_surface_id)
+            .ok_or(TerminalTabSurfaceError::SourceNotFound)?;
+        let target = tree
+            .find_surface(internals.pane_id, tab_id, surface_id)
+            .ok_or(TerminalTabSurfaceError::SurfaceNotFound)?;
+        if target.creator_surface_id.as_deref() != Some(source.surface_id.as_str()) {
+            return Err(TerminalTabSurfaceError::SurfaceNotOwned);
+        }
+        target.handle.clone()
+    };
+    if !handle.send_text(&format!("{command}\n")) {
+        return Err(TerminalTabSurfaceError::CommandNotWritable);
+    }
+    Ok(())
+}
+
+pub fn close_surface_in_terminal_tab(
+    pane_widget: &gtk::Widget,
+    tab_id: &str,
+    source_surface_id: &str,
+    surface_id: &str,
+) -> Result<(), TerminalTabSurfaceError> {
+    let (internals, terminal_tab_state, _) = terminal_tab_context(pane_widget, tab_id)?;
+    let (leaf_id, handle) = {
+        let tree = terminal_tab_state.inner.tree.borrow();
+        let source = tree
+            .find_surface(internals.pane_id, tab_id, source_surface_id)
+            .ok_or(TerminalTabSurfaceError::SourceNotFound)?;
+        let target = tree
+            .find_surface(internals.pane_id, tab_id, surface_id)
+            .ok_or(TerminalTabSurfaceError::SurfaceNotFound)?;
+        if target.leaf_id == source.leaf_id {
+            return Err(TerminalTabSurfaceError::CannotCloseSource);
+        }
+        if target.creator_surface_id.as_deref() != Some(source.surface_id.as_str()) {
+            return Err(TerminalTabSurfaceError::SurfaceNotOwned);
+        }
+        (target.leaf_id.clone(), target.handle.clone())
+    };
+    if !terminal_tab_state.close_leaf(&leaf_id) {
+        return Err(TerminalTabSurfaceError::SurfaceNotFound);
+    }
+    handle.close();
+    (internals.callbacks.on_state_changed)();
+    Ok(())
 }
 
 pub fn focus_active_terminal_in_pane(

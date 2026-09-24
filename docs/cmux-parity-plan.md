@@ -13,7 +13,9 @@ Limux has **two control servers**:
    `system.ping`, `system.identify`, `workspace.{current,list,create,
    select,rename,close}`, `pane.list`, `pane.surfaces`, `surface.list`,
    `pane.create` for terminal self-spawn, `surface.send_text`,
-   `surface.add` for fixed-layout agent terminals, `surface.send_key`,
+   `surface.add` for fixed-layout agent terminals, `surface.run` for commands
+   in caller-created surfaces, `surface.close` for removing those surfaces,
+   `surface.send_key`,
    `surface.read_text`, `surface.health`, and
    `notification.create`. It still does **NOT** support browser commands.
 

@@ -191,6 +191,38 @@ grep -Fq "\"cwd\": \"$CWD_TARGET\"" "$XDG_DATA_HOME/limux/session.json" \
   || { echo "FAIL: terminal cwd was not persisted"; exit 1; }
 echo "stage 1b: OK"
 
+# --- 5. Stage 1c: caller-owned surface lifecycle --------------------------
+echo
+echo "== stage 1c: add, run in, and close a caller-owned surface =="
+CALLER_WORKSPACE_ID="00000000-0000-4000-8000-000000000001"
+CALLER_TAB_ID="terminal-0"
+CALLER_SURFACE_ID="1:terminal-0:leaf-0"
+CALLER_ENV=("LIMUX_WORKSPACE_ID=$CALLER_WORKSPACE_ID" "LIMUX_TAB_ID=$CALLER_TAB_ID" "LIMUX_SURFACE_ID=$CALLER_SURFACE_ID")
+env "${CALLER_ENV[@]}" "$LIMUX_CLI" --json add-surface > "$LOG_DIR/stage1c-add.json"
+CHILD_SURFACE_ID="$(sed -n 's/.*"surface_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$LOG_DIR/stage1c-add.json" | head -1)"
+[ -n "$CHILD_SURFACE_ID" ] || { echo "FAIL: add-surface response missing surface_id"; exit 1; }
+
+RUN_PROOF="$DEMO_DIR/run-surface-proof"
+env "${CALLER_ENV[@]}" "$LIMUX_CLI" run --surface "$CHILD_SURFACE_ID" --cmd "printf run-ok > '$RUN_PROOF'"
+for _ in $(seq 1 50); do
+  [ -f "$RUN_PROOF" ] && break
+  sleep 0.1
+done
+[ -f "$RUN_PROOF" ] && [ "$(cat "$RUN_PROOF")" = "run-ok" ] \
+  || { echo "FAIL: run did not execute in the added surface"; exit 1; }
+
+if env "${CALLER_ENV[@]}" "$LIMUX_CLI" close-surface --surface "$CALLER_SURFACE_ID" >/dev/null 2>&1; then
+  echo "FAIL: close-surface allowed closing the caller source"; exit 1
+fi
+
+env "${CALLER_ENV[@]}" "$LIMUX_CLI" close-surface --surface "$CHILD_SURFACE_ID"
+env "${CALLER_ENV[@]}" "$LIMUX_CLI" --json list-panels --workspace "$CALLER_WORKSPACE_ID" \
+  > "$LOG_DIR/stage1c-panels.json"
+if grep -Fq "$CHILD_SURFACE_ID" "$LOG_DIR/stage1c-panels.json"; then
+  echo "FAIL: closed surface remains in the caller tab"; exit 1
+fi
+echo "stage 1c: OK (add, run, source protection, close)"
+
 # --- 5. Stage 2: live agent-team ------------------------------------------
 echo
 echo "== stage 2: agent-team against live host (--no-launch) =="

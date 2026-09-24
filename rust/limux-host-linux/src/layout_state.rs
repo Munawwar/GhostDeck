@@ -206,7 +206,7 @@ pub enum TabContentState {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TerminalTreeState {
-    Leaf(TerminalLeafState),
+    Leaf(Box<TerminalLeafState>),
     Split(TerminalSplitState),
 }
 
@@ -214,6 +214,8 @@ pub enum TerminalTreeState {
 pub struct TerminalLeafState {
     #[serde(default)]
     pub leaf_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_surface_id: Option<String>,
     #[serde(default)]
     pub cwd: Option<String>,
     #[serde(default)]
@@ -309,11 +311,12 @@ impl TabState {
 
 impl TerminalTreeState {
     pub fn single_leaf(cwd: Option<&str>, agent: Option<RestorableAgentState>) -> Self {
-        Self::Leaf(TerminalLeafState {
+        Self::Leaf(Box::new(TerminalLeafState {
             leaf_id: Some(default_terminal_leaf_id()),
+            creator_surface_id: None,
             cwd: cwd.map(|value| value.to_string()),
             agent,
-        })
+        }))
     }
 
     fn first_leaf_id(&self) -> Option<String> {
@@ -1816,16 +1819,18 @@ mod tests {
                     tree: Some(Box::new(TerminalTreeState::Split(TerminalSplitState {
                         orientation: SplitOrientation::Horizontal,
                         ratio: 0.5,
-                        start: Box::new(TerminalTreeState::Leaf(TerminalLeafState {
+                        start: Box::new(TerminalTreeState::Leaf(Box::new(TerminalLeafState {
                             leaf_id: None,
+                            creator_surface_id: None,
                             cwd: Some("/tmp/project-a".to_string()),
                             agent: None,
-                        })),
-                        end: Box::new(TerminalTreeState::Leaf(TerminalLeafState {
+                        }))),
+                        end: Box::new(TerminalTreeState::Leaf(Box::new(TerminalLeafState {
                             leaf_id: Some("leaf-0".to_string()),
+                            creator_surface_id: None,
                             cwd: Some("/tmp/project-b".to_string()),
                             agent: None,
-                        })),
+                        }))),
                     }))),
                     active_leaf_id: Some("leaf-0".to_string()),
                 },
@@ -1905,16 +1910,18 @@ mod tests {
                     tree: Some(Box::new(TerminalTreeState::Split(TerminalSplitState {
                         orientation: SplitOrientation::Horizontal,
                         ratio: 0.5,
-                        start: Box::new(TerminalTreeState::Leaf(TerminalLeafState {
+                        start: Box::new(TerminalTreeState::Leaf(Box::new(TerminalLeafState {
                             leaf_id: Some("leaf-a".to_string()),
+                            creator_surface_id: None,
                             cwd: Some("/tmp/project-a".to_string()),
                             agent: None,
-                        })),
-                        end: Box::new(TerminalTreeState::Leaf(TerminalLeafState {
+                        }))),
+                        end: Box::new(TerminalTreeState::Leaf(Box::new(TerminalLeafState {
                             leaf_id: Some("leaf-b".to_string()),
+                            creator_surface_id: None,
                             cwd: Some("/tmp/project-b".to_string()),
                             agent: None,
-                        })),
+                        }))),
                     }))),
                     active_leaf_id: Some("leaf-b".to_string()),
                 },
