@@ -38,7 +38,7 @@ jobs:
           fi
 
       - name: Install Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: 0.15.2
 
@@ -71,6 +71,7 @@ jobs:
         run: |
           BLUEPRINT_VERSION=v0.20.4
           git clone --depth 1 --branch "${BLUEPRINT_VERSION}" https://github.com/GNOME/blueprint-compiler.git /tmp/blueprint-compiler
+          test "$(git -C /tmp/blueprint-compiler rev-parse HEAD)" = "31b62c24a72c1670d2d93dcdf2d130f1ae12778e"
           meson setup /tmp/blueprint-compiler/_build /tmp/blueprint-compiler --prefix /tmp/blueprint-prefix
           meson install -C /tmp/blueprint-compiler/_build
           echo "/tmp/blueprint-prefix/bin" >> "$GITHUB_PATH"
@@ -87,9 +88,10 @@ jobs:
 
       - name: Install appimagetool
         run: |
-          curl -L \
+          curl -fsSL --retry 3 \
             https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage \
             -o /tmp/appimagetool
+          echo "b90f4a8b18967545fda78a445b27680a1642f1ef9488ced28b65398f2be7add2  /tmp/appimagetool" | sha256sum --check
           chmod +x /tmp/appimagetool
 
       - name: Build Linux packages
@@ -123,7 +125,7 @@ jobs:
           path: dist
 
       - name: Upload packages to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: v${{ needs.packages.outputs.version }}
           name: GhostDeck v${{ needs.packages.outputs.version }}
