@@ -6,13 +6,11 @@ A GPU-accelerated terminal workspace manager for Linux, powered by Ghostty's ren
 
 ## Features
 
-- **GPU-rendered terminals** via embedded Ghostty (OpenGL)
-- **Workspaces** with folder-based naming, persistence across restarts, and sidebar management
-- **Ghostty surface splits** (horizontal/vertical) with keyboard navigation
-- **Tabbed terminals** within each workspace
-- **Right-click context menu** with copy, paste, split, clear
-- **Drag-and-drop** workspace reordering with favorites; terminal tabs can be pinned
-- **Animated sidebar** collapse/expand
+- **Ghostty:** the same GPU-rendered Ghostty you love.
+- **Workspaces, tabs, and splits:** all with keyboard navigation.
+- **OS notification hooks for agents:** so you don't miss updates when an AI agent completes a task.
+- **Restore layout:** remembers workspaces, tabs, and splits when you close GhostDeck, then restores them on startup.
+- **Agent-created surfaces:** skill and CLI support for agents to create terminal surfaces, run commands, and close them.
 
 ## Install
 
