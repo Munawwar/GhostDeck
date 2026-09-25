@@ -216,6 +216,9 @@ struct TerminalTabInner {
     focus_after_rebuild: Cell<bool>,
     swap_source: RefCell<Option<String>>,
     swap_buttons: RefCell<Vec<(String, gtk::Button)>>,
+    active_resize_split: Cell<usize>,
+    leaf_overlays: RefCell<std::collections::HashMap<String, gtk::Overlay>>,
+    resize_revealers: RefCell<Vec<gtk::Revealer>>,
     on_state_changed: RefCell<Option<std::rc::Weak<PaneCallbacks>>>,
 }
 
@@ -400,6 +403,9 @@ impl TerminalTabState {
                 focus_after_rebuild: Cell::new(false),
                 swap_source: RefCell::new(None),
                 swap_buttons: RefCell::new(Vec::new()),
+                active_resize_split: Cell::new(0),
+                leaf_overlays: RefCell::new(std::collections::HashMap::new()),
+                resize_revealers: RefCell::new(Vec::new()),
                 on_state_changed: RefCell::new(None),
             }),
         };
@@ -407,6 +413,21 @@ impl TerminalTabState {
             &state.inner.tree.borrow(),
             &state,
         ));
+        let release = gtk::EventControllerLegacy::new();
+        release.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak = Rc::downgrade(&state.inner);
+        release.connect_event(move |_, event| {
+            if matches!(
+                event.event_type(),
+                gtk::gdk::EventType::ButtonRelease | gtk::gdk::EventType::GrabBroken
+            ) {
+                if let Some(inner) = weak.upgrade() {
+                    inner.active_resize_split.set(0);
+                }
+            }
+            glib::Propagation::Proceed
+        });
+        state.inner.root.add_controller(release);
         let key_controller = gtk::EventControllerKey::new();
         key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
         let weak = Rc::downgrade(&state.inner);
@@ -650,6 +671,9 @@ impl TerminalTabState {
     fn trigger_rebuild(&self, focus_after_rebuild: bool) {
         self.cancel_swap();
         self.inner.swap_buttons.borrow_mut().clear();
+        self.inner.active_resize_split.set(0);
+        self.inner.leaf_overlays.borrow_mut().clear();
+        self.inner.resize_revealers.borrow_mut().clear();
         self.inner.focus_after_rebuild.set(focus_after_rebuild);
         if let Some(source) = self.inner.rebuild_source.borrow_mut().take() {
             source.remove();
@@ -739,6 +763,11 @@ fn build_terminal_split_widget_tree(
                 .borrow_mut()
                 .push((leaf.leaf_id.clone(), button.clone()));
             overlay.add_overlay(&button);
+            state
+                .inner
+                .leaf_overlays
+                .borrow_mut()
+                .insert(leaf.leaf_id.clone(), overlay.clone());
             overlay.upcast()
         }
         TerminalSplitNode::Split {
@@ -760,9 +789,26 @@ fn build_terminal_split_widget_tree(
             paned.set_resize_start_child(true);
             paned.set_resize_end_child(true);
 
-            let resize_region = |child: gtk::Widget| {
-                let overlay = gtk::Overlay::builder().hexpand(true).vexpand(true).build();
-                overlay.set_child(Some(&child));
+            let start_widget = build_terminal_split_widget_tree(start, state);
+            let end_widget = build_terminal_split_widget_tree(end, state);
+            paned.set_start_child(Some(&start_widget));
+            paned.set_end_child(Some(&end_widget));
+
+            let mut trailing = start.as_ref();
+            while let TerminalSplitNode::Split { end, .. } = trailing {
+                trailing = end;
+            }
+            let TerminalSplitNode::Leaf(start_leaf) = trailing else {
+                unreachable!()
+            };
+            let resize_label = |leaf_id: &str| {
+                let overlay = state
+                    .inner
+                    .leaf_overlays
+                    .borrow()
+                    .get(leaf_id)
+                    .cloned()
+                    .expect("split leaf overlay exists");
                 let label = gtk::Label::new(None);
                 label.add_css_class("limux-resize-share");
                 label.set_halign(gtk::Align::Center);
@@ -778,12 +824,39 @@ fn build_terminal_split_widget_tree(
                 overlay.add_overlay(&revealer);
                 (overlay, label, revealer)
             };
-            let (start_region, start_label, start_revealer) =
-                resize_region(build_terminal_split_widget_tree(start, state));
-            let (end_region, end_label, end_revealer) =
-                resize_region(build_terminal_split_widget_tree(end, state));
-            paned.set_start_child(Some(&start_region));
-            paned.set_end_child(Some(&end_region));
+            let (start_leaf, start_label, start_revealer) = resize_label(&start_leaf.leaf_id);
+            let (end_leaf, end_label, end_revealer) = resize_label(&end.first_leaf().leaf_id);
+            state
+                .inner
+                .resize_revealers
+                .borrow_mut()
+                .extend([start_revealer.clone(), end_revealer.clone()]);
+
+            let split_id = paned.as_ptr() as usize;
+            let click = gtk::GestureClick::new();
+            click.set_button(1);
+            click.set_propagation_phase(gtk::PropagationPhase::Capture);
+            let paned_for_press = paned.clone();
+            let resize_owner = Rc::downgrade(&state.inner);
+            click.connect_pressed(move |_, _, x, y| {
+                let position = paned_for_press.position() as f64;
+                let coordinate = if split_orientation == gtk::Orientation::Horizontal {
+                    x
+                } else {
+                    y
+                };
+                if (coordinate - position).abs() > 16.0 {
+                    return;
+                }
+                if let Some(inner) = resize_owner.upgrade() {
+                    inner.active_resize_split.set(split_id);
+                    for revealer in inner.resize_revealers.borrow().iter() {
+                        revealer.set_transition_duration(0);
+                        revealer.set_reveal_child(false);
+                    }
+                }
+            });
+            paned.add_controller(click);
 
             // Ignore early position-notify churn until the first restored ratio
             // has actually been applied with a real allocation.
@@ -792,9 +865,17 @@ fn build_terminal_split_widget_tree(
             let orientation_for_notify = *orientation;
             let applying_for_notify = applying.clone();
             let tab_root = state.inner.root.downgrade();
+            let resize_owner = Rc::downgrade(&state.inner);
             let hide_source = Rc::new(RefCell::new(None::<glib::SourceId>));
             paned.connect_position_notify(move |paned| {
                 if applying_for_notify.get() {
+                    return;
+                }
+                let Some(inner) = resize_owner.upgrade() else {
+                    return;
+                };
+                let active_split = inner.active_resize_split.get();
+                if active_split != 0 && active_split != split_id {
                     return;
                 }
                 let Some(tab_root) = tab_root.upgrade() else {
@@ -810,6 +891,10 @@ fn build_terminal_split_widget_tree(
                 *shared_ratio.borrow_mut() =
                     layout_state::snapshot_split_ratio(paned.position(), size, Some(stored_ratio));
 
+                if active_split != split_id {
+                    return;
+                }
+
                 let (total, glyph, axis) = if orientation_for_notify == gtk::Orientation::Horizontal
                 {
                     (tab_root.allocated_width(), "↔", "width")
@@ -819,20 +904,20 @@ fn build_terminal_split_widget_tree(
                 if total <= 0 {
                     return;
                 }
-                let dimension = |region: &gtk::Overlay| {
+                let dimension = |leaf: &gtk::Overlay| {
                     if orientation_for_notify == gtk::Orientation::Horizontal {
-                        region.allocated_width()
+                        leaf.allocated_width()
                     } else {
-                        region.allocated_height()
+                        leaf.allocated_height()
                     }
                 };
                 start_label.set_label(&format!(
                     "{glyph} {}% {axis}",
-                    (dimension(&start_region) as f64 * 100.0 / total as f64).round()
+                    (dimension(&start_leaf) as f64 * 100.0 / total as f64).round()
                 ));
                 end_label.set_label(&format!(
                     "{glyph} {}% {axis}",
-                    (dimension(&end_region) as f64 * 100.0 / total as f64).round()
+                    (dimension(&end_leaf) as f64 * 100.0 / total as f64).round()
                 ));
                 start_revealer.set_transition_duration(0);
                 end_revealer.set_transition_duration(0);
