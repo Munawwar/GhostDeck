@@ -770,8 +770,12 @@ fn request_session_save(state: &State) {
 }
 
 fn save_session_now(state: &State) {
-    let session = snapshot_session_state(state);
-    if let Err(err) = layout_state::save_session_atomic(&session) {
+    let session = snapshot_session_state(state, None);
+    save_session_state(&session);
+}
+
+fn save_session_state(session: &AppSessionState) {
+    if let Err(err) = layout_state::save_session_atomic(session) {
         eprintln!("ghostdeck: failed to save session state: {err}");
     }
 }
@@ -805,7 +809,8 @@ fn apply_loaded_session(state: &State, mut loaded: LoadedSession) {
     suspend_persistence(state, false);
 
     if restored_any || matches!(loaded.source, layout_state::SessionLoadSource::Legacy) {
-        save_session_now(state);
+        let session = snapshot_session_state(state, Some(loaded.state.window.clone()));
+        save_session_state(&session);
     }
 }
 
@@ -856,7 +861,10 @@ fn apply_top_bar_state_immediately(state: &State, visible: bool) {
     sync_top_bar_visibility(state);
 }
 
-fn snapshot_session_state(state: &State) -> AppSessionState {
+fn snapshot_session_state(
+    state: &State,
+    window_state: Option<layout_state::WindowState>,
+) -> AppSessionState {
     let s = state.borrow();
     let restorable_agents = layout_state::RestorableAgentIndex::load();
     let sidebar_visible = sidebar_is_visible(&s);
@@ -893,6 +901,15 @@ fn snapshot_session_state(state: &State) -> AppSessionState {
             }
         })
         .collect();
+    let window = window_state.unwrap_or_else(|| {
+        let (width, height) = s.window.default_size();
+        layout_state::WindowState {
+            width,
+            height,
+            maximized: s.window.is_maximized(),
+            fullscreened: s.window.is_fullscreen(),
+        }
+    });
 
     layout_state::normalize_session(AppSessionState {
         version: layout_state::SESSION_VERSION,
@@ -902,6 +919,7 @@ fn snapshot_session_state(state: &State) -> AppSessionState {
             visible: sidebar_visible,
             width: sidebar_width,
         },
+        window,
         workspaces,
     })
 }
@@ -1240,6 +1258,7 @@ row:selected .ghostdeck-ws-path {
 // ---------------------------------------------------------------------------
 
 pub fn build_window(app: &adw::Application) {
+    let loaded_session = layout_state::load_session();
     let display = gtk::gdk::Display::default().expect("display");
     let gnome_interface_settings = gnome_interface_settings();
     let portal_color_scheme_preference = Rc::new(Cell::new(PortalColorSchemePreference::Unknown));
@@ -1310,8 +1329,12 @@ pub fn build_window(app: &adw::Application) {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title(title)
-        .default_width(1400)
-        .default_height(900)
+        .default_width(loaded_session.state.window.width)
+        .default_height(loaded_session.state.window.height)
+        .maximized(
+            loaded_session.state.window.maximized && !loaded_session.state.window.fullscreened,
+        )
+        .fullscreened(loaded_session.state.window.fullscreened)
         .build();
     apply_window_background_class(&window, background_opacity);
 
@@ -1622,7 +1645,7 @@ pub fn build_window(app: &adw::Application) {
         });
     }
 
-    apply_loaded_session(&state, layout_state::load_session());
+    apply_loaded_session(&state, loaded_session);
 
     crate::control_bridge::start(dispatch_control_command);
 

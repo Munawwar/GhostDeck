@@ -9,6 +9,8 @@ pub const PERSISTENCE_DIR_NAME: &str = "ghostdeck";
 pub const SESSION_FILE_NAME: &str = "session.json";
 pub const LEGACY_WORKSPACES_FILE_NAME: &str = "workspaces.json";
 pub const DEFAULT_SIDEBAR_WIDTH: i32 = 220;
+pub const DEFAULT_WINDOW_WIDTH: i32 = 1400;
+pub const DEFAULT_WINDOW_HEIGHT: i32 = 900;
 pub const DEFAULT_SPLIT_RATIO: f64 = 0.5;
 const MIN_SPLIT_RATIO: f64 = 0.02;
 const MAX_SPLIT_RATIO: f64 = 0.98;
@@ -45,7 +47,18 @@ pub struct AppSessionState {
     #[serde(default)]
     pub sidebar: SidebarState,
     #[serde(default)]
+    pub window: WindowState,
+    #[serde(default)]
     pub workspaces: Vec<WorkspaceState>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct WindowState {
+    pub width: i32,
+    pub height: i32,
+    pub maximized: bool,
+    pub fullscreened: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -258,7 +271,19 @@ impl Default for AppSessionState {
             active_workspace_index: 0,
             top_bar_visible: default_top_bar_visible(),
             sidebar: SidebarState::default(),
+            window: WindowState::default(),
             workspaces: Vec::new(),
+        }
+    }
+}
+
+impl Default for WindowState {
+    fn default() -> Self {
+        Self {
+            width: DEFAULT_WINDOW_WIDTH,
+            height: DEFAULT_WINDOW_HEIGHT,
+            maximized: false,
+            fullscreened: false,
         }
     }
 }
@@ -495,6 +520,12 @@ pub fn split_position_from_ratio(ratio: f64, total_size: i32) -> i32 {
 pub fn normalize_session(mut state: AppSessionState) -> AppSessionState {
     state.version = SESSION_VERSION;
     state.sidebar.width = state.sidebar.width.max(DEFAULT_SIDEBAR_WIDTH);
+    if state.window.width <= 0 {
+        state.window.width = DEFAULT_WINDOW_WIDTH;
+    }
+    if state.window.height <= 0 {
+        state.window.height = DEFAULT_WINDOW_HEIGHT;
+    }
     if state.workspaces.is_empty() {
         state.active_workspace_index = 0;
     } else if state.active_workspace_index >= state.workspaces.len() {
@@ -1380,6 +1411,12 @@ mod tests {
     fn save_session_atomic_writes_canonical_file() {
         let dir = tempdir().expect("tempdir");
         let state = AppSessionState {
+            window: WindowState {
+                width: 1280,
+                height: 720,
+                maximized: true,
+                fullscreened: false,
+            },
             workspaces: vec![WorkspaceState {
                 id: Some("22222222-2222-4222-8222-222222222222".to_string()),
                 name: "workspace".to_string(),
@@ -1402,6 +1439,7 @@ mod tests {
             Some("22222222-2222-4222-8222-222222222222")
         );
         assert_eq!(decoded.workspaces[0].name, "workspace");
+        assert_eq!(decoded.window, state.window);
     }
 
     #[test]
@@ -1425,6 +1463,7 @@ mod tests {
 
         let decoded: AppSessionState = serde_json::from_str(raw).expect("decode legacy shape");
         assert_eq!(decoded.workspaces[0].id, None);
+        assert_eq!(decoded.window, WindowState::default());
     }
 
     #[test]
