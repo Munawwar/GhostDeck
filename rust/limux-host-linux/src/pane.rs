@@ -212,13 +212,14 @@ struct TerminalTabInner {
     tree: RefCell<TerminalSplitNode>,
     active_leaf_id: RefCell<String>,
     root: gtk::Box,
+    resize_overlay: gtk::Overlay,
     rebuild_source: RefCell<Option<glib::SourceId>>,
     focus_after_rebuild: Cell<bool>,
     swap_source: RefCell<Option<String>>,
     swap_buttons: RefCell<Vec<(String, gtk::Button)>>,
     active_resize_split: Cell<usize>,
-    leaf_overlays: RefCell<std::collections::HashMap<String, gtk::Overlay>>,
     resize_revealers: RefCell<Vec<gtk::Revealer>>,
+    resize_layer: gtk::Fixed,
     on_state_changed: RefCell<Option<std::rc::Weak<PaneCallbacks>>>,
 }
 
@@ -393,26 +394,39 @@ impl TerminalTabState {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.set_hexpand(true);
         root.set_vexpand(true);
+        let resize_layer = gtk::Fixed::new();
+        resize_layer.set_hexpand(true);
+        resize_layer.set_vexpand(true);
+        resize_layer.set_halign(gtk::Align::Fill);
+        resize_layer.set_valign(gtk::Align::Fill);
+        resize_layer.set_can_target(false);
+        let resize_overlay = gtk::Overlay::new();
+        resize_overlay.add_overlay(&resize_layer);
         let active_leaf_id = active_leaf_id.unwrap_or_else(|| tree.first_leaf().leaf_id.clone());
         let state = Self {
             inner: Rc::new(TerminalTabInner {
                 tree: RefCell::new(tree),
                 active_leaf_id: RefCell::new(active_leaf_id),
                 root,
+                resize_overlay,
                 rebuild_source: RefCell::new(None),
                 focus_after_rebuild: Cell::new(false),
                 swap_source: RefCell::new(None),
                 swap_buttons: RefCell::new(Vec::new()),
                 active_resize_split: Cell::new(0),
-                leaf_overlays: RefCell::new(std::collections::HashMap::new()),
                 resize_revealers: RefCell::new(Vec::new()),
+                resize_layer,
                 on_state_changed: RefCell::new(None),
             }),
         };
-        state.inner.root.append(&build_terminal_split_widget_tree(
-            &state.inner.tree.borrow(),
-            &state,
-        ));
+        state
+            .inner
+            .resize_overlay
+            .set_child(Some(&build_terminal_split_widget_tree(
+                &state.inner.tree.borrow(),
+                &state,
+            )));
+        state.inner.root.append(&state.inner.resize_overlay);
         let release = gtk::EventControllerLegacy::new();
         release.set_propagation_phase(gtk::PropagationPhase::Capture);
         let weak = Rc::downgrade(&state.inner);
@@ -672,15 +686,15 @@ impl TerminalTabState {
         self.cancel_swap();
         self.inner.swap_buttons.borrow_mut().clear();
         self.inner.active_resize_split.set(0);
-        self.inner.leaf_overlays.borrow_mut().clear();
         self.inner.resize_revealers.borrow_mut().clear();
+        while let Some(child) = self.inner.resize_layer.first_child() {
+            self.inner.resize_layer.remove(&child);
+        }
         self.inner.focus_after_rebuild.set(focus_after_rebuild);
         if let Some(source) = self.inner.rebuild_source.borrow_mut().take() {
             source.remove();
         }
-        while let Some(child) = self.inner.root.first_child() {
-            self.inner.root.remove(&child);
-        }
+        self.inner.resize_overlay.set_child(gtk::Widget::NONE);
         self.schedule_rebuild();
     }
 
@@ -705,8 +719,8 @@ impl TerminalTabState {
             return;
         }
         self.inner
-            .root
-            .append(&build_terminal_split_widget_tree(&tree, self));
+            .resize_overlay
+            .set_child(Some(&build_terminal_split_widget_tree(&tree, self)));
         drop(tree);
         self.refresh_display();
         if self.inner.focus_after_rebuild.replace(false) {
@@ -763,11 +777,6 @@ fn build_terminal_split_widget_tree(
                 .borrow_mut()
                 .push((leaf.leaf_id.clone(), button.clone()));
             overlay.add_overlay(&button);
-            state
-                .inner
-                .leaf_overlays
-                .borrow_mut()
-                .insert(leaf.leaf_id.clone(), overlay.clone());
             overlay.upcast()
         }
         TerminalSplitNode::Split {
@@ -789,43 +798,46 @@ fn build_terminal_split_widget_tree(
             paned.set_resize_start_child(true);
             paned.set_resize_end_child(true);
 
-            let start_widget = build_terminal_split_widget_tree(start, state);
-            let end_widget = build_terminal_split_widget_tree(end, state);
-            paned.set_start_child(Some(&start_widget));
-            paned.set_end_child(Some(&end_widget));
-
-            let mut trailing = start.as_ref();
-            while let TerminalSplitNode::Split { end, .. } = trailing {
-                trailing = end;
-            }
-            let TerminalSplitNode::Leaf(start_leaf) = trailing else {
-                unreachable!()
-            };
-            let resize_label = |leaf_id: &str| {
-                let overlay = state
-                    .inner
-                    .leaf_overlays
-                    .borrow()
-                    .get(leaf_id)
-                    .cloned()
-                    .expect("split leaf overlay exists");
+            let resize_region = || {
+                let guide = gtk::Box::new(split_orientation, 0);
+                guide.add_css_class(if split_orientation == gtk::Orientation::Horizontal {
+                    "limux-resize-guide-width"
+                } else {
+                    "limux-resize-guide-height"
+                });
+                if split_orientation == gtk::Orientation::Horizontal {
+                    guide.set_halign(gtk::Align::Fill);
+                    guide.set_valign(gtk::Align::Center);
+                    guide.set_hexpand(true);
+                    guide.set_margin_start(14);
+                    guide.set_margin_end(14);
+                } else {
+                    guide.set_halign(gtk::Align::Center);
+                    guide.set_valign(gtk::Align::Fill);
+                    guide.set_vexpand(true);
+                    guide.set_margin_top(14);
+                    guide.set_margin_bottom(14);
+                }
                 let label = gtk::Label::new(None);
                 label.add_css_class("limux-resize-share");
                 label.set_halign(gtk::Align::Center);
                 label.set_valign(gtk::Align::Center);
                 label.set_can_target(false);
+                let measurement = gtk::Overlay::builder().hexpand(true).vexpand(true).build();
+                measurement.set_child(Some(&guide));
+                measurement.add_overlay(&label);
                 let revealer = gtk::Revealer::builder()
                     .transition_type(gtk::RevealerTransitionType::Crossfade)
-                    .halign(gtk::Align::Center)
-                    .valign(gtk::Align::Center)
                     .build();
                 revealer.set_can_target(false);
-                revealer.set_child(Some(&label));
-                overlay.add_overlay(&revealer);
-                (overlay, label, revealer)
+                revealer.set_child(Some(&measurement));
+                state.inner.resize_layer.put(&revealer, 0.0, 0.0);
+                (label, revealer)
             };
-            let (start_leaf, start_label, start_revealer) = resize_label(&start_leaf.leaf_id);
-            let (end_leaf, end_label, end_revealer) = resize_label(&end.first_leaf().leaf_id);
+            let (start_label, start_revealer) = resize_region();
+            let (end_label, end_revealer) = resize_region();
+            paned.set_start_child(Some(&build_terminal_split_widget_tree(start, state)));
+            paned.set_end_child(Some(&build_terminal_split_widget_tree(end, state)));
             state
                 .inner
                 .resize_revealers
@@ -865,6 +877,7 @@ fn build_terminal_split_widget_tree(
             let orientation_for_notify = *orientation;
             let applying_for_notify = applying.clone();
             let tab_root = state.inner.root.downgrade();
+            let resize_layer = state.inner.resize_layer.downgrade();
             let resize_owner = Rc::downgrade(&state.inner);
             let hide_source = Rc::new(RefCell::new(None::<glib::SourceId>));
             paned.connect_position_notify(move |paned| {
@@ -879,6 +892,9 @@ fn build_terminal_split_widget_tree(
                     return;
                 }
                 let Some(tab_root) = tab_root.upgrade() else {
+                    return;
+                };
+                let Some(resize_layer) = resize_layer.upgrade() else {
                     return;
                 };
                 let allocation = paned.allocation();
@@ -904,20 +920,42 @@ fn build_terminal_split_widget_tree(
                 if total <= 0 {
                     return;
                 }
-                let dimension = |leaf: &gtk::Overlay| {
-                    if orientation_for_notify == gtk::Orientation::Horizontal {
-                        leaf.allocated_width()
-                    } else {
-                        leaf.allocated_height()
-                    }
+                let Some(bounds) = paned.compute_bounds(&tab_root) else {
+                    return;
                 };
+                let (x, y, width, height) = (
+                    bounds.x() as i32,
+                    bounds.y() as i32,
+                    bounds.width() as i32,
+                    bounds.height() as i32,
+                );
+                let divider = if orientation_for_notify == gtk::Orientation::Horizontal {
+                    (x + paned.position()).clamp(0, total)
+                } else {
+                    (y + paned.position()).clamp(0, total)
+                };
+                let (start_rect, end_rect) =
+                    if orientation_for_notify == gtk::Orientation::Horizontal {
+                        (
+                            (0, y, divider, height),
+                            (divider, y, total - divider, height),
+                        )
+                    } else {
+                        ((x, 0, width, divider), (x, divider, width, total - divider))
+                    };
+                for (revealer, (x, y, width, height)) in
+                    [(&start_revealer, start_rect), (&end_revealer, end_rect)]
+                {
+                    resize_layer.move_(revealer, x as f64, y as f64);
+                    revealer.set_size_request(width.max(1), height.max(1));
+                }
                 start_label.set_label(&format!(
                     "{glyph} {}% {axis}",
-                    (dimension(&start_leaf) as f64 * 100.0 / total as f64).round()
+                    (divider as f64 * 100.0 / total as f64).round()
                 ));
                 end_label.set_label(&format!(
                     "{glyph} {}% {axis}",
-                    (dimension(&end_leaf) as f64 * 100.0 / total as f64).round()
+                    100.0 - (divider as f64 * 100.0 / total as f64).round()
                 ));
                 start_revealer.set_transition_duration(0);
                 end_revealer.set_transition_duration(0);
@@ -1106,6 +1144,16 @@ pub const PANE_CSS: &str = r#"
     padding: 6px 10px;
     font-size: 16px;
     font-weight: 700;
+}
+.limux-resize-guide-width {
+    min-height: 7px;
+    border: 1px solid @accent_bg_color;
+    border-bottom: none;
+}
+.limux-resize-guide-height {
+    min-width: 7px;
+    border: 1px solid @accent_bg_color;
+    border-right: none;
 }
 .limux-swap-target {
     background: alpha(@window_bg_color, 0.7);
