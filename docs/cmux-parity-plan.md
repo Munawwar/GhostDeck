@@ -2,13 +2,13 @@
 
 ## Architecture discovery
 
-Limux has **two control servers**:
+GhostDeck has **two control servers**:
 
-1. **Standalone `limux-control-server` binary** — uses `limux_core::Dispatcher`
+1. **Standalone `ghostdeck-control-server` binary** — uses `ghostdeck_core::Dispatcher`
    + `ControlState` and supports the **full** command vocabulary. Used for
    tests and for CLI calls when the GUI isn't running.
 
-2. **Embedded bridge inside `limux-host-linux`** — `control_bridge.rs` only
+2. **Embedded bridge inside `ghostdeck-host-linux`** — `control_bridge.rs` only
    routes a narrow subset of methods to the GTK main loop. Supports
    `system.ping`, `system.identify`, `workspace.{current,list,create,
    select,rename,close}`, `pane.list`, `pane.surfaces`, `surface.list`,
@@ -52,27 +52,27 @@ Remaining proxy work is for broader dispatcher parity.
   UUIDs. This is what made phase 5 practical.
 - `pane.list`, `pane.surfaces`, and `surface.list` now route on the live
   GTK bridge, so agents can discover peer panes/surfaces in a running
-  Limux window.
+  GhostDeck window.
 - `surface.send_key` now routes to the exact terminal surface when provided,
   so agents can send deterministic key-level control such as Ctrl-C.
 - `surface.health` and `surface.read_text` now route on the live GTK bridge,
   so agents can inspect peer terminal health and visible screen text.
 - `surface.add` adds up to three terminal surfaces to the caller's exact tab.
-  Limux keeps the caller on the left and owns the fixed vertical stack on the
+  GhostDeck keeps the caller on the left and owns the fixed vertical stack on the
   right; the caller cannot provide a direction or target.
 
-### Phase 3 — `limux notify` + GUI toast/sidebar integration ✅
+### Phase 3 — `ghostdeck notify` + GUI toast/sidebar integration ✅
 `ControlCommand::CreateNotification` wired through the bridge into
 `mark_workspace_unread_with_message` + libadwaita toast.
-CLI: `limux notify [--workspace <id|name>] [--subtitle <…>] [--body <…>] <title>`.
+CLI: `ghostdeck notify [--workspace <id|name>] [--subtitle <…>] [--body <…>] <title>`.
 
-### Phase 4 — `limux claude-hook` / `opencode-hook` / `gemini-hook` ✅
+### Phase 4 — `ghostdeck claude-hook` / `opencode-hook` / `gemini-hook` ✅
 Reads hook JSON from stdin, translates the agent-specific event vocabulary
 into a `notify` (and, where useful, an inline `send`). Drop-in for
 `~/.claude/settings.json` hooks blocks.
 
-### Phase 5 — `limux agent-team` + `AGENTS.md` template ✅
-`limux agent-team [--agents codex,claude[,opencode,gemini]] [--cwd <path>]
+### Phase 5 — `ghostdeck agent-team` + `AGENTS.md` template ✅
+`ghostdeck agent-team [--agents codex,claude[,opencode,gemini]] [--cwd <path>]
 [--no-launch] [--dry-run]`:
 
 - Calls `surface.add` for each peer (up to three) in the caller's tab and
@@ -81,12 +81,12 @@ into a `notify` (and, where useful, an inline `send`). Drop-in for
 - Writes `AGENTS.md` in the shared cwd documenting:
     - the peers table (agent → surface ID → launch command),
     - the `<agent-msg from="…" to="…" id="…" reply-to="…" ts="…">` envelope,
-    - the exact `limux send` invocation for sending and replying,
-    - the `limux notify` escalation path for human input,
-    - the `LIMUX_*` env contract every spawned terminal inherits,
+    - the exact `ghostdeck send` invocation for sending and replying,
+    - the `ghostdeck notify` escalation path for human input,
+    - the `GHOSTDECK_*` env contract every spawned terminal inherits,
     - editable Policies section (timeouts, size limits, destructive-action gating).
 
-### Phase 6 — (deferred) `limux progress`, `limux log`, `limux markdown`
+### Phase 6 — (deferred) `ghostdeck progress`, `ghostdeck log`, `ghostdeck markdown`
 Nice polish, not blockers.
 
 ## Why phase 2 first

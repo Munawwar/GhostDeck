@@ -1,31 +1,31 @@
 # Maintainer: Anton Barchukov <anton@barchukov.com>
-pkgname=limux-bin
+pkgname=ghostdeck-bin
 pkgver=@@VERSION@@
 pkgrel=1
 pkgdesc="GPU-accelerated terminal workspace manager for Linux, powered by Ghostty's rendering engine (cmux port)"
 arch=('x86_64')
-url="https://github.com/am-will/limux"
+url="https://github.com/Munawwar/GhostDeck"
 license=('MIT')
 depends=('gtk4' 'libadwaita')
-provides=('limux')
-conflicts=('limux')
+provides=('ghostdeck')
+conflicts=('ghostdeck')
 options=(!debug !strip)
-source=("limux-${pkgver}.tar.gz::https://github.com/am-will/limux/releases/download/v${pkgver}/limux-${pkgver}-linux-x86_64.tar.gz")
+source=("ghostdeck-${pkgver}.tar.gz::https://github.com/Munawwar/GhostDeck/releases/download/v${pkgver}/ghostdeck-${pkgver}-linux-x86_64.tar.gz")
 sha256sums=('@@SHA256@@')
 
 package() {
-    cd "limux-${pkgver}-linux-x86_64"
+    cd "ghostdeck-${pkgver}-linux-x86_64"
 
-    install -Dm755 limux "${pkgdir}/usr/bin/limux"
-    install -Dm755 libexec/limux/limux-host "${pkgdir}/usr/libexec/limux/limux-host"
-    install -Dm644 lib/libghostty.so "${pkgdir}/usr/lib/limux/libghostty.so"
+    install -Dm755 ghostdeck "${pkgdir}/usr/bin/ghostdeck"
+    install -Dm755 libexec/ghostdeck/ghostdeck-host "${pkgdir}/usr/libexec/ghostdeck/ghostdeck-host"
+    install -Dm644 lib/libghostty.so "${pkgdir}/usr/lib/ghostdeck/libghostty.so"
 
-    install -Dm644 /dev/stdin "${pkgdir}/etc/ld.so.conf.d/limux.conf" <<< "/usr/lib/limux"
+    install -Dm644 /dev/stdin "${pkgdir}/etc/ld.so.conf.d/ghostdeck.conf" <<< "/usr/lib/ghostdeck"
 
     install -Dm644 share/applications/*.desktop -t "${pkgdir}/usr/share/applications/"
     install -Dm644 share/metainfo/*.xml -t "${pkgdir}/usr/share/metainfo/"
 
     install -dm755 "${pkgdir}/usr/share/icons"
     cp -r share/icons/hicolor "${pkgdir}/usr/share/icons/"
-    cp -r share/limux "${pkgdir}/usr/share/limux"
+    cp -r share/ghostdeck "${pkgdir}/usr/share/ghostdeck"
 }

@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Name=GhostDeck
+Comment=GPU-accelerated terminal workspace manager
+Exec=ghostdeck
+TryExec=ghostdeck
+Icon=ghostdeck
+Terminal=false
+Type=Application
+Categories=Utility;TerminalEmulator;
+Keywords=terminal;multiplexer;ghostty;workspace;
+StartupNotify=true
+StartupWMClass=dev.ghostdeck.linux
+X-GNOME-UsesNotifications=true

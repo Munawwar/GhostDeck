@@ -1,10 +1,10 @@
-# Limux Shortcut Remapping
+# GhostDeck Shortcut Remapping
 
 This document explains how the Linux host shortcut system works and how to test it manually.
 
 ## What It Does
 
-Limux has a host-owned shortcut registry in `rust/limux-host-linux/src/shortcut_config.rs`.
+GhostDeck has a host-owned shortcut registry in `rust/ghostdeck-host-linux/src/shortcut_config.rs`.
 
 That registry is the single source of truth for:
 
@@ -14,37 +14,37 @@ That registry is the single source of truth for:
 - capture-phase host shortcut dispatch
 - visible tooltip text for shortcut-backed UI actions
 
-Ghostty config is not involved. Ghostty still owns terminal behavior once Limux decides not to intercept a key.
+Ghostty config is not involved. Ghostty still owns terminal behavior once GhostDeck decides not to intercept a key.
 
 ## Config File Location
 
-Limux reads shortcuts from:
+GhostDeck reads shortcuts from:
 
 ```text
-~/.config/limux/shortcuts.json
+~/.config/ghostdeck/shortcuts.json
 ```
 
-That path comes from `dirs::config_dir()/limux/shortcuts.json`.
+That path comes from `dirs::config_dir()/ghostdeck/shortcuts.json`.
 
-If the file is missing, Limux uses built-in defaults.
+If the file is missing, GhostDeck uses built-in defaults.
 
-Older Limux builds stored shortcut overrides under the top-level `shortcuts`
-key in `~/.config/limux/config.json`. On startup, if `shortcuts.json` does not
-exist, Limux migrates that legacy `shortcuts` object into `shortcuts.json` and
+Older GhostDeck builds stored shortcut overrides under the top-level `shortcuts`
+key in `~/.config/ghostdeck/config.json`. On startup, if `shortcuts.json` does not
+exist, GhostDeck migrates that legacy `shortcuts` object into `shortcuts.json` and
 leaves `config.json` untouched.
 
 ## Important Runtime Behavior
 
 - Shortcuts are loaded at startup.
-- When you change them through the terminal `Keybinds` editor, Limux writes the config, reloads it, and applies the new bindings immediately in the running app.
-- If you edit `~/.config/limux/shortcuts.json` by hand outside the app, restart Limux to pick up those changes.
-- If the config file is invalid or unreadable, Limux falls back to defaults and prints a warning to stderr.
-- If two active shortcuts resolve to the same binding, Limux rejects the override set and falls back to defaults.
+- When you change them through the terminal `Keybinds` editor, GhostDeck writes the config, reloads it, and applies the new bindings immediately in the running app.
+- If you edit `~/.config/ghostdeck/shortcuts.json` by hand outside the app, restart GhostDeck to pick up those changes.
+- If the config file is invalid or unreadable, GhostDeck falls back to defaults and prints a warning to stderr.
+- If two active shortcuts resolve to the same binding, GhostDeck rejects the override set and falls back to defaults.
 - Unknown shortcut IDs are ignored with a warning.
 - `null` or `""` unbinds a shortcut.
 - Host shortcuts must use `Ctrl`, `Alt`, or `Cmd` as the base modifier unless the shortcut explicitly allows a bare function key, such as the default `F11` fullscreen binding. `Shift` can be added on top of a modified shortcut.
 - Most default shortcuts use `Ctrl`; fullscreen defaults to `F11`.
-- `Cmd` is a logical Limux modifier that matches either Linux `Meta` or Linux `Super` for custom remaps.
+- `Cmd` is a logical GhostDeck modifier that matches either Linux `Meta` or Linux `Super` for custom remaps.
 - App-global shortcuts still fire inside editable widgets, but surface shortcuts bypass editable widgets so native text editing keeps working.
 
 ## Keybinds Editor
@@ -166,9 +166,9 @@ That means a remap changes both the GTK accelerator registration and the capture
 
 ## Pass-Through Behavior
 
-If a key combo does not match a resolved Limux shortcut, Limux does not intercept it and Ghostty receives it.
+If a key combo does not match a resolved GhostDeck shortcut, GhostDeck does not intercept it and Ghostty receives it.
 
-That means terminal-native combos like these should pass through unless you explicitly bind them in Limux:
+That means terminal-native combos like these should pass through unless you explicitly bind them in GhostDeck:
 
 - `Ctrl+C`
 - `Ctrl+L`
@@ -199,16 +199,16 @@ Note:
 From the repo root:
 
 ```bash
-cargo test -p limux-host-linux
-cargo build -p limux-host-linux
-cargo build -p limux-host-linux --no-default-features
+cargo test -p ghostdeck-host-linux
+cargo build -p ghostdeck-host-linux
+cargo build -p ghostdeck-host-linux --no-default-features
 ```
 
 Run the app for manual testing:
 
 ```bash
 LD_LIBRARY_PATH="/home/willr/Applications/cmux-linux/cmux/ghostty/zig-out/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-cargo run -p limux-host-linux --bin limux
+cargo run -p ghostdeck-host-linux --bin ghostdeck
 ```
 
 ## Manual Test Plan
@@ -218,10 +218,10 @@ cargo run -p limux-host-linux --bin limux
 Remove or move the config file out of the way:
 
 ```bash
-trash ~/.config/limux/shortcuts.json
+trash ~/.config/ghostdeck/shortcuts.json
 ```
 
-Launch Limux and verify:
+Launch GhostDeck and verify:
 
 - `Ctrl+M` toggles the sidebar
 - `Ctrl+Shift+M` toggles the top bar
@@ -231,8 +231,8 @@ Launch Limux and verify:
 - `Ctrl+Shift+D` splits down
 - `Ctrl+Page_Down` and `Ctrl+Page_Up` switch workspaces
 - pane button tooltips show the default shortcut suffixes where applicable
-- `Ctrl+Q` quits Limux
-- `Ctrl+Alt+N` opens a second Limux instance
+- `Ctrl+Q` quits GhostDeck
+- `Ctrl+Alt+N` opens a second GhostDeck instance
 - `Ctrl+K` clears terminal scrollback
 - `Ctrl+Shift+0` resets terminal font size
 
@@ -248,7 +248,7 @@ Create:
 }
 ```
 
-Restart Limux and verify:
+Restart GhostDeck and verify:
 
 - `Ctrl+Alt+B` toggles the sidebar
 - `Ctrl+M` no longer toggles the sidebar
@@ -265,11 +265,11 @@ Create:
 }
 ```
 
-Restart Limux and verify:
+Restart GhostDeck and verify:
 
-- `Ctrl+D` no longer triggers split-right in Limux
+- `Ctrl+D` no longer triggers split-right in GhostDeck
 - the split-right button tooltip no longer shows a shortcut suffix
-- in a terminal pane, `Ctrl+D` now reaches the terminal app instead of being intercepted by Limux
+- in a terminal pane, `Ctrl+D` now reaches the terminal app instead of being intercepted by GhostDeck
 
 ### 4. Verify Pane Tooltip Remap
 
@@ -283,7 +283,7 @@ Create:
 }
 ```
 
-Restart Limux and verify:
+Restart GhostDeck and verify:
 
 - the new terminal button tooltip shows `Ctrl+Alt+T`
 - `Ctrl+Alt+T` opens a terminal tab
@@ -302,16 +302,16 @@ Create:
 }
 ```
 
-Restart Limux from a terminal and verify:
+Restart GhostDeck from a terminal and verify:
 
-- Limux prints a warning about duplicate bindings
-- Limux falls back to defaults
+- GhostDeck prints a warning about duplicate bindings
+- GhostDeck falls back to defaults
 - `Ctrl+M` toggles the sidebar
 - `Ctrl+D` still splits right
 
 ### 6. Open The Keybinds Editor
 
-Launch Limux, right-click inside a terminal, and verify:
+Launch GhostDeck, right-click inside a terminal, and verify:
 
 - the terminal context menu contains `Keybinds`
 - clicking `Keybinds` opens the keybind editor popover
@@ -322,19 +322,19 @@ Launch Limux, right-click inside a terminal, and verify:
 
 ### 7. Remap From The Editor
 
-Launch Limux, open terminal `Keybinds`, click the `Split Right` binding, and press `Ctrl+H`.
+Launch GhostDeck, open terminal `Keybinds`, click the `Split Right` binding, and press `Ctrl+H`.
 
 Verify:
 
 - the `Split Right` row updates to `Ctrl+H`
-- `~/.config/limux/shortcuts.json` contains the `split_right` override
-- `Ctrl+H` splits right immediately without restarting Limux
+- `~/.config/ghostdeck/shortcuts.json` contains the `split_right` override
+- `Ctrl+H` splits right immediately without restarting GhostDeck
 - `Ctrl+D` no longer splits right
 - the pane header split-right tooltip now shows `Ctrl+H`
 
 ### 8. Editor Validation
 
-Launch Limux, open terminal `Keybinds`, and try these invalid captures on any row:
+Launch GhostDeck, open terminal `Keybinds`, and try these invalid captures on any row:
 
 - press only `Shift+H`
 - press only `Ctrl`
@@ -361,7 +361,7 @@ Create:
 
 Restart and verify:
 
-- Limux warns that the unknown ID was ignored
+- GhostDeck warns that the unknown ID was ignored
 - `toggle_sidebar` still remaps correctly
 
 ### 10. Invalid JSON Fallback
@@ -372,10 +372,10 @@ Write invalid JSON:
 { this is not valid json
 ```
 
-Restart Limux from a terminal and verify:
+Restart GhostDeck from a terminal and verify:
 
-- Limux prints a warning
-- Limux falls back to defaults
+- GhostDeck prints a warning
+- GhostDeck falls back to defaults
 - default shortcuts work again
 
 ### 11. Cmd Alias Policy
@@ -390,7 +390,7 @@ Create:
 }
 ```
 
-Restart Limux and verify:
+Restart GhostDeck and verify:
 
 - the keybind editor displays `Cmd+T`
 - either the physical `Meta+T` or `Super+T` combination opens a terminal tab
@@ -426,7 +426,7 @@ That covers:
 
 ## Relevant Source Files
 
-- `rust/limux-host-linux/src/shortcut_config.rs`
-- `rust/limux-host-linux/src/main.rs`
-- `rust/limux-host-linux/src/window.rs`
-- `rust/limux-host-linux/src/pane.rs`
+- `rust/ghostdeck-host-linux/src/shortcut_config.rs`
+- `rust/ghostdeck-host-linux/src/main.rs`
+- `rust/ghostdeck-host-linux/src/window.rs`
+- `rust/ghostdeck-host-linux/src/pane.rs`

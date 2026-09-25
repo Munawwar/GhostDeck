@@ -71,7 +71,7 @@ jobs:
 
       - name: Build RPM package
         env:
-          LIMUX_MAX_GLIBC: "2.39"
+          GHOSTDECK_MAX_GLIBC: "2.39"
         run: ./scripts/package.sh "${{ steps.version.outputs.version }}"
 
       - name: Resolve RPM path
@@ -82,7 +82,7 @@ jobs:
           ARCH="$(uname -m)"
           RPM_ARCH="x86_64"
           [ "$ARCH" = "aarch64" ] && RPM_ARCH="aarch64"
-          RPM_OUTPUT="dist/limux-${VERSION}-1.${RPM_ARCH}.rpm"
+          RPM_OUTPUT="dist/ghostdeck-${VERSION}-1.${RPM_ARCH}.rpm"
           test -f "$RPM_OUTPUT"
           echo "rpm_path=$RPM_OUTPUT" >> "$GITHUB_OUTPUT"
           echo "rpm_arch=$RPM_ARCH" >> "$GITHUB_OUTPUT"
@@ -99,6 +99,6 @@ jobs:
       - name: Upload RPM as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: limux-rpm-${{ steps.version.outputs.version }}
+          name: ghostdeck-rpm-${{ steps.version.outputs.version }}
           path: ${{ steps.rpm.outputs.rpm_path }}
           retention-days: 30

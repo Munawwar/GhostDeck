@@ -1,0 +1,1015 @@
+//! Bridge the ghostdeck control socket onto the GTK host state.
+
+use std::io::{self, Write};
+use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::time::Duration;
+
+use gtk::glib;
+use gtk4 as gtk;
+use ghostdeck_control::auth::{self, SocketControlMode};
+use ghostdeck_control::request_io::{self, read_request_frame};
+use ghostdeck_control::socket_path::{bind_listener, resolve_socket_path, SocketMode};
+use ghostdeck_protocol::{parse_v1_command_envelope, V2Request, V2Response};
+use serde_json::{json, Map, Value};
+
+const METHODS: &[&str] = &[
+    "system.ping",
+    "system.identify",
+    "system.capabilities",
+    "workspace.current",
+    "workspace.list",
+    "workspace.create",
+    "workspace.select",
+    "workspace.rename",
+    "workspace.close",
+    "pane.list",
+    "pane.surfaces",
+    "surface.list",
+    "surface.add",
+    "surface.run",
+    "surface.close",
+    "surface.health",
+    "surface.read_text",
+    "surface.send_text",
+    "surface.send_key",
+    "notification.create",
+];
+
+const PARSE_ERROR_CODE: i64 = -32700;
+const INVALID_PARAMS_CODE: i64 = -32602;
+const UNKNOWN_METHOD_CODE: i64 = -32601;
+const INTERNAL_ERROR_CODE: i64 = -32603;
+const NOT_FOUND_CODE: i64 = -32004;
+const CONFLICT_CODE: i64 = -32009;
+
+type BridgeResult = Result<Value, BridgeError>;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkspaceTarget {
+    Active,
+    Handle(String),
+    Name(String),
+    Index(usize),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AddSurfaceRequest {
+    pub target: WorkspaceTarget,
+    pub tab_id: String,
+    pub source_surface_id: String,
+    pub cwd: Option<String>,
+    pub command: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SurfaceCommandRequest {
+    pub target: WorkspaceTarget,
+    pub tab_id: String,
+    pub source_surface_id: String,
+    pub surface_id: String,
+    pub command: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CloseSurfaceRequest {
+    pub target: WorkspaceTarget,
+    pub tab_id: String,
+    pub source_surface_id: String,
+    pub surface_id: String,
+}
+
+#[derive(Debug)]
+pub enum ControlCommand {
+    Identify {
+        caller: Option<Value>,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    CurrentWorkspace {
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    ListWorkspaces {
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    ListPanes {
+        target: WorkspaceTarget,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    ListPaneSurfaces {
+        target: WorkspaceTarget,
+        pane_id: Option<String>,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    AddSurface {
+        request: AddSurfaceRequest,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    RunSurfaceCommand {
+        request: SurfaceCommandRequest,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    CloseSurface {
+        request: CloseSurfaceRequest,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    ListSurfaces {
+        target: WorkspaceTarget,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    SurfaceHealth {
+        target: WorkspaceTarget,
+        surface_hint: Option<String>,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    ReadSurfaceText {
+        target: WorkspaceTarget,
+        surface_hint: Option<String>,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    CreateWorkspace {
+        name: Option<String>,
+        cwd: Option<String>,
+        command: Option<String>,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    SelectWorkspace {
+        target: WorkspaceTarget,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    RenameWorkspace {
+        target: WorkspaceTarget,
+        title: String,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    CloseWorkspace {
+        target: WorkspaceTarget,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    SendText {
+        target: WorkspaceTarget,
+        surface_hint: Option<String>,
+        text: String,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    SendKey {
+        target: WorkspaceTarget,
+        surface_hint: Option<String>,
+        key: String,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    /// Post a desktop-style notification into the sidebar + toast overlay.
+    /// `target` chooses the workspace to flag as unread; if not provided,
+    /// the currently-active workspace is used.
+    CreateNotification {
+        target: WorkspaceTarget,
+        title: String,
+        subtitle: String,
+        body: String,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+}
+
+impl ControlCommand {
+    pub fn respond(self, result: BridgeResult) {
+        match self {
+            Self::Identify { reply, .. }
+            | Self::CurrentWorkspace { reply }
+            | Self::ListWorkspaces { reply }
+            | Self::ListPanes { reply, .. }
+            | Self::ListPaneSurfaces { reply, .. }
+            | Self::AddSurface { reply, .. }
+            | Self::RunSurfaceCommand { reply, .. }
+            | Self::CloseSurface { reply, .. }
+            | Self::ListSurfaces { reply, .. }
+            | Self::SurfaceHealth { reply, .. }
+            | Self::ReadSurfaceText { reply, .. }
+            | Self::CreateWorkspace { reply, .. }
+            | Self::SelectWorkspace { reply, .. }
+            | Self::RenameWorkspace { reply, .. }
+            | Self::CloseWorkspace { reply, .. }
+            | Self::SendText { reply, .. }
+            | Self::SendKey { reply, .. }
+            | Self::CreateNotification { reply, .. } => {
+                let _ = reply.send(result);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BridgeError {
+    code: i64,
+    message: String,
+    data: Option<Value>,
+}
+
+impl BridgeError {
+    fn new(code: i64, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            data: None,
+        }
+    }
+
+    fn with_data(mut self, data: Value) -> Self {
+        self.data = Some(data);
+        self
+    }
+
+    pub fn invalid_params(message: impl Into<String>) -> Self {
+        Self::new(INVALID_PARAMS_CODE, message)
+    }
+
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::new(NOT_FOUND_CODE, message)
+    }
+
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::new(CONFLICT_CODE, message)
+    }
+
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::new(INTERNAL_ERROR_CODE, message)
+    }
+}
+
+fn parse_request(input: &str) -> Result<V2Request, BridgeError> {
+    if let Ok(request) = serde_json::from_str::<V2Request>(input) {
+        return Ok(request);
+    }
+
+    match parse_v1_command_envelope(input) {
+        Ok(v1) => Ok(v1.into_v2_request(None)),
+        Err(error) => Err(BridgeError::new(
+            PARSE_ERROR_CODE,
+            format!("invalid request payload: {error}"),
+        )
+        .with_data(json!({ "raw": input }))),
+    }
+}
+
+fn params_object(params: &Value) -> Result<&Map<String, Value>, BridgeError> {
+    params
+        .as_object()
+        .ok_or_else(|| BridgeError::invalid_params("params must be a JSON object"))
+}
+
+fn optional_string(params: &Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        params
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn optional_handle(
+    params: &Map<String, Value>,
+    keys: &[&str],
+) -> Result<Option<String>, BridgeError> {
+    for key in keys {
+        let Some(value) = params.get(*key) else {
+            continue;
+        };
+        match value {
+            Value::Null => {}
+            Value::String(raw) => {
+                let handle = raw.trim();
+                if !handle.is_empty() {
+                    return Ok(Some(handle.to_string()));
+                }
+            }
+            Value::Number(number) => {
+                let id = number.as_u64().ok_or_else(|| {
+                    BridgeError::invalid_params(format!(
+                        "{key} must be a non-negative integer or ref handle"
+                    ))
+                })?;
+                return Ok(Some(id.to_string()));
+            }
+            _ => {
+                return Err(BridgeError::invalid_params(format!(
+                    "{key} must be a non-negative integer or ref handle"
+                )));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn optional_ref_handle(
+    params: &Map<String, Value>,
+    keys: &[&str],
+    prefix: &str,
+) -> Result<Option<String>, BridgeError> {
+    optional_handle(params, keys).map(|handle| {
+        handle.map(|handle| {
+            handle
+                .strip_prefix(prefix)
+                .unwrap_or(handle.as_str())
+                .to_string()
+        })
+    })
+}
+
+fn optional_surface_handle(
+    params: &Map<String, Value>,
+    keys: &[&str],
+) -> Result<Option<String>, BridgeError> {
+    for key in keys {
+        if params.get(*key).is_none_or(Value::is_null) {
+            continue;
+        }
+        return optional_ref_handle(params, &[*key], "surface:")?
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| Some(value.trim().to_string()))
+            .ok_or_else(|| BridgeError::invalid_params(format!("{key} must not be empty")));
+    }
+    Ok(None)
+}
+
+fn optional_index(params: &Map<String, Value>, key: &str) -> Result<Option<usize>, BridgeError> {
+    let Some(value) = params.get(key) else {
+        return Ok(None);
+    };
+
+    if let Some(index) = value.as_u64() {
+        return Ok(Some(index as usize));
+    }
+
+    Err(BridgeError::invalid_params(format!(
+        "{key} must be a non-negative integer"
+    )))
+}
+
+fn looks_like_workspace_handle(raw: &str) -> bool {
+    let raw = raw.trim();
+    if raw.starts_with("workspace:") {
+        return true;
+    }
+    let value = raw;
+    uuid::Uuid::parse_str(value).is_ok() || value.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn parse_optional_workspace_target(
+    params: &Map<String, Value>,
+    allow_name: bool,
+) -> Result<WorkspaceTarget, BridgeError> {
+    if let Some(handle) = optional_handle(params, &["workspace_id", "id"])? {
+        if allow_name && !looks_like_workspace_handle(&handle) {
+            return Ok(WorkspaceTarget::Name(handle));
+        }
+        return Ok(WorkspaceTarget::Handle(handle));
+    }
+    if allow_name {
+        if let Some(name) = optional_string(params, &["name"]) {
+            return Ok(WorkspaceTarget::Name(name));
+        }
+    }
+    if let Some(index) = optional_index(params, "index")? {
+        return Ok(WorkspaceTarget::Index(index));
+    }
+    Ok(WorkspaceTarget::Active)
+}
+
+fn parse_surface_scope(
+    params: &Map<String, Value>,
+    method: &str,
+) -> Result<(WorkspaceTarget, String, String, String), BridgeError> {
+    let target = parse_required_workspace_target(params, false, method)?;
+    let tab_id = optional_string(params, &["tab_id"])
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| BridgeError::invalid_params(format!("{method} requires tab_id")))?;
+    let source_surface_id = optional_ref_handle(params, &["source_surface_id"], "surface:")?
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            BridgeError::invalid_params(format!("{method} requires source_surface_id"))
+        })?;
+    let surface_id = optional_ref_handle(params, &["surface_id"], "surface:")?
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| BridgeError::invalid_params(format!("{method} requires surface_id")))?;
+    Ok((target, tab_id, source_surface_id, surface_id))
+}
+
+fn parse_required_workspace_target(
+    params: &Map<String, Value>,
+    allow_name: bool,
+    method: &str,
+) -> Result<WorkspaceTarget, BridgeError> {
+    let target = parse_optional_workspace_target(params, allow_name)?;
+    if matches!(target, WorkspaceTarget::Active) {
+        Err(BridgeError::invalid_params(format!(
+            "{method} requires workspace_id/id, name, or index"
+        )))
+    } else {
+        Ok(target)
+    }
+}
+
+fn handle_method(
+    id: Option<Value>,
+    method: &str,
+    params: Value,
+    dispatch: &dyn Fn(ControlCommand),
+) -> V2Response {
+    let params = match params_object(&params) {
+        Ok(params) => params,
+        Err(error) => return error_response(id, error),
+    };
+
+    let queued = match method {
+        "system.ping" | "ping" => return V2Response::success(id, json!({ "pong": true })),
+        "system.capabilities" => {
+            return V2Response::success(id, json!({ "commands": METHODS, "methods": METHODS }));
+        }
+        "system.identify" => {
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::Identify {
+                    caller: params.get("caller").cloned(),
+                    reply,
+                },
+                rx,
+            )
+        }
+        "workspace.current" => {
+            let (reply, rx) = mpsc::channel();
+            (ControlCommand::CurrentWorkspace { reply }, rx)
+        }
+        "workspace.list" | "list-workspaces" => {
+            let (reply, rx) = mpsc::channel();
+            (ControlCommand::ListWorkspaces { reply }, rx)
+        }
+        "pane.list" | "list-panes" => {
+            let target = match parse_optional_workspace_target(params, true) {
+                Ok(target) => target,
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (ControlCommand::ListPanes { target, reply }, rx)
+        }
+        "pane.surfaces" => {
+            let target = match parse_optional_workspace_target(params, true) {
+                Ok(target) => target,
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::ListPaneSurfaces {
+                    target,
+                    pane_id: optional_string(params, &["pane_id", "id"]),
+                    reply,
+                },
+                rx,
+            )
+        }
+        "surface.add" | "add-surface" => {
+            let target = match parse_required_workspace_target(params, false, "surface.add") {
+                Ok(target) => target,
+                Err(error) => return error_response(id, error),
+            };
+            let Some(tab_id) = optional_string(params, &["tab_id"]) else {
+                return error_response(
+                    id,
+                    BridgeError::invalid_params("surface.add requires tab_id"),
+                );
+            };
+            let source_surface_id =
+                match optional_ref_handle(params, &["source_surface_id"], "surface:") {
+                    Ok(Some(surface_id)) => surface_id,
+                    Ok(None) => {
+                        return error_response(
+                            id,
+                            BridgeError::invalid_params("surface.add requires source_surface_id"),
+                        );
+                    }
+                    Err(error) => return error_response(id, error),
+                };
+            let cwd = match params.get("cwd") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(cwd)) if !cwd.trim().is_empty() => Some(cwd.clone()),
+                _ => {
+                    return error_response(
+                        id,
+                        BridgeError::invalid_params("surface.add cwd must be a nonempty string"),
+                    )
+                }
+            };
+            let command = match params.get("command") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(command)) if !command.trim().is_empty() => Some(command.clone()),
+                _ => {
+                    return error_response(
+                        id,
+                        BridgeError::invalid_params(
+                            "surface.add command must be a nonempty string",
+                        ),
+                    )
+                }
+            };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::AddSurface {
+                    request: AddSurfaceRequest {
+                        target,
+                        tab_id,
+                        source_surface_id,
+                        cwd,
+                        command,
+                    },
+                    reply,
+                },
+                rx,
+            )
+        }
+        "surface.run" | "run-surface" => {
+            let (target, tab_id, source_surface_id, surface_id) =
+                match parse_surface_scope(params, "surface.run") {
+                    Ok(scope) => scope,
+                    Err(error) => return error_response(id, error),
+                };
+            let command = match params.get("command") {
+                Some(Value::String(command)) if !command.trim().is_empty() => command.clone(),
+                _ => {
+                    return error_response(
+                        id,
+                        BridgeError::invalid_params("surface.run requires a nonempty command"),
+                    )
+                }
+            };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::RunSurfaceCommand {
+                    request: SurfaceCommandRequest {
+                        target,
+                        tab_id,
+                        source_surface_id,
+                        surface_id,
+                        command,
+                    },
+                    reply,
+                },
+                rx,
+            )
+        }
+        "surface.close" | "close-surface" => {
+            let (target, tab_id, source_surface_id, surface_id) =
+                match parse_surface_scope(params, "surface.close") {
+                    Ok(scope) => scope,
+                    Err(error) => return error_response(id, error),
+                };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::CloseSurface {
+                    request: CloseSurfaceRequest {
+                        target,
+                        tab_id,
+                        source_surface_id,
+                        surface_id,
+                    },
+                    reply,
+                },
+                rx,
+            )
+        }
+        "surface.list" | "list-panels" => {
+            let target = match parse_optional_workspace_target(params, true) {
+                Ok(target) => target,
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (ControlCommand::ListSurfaces { target, reply }, rx)
+        }
+        "surface.health" | "surface-health" => {
+            let target = match parse_optional_workspace_target(params, true) {
+                Ok(target) => target,
+                Err(error) => return error_response(id, error),
+            };
+            let surface_hint = match optional_surface_handle(params, &["surface_id", "id"]) {
+                Ok(surface_hint) => surface_hint,
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::SurfaceHealth {
+                    target,
+                    surface_hint,
+                    reply,
+                },
+                rx,
+            )
+        }
+        "surface.read_text" | "read-screen" | "capture-pane" => {
+            let target = match parse_optional_workspace_target(params, true) {
+                Ok(target) => target,
+                Err(error) => return error_response(id, error),
+            };
+            let surface_hint = match optional_surface_handle(params, &["surface_id", "id"]) {
+                Ok(surface_hint) => surface_hint,
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::ReadSurfaceText {
+                    target,
+                    surface_hint,
+                    reply,
+                },
+                rx,
+            )
+        }
+        "workspace.create" | "new-workspace" => {
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::CreateWorkspace {
+                    name: optional_string(params, &["name", "title"]),
+                    cwd: optional_string(params, &["cwd"]),
+                    command: optional_string(params, &["command"]),
+                    reply,
+                },
+                rx,
+            )
+        }
+        "workspace.select" | "workspace.activate" | "activate-workspace" => {
+            let target = match parse_required_workspace_target(params, true, method) {
+                Ok(target) => target,
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (ControlCommand::SelectWorkspace { target, reply }, rx)
+        }
+        "workspace.rename" | "rename-workspace" => {
+            let Some(title) = optional_string(params, &["title", "name"]) else {
+                return error_response(
+                    id,
+                    BridgeError::invalid_params("workspace.rename requires title/name"),
+                );
+            };
+            let target = match parse_optional_workspace_target(params, false) {
+                Ok(target) => target,
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::RenameWorkspace {
+                    target,
+                    title,
+                    reply,
+                },
+                rx,
+            )
+        }
+        "workspace.close" | "close-workspace" => {
+            let target = match parse_optional_workspace_target(params, false) {
+                Ok(target) => target,
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (ControlCommand::CloseWorkspace { target, reply }, rx)
+        }
+        "surface.send_text" | "send-text" | "send" => {
+            let Some(text) = optional_string(params, &["text"]) else {
+                return error_response(
+                    id,
+                    BridgeError::invalid_params("surface.send_text requires text"),
+                );
+            };
+            // allow_name = true: lets agent-team peers address each other by
+            // workspace name (e.g. `--workspace codex`) instead of UUID.
+            let target = match parse_optional_workspace_target(params, true) {
+                Ok(target) => target,
+                Err(error) => return error_response(id, error),
+            };
+            let surface_hint = match optional_surface_handle(params, &["surface_id"]) {
+                Ok(surface_hint) => surface_hint,
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::SendText {
+                    target,
+                    surface_hint,
+                    text,
+                    reply,
+                },
+                rx,
+            )
+        }
+        "surface.send_key" | "send-key" => {
+            let Some(key) = optional_string(params, &["key"]) else {
+                return error_response(
+                    id,
+                    BridgeError::invalid_params("surface.send_key requires key"),
+                );
+            };
+            let target = match parse_optional_workspace_target(params, true) {
+                Ok(target) => target,
+                Err(error) => return error_response(id, error),
+            };
+            let surface_hint = match optional_surface_handle(params, &["surface_id"]) {
+                Ok(surface_hint) => surface_hint,
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::SendKey {
+                    target,
+                    surface_hint,
+                    key,
+                    reply,
+                },
+                rx,
+            )
+        }
+        "notification.create" | "notify" => {
+            // Title is required; subtitle and body are optional. This mirrors
+            // cmux notify's shape (title/subtitle/body) and maps onto the
+            // existing sidebar unread pipeline.
+            let Some(title) = optional_string(params, &["title"]) else {
+                return error_response(
+                    id,
+                    BridgeError::invalid_params("notification.create requires title"),
+                );
+            };
+            let subtitle = optional_string(params, &["subtitle"]).unwrap_or_default();
+            let body = optional_string(params, &["body", "message"]).unwrap_or_default();
+            // allow_name = true: lets agent hooks target a peer by name.
+            let target = match parse_optional_workspace_target(params, true) {
+                Ok(target) => target,
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::CreateNotification {
+                    target,
+                    title,
+                    subtitle,
+                    body,
+                    reply,
+                },
+                rx,
+            )
+        }
+        _ => {
+            return error_response(
+                id,
+                BridgeError::new(UNKNOWN_METHOD_CODE, format!("unknown method: {method}")),
+            );
+        }
+    };
+
+    let (command, reply_rx) = queued;
+
+    dispatch(command);
+
+    match reply_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(result)) => V2Response::success(id, result),
+        Ok(Err(error)) => error_response(id, error),
+        Err(_) => error_response(id, BridgeError::internal("control command timed out")),
+    }
+}
+
+fn error_response(id: Option<Value>, error: BridgeError) -> V2Response {
+    V2Response::error(id, error.code, error.message, error.data)
+}
+
+fn dispatch_request(input: &str, dispatch: &dyn Fn(ControlCommand)) -> V2Response {
+    match parse_request(input) {
+        Ok(request) => handle_method(request.id, &request.method, request.params, dispatch),
+        Err(error) => error_response(None, error),
+    }
+}
+
+fn handle_client(
+    stream: UnixStream,
+    dispatch: &(dyn Fn(ControlCommand) + Send + Sync + 'static),
+) -> io::Result<()> {
+    stream.set_read_timeout(Some(request_io::CLIENT_IDLE_TIMEOUT))?;
+    let reader_stream = stream.try_clone()?;
+    reader_stream.set_read_timeout(Some(request_io::CLIENT_IDLE_TIMEOUT))?;
+    let mut reader = io::BufReader::new(reader_stream);
+    let mut writer = stream;
+    let mut line_buf = Vec::with_capacity(4096);
+
+    loop {
+        if !read_request_frame(&mut reader, &mut line_buf)? {
+            return Ok(());
+        }
+
+        let input = std::str::from_utf8(&line_buf)
+            .map(|line| line.trim_end_matches(['\n', '\r']))
+            .unwrap_or("");
+        if input.is_empty() {
+            continue;
+        }
+
+        let response = dispatch_request(input, dispatch);
+        let mut payload = serde_json::to_string(&response)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        payload.push('\n');
+        writer.write_all(payload.as_bytes())?;
+        writer.flush()?;
+    }
+}
+
+struct ConnectionSlot {
+    active_connections: Arc<AtomicUsize>,
+}
+
+impl ConnectionSlot {
+    fn try_acquire(active_connections: Arc<AtomicUsize>) -> Option<Self> {
+        active_connections
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                (current < request_io::MAX_CONNECTIONS).then_some(current + 1)
+            })
+            .ok()?;
+        Some(Self { active_connections })
+    }
+}
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        self.active_connections.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Start the control socket server in a background thread and dispatch each
+/// command onto the GTK main context.
+pub fn start(dispatch: fn(ControlCommand)) {
+    let context = glib::MainContext::default();
+    let dispatch = std::sync::Arc::new(move |command: ControlCommand| {
+        context.invoke(move || dispatch(command));
+    });
+
+    std::thread::Builder::new()
+        .name("ghostdeck-control".into())
+        .spawn(move || {
+            let path = resolve_socket_path(None, SocketMode::Runtime);
+            let control_mode = SocketControlMode::from_env();
+            let listener = match bind_listener(
+                &path,
+                SocketMode::Runtime,
+                control_mode.requires_owner_only_socket(),
+            ) {
+                Ok(listener) => listener,
+                Err(error) => {
+                    eprintln!(
+                        "ghostdeck: control socket bind failed ({}): {error}",
+                        path.display()
+                    );
+                    return;
+                }
+            };
+
+            eprintln!("ghostdeck: control socket at {}", path.display());
+            let active_connections = Arc::new(AtomicUsize::new(0));
+
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(stream) => {
+                        let Some(slot) = ConnectionSlot::try_acquire(active_connections.clone()) else {
+                            eprintln!("ghostdeck: rejecting control client, too many active connections");
+                            continue;
+                        };
+                        let peer = match auth::authorize_peer(&stream, control_mode) {
+                            Ok(peer) => peer,
+                            Err(error) => {
+                                eprintln!("ghostdeck: rejected control client: {error}");
+                                continue;
+                            }
+                        };
+                        let dispatch = dispatch.clone();
+                        std::thread::Builder::new()
+                            .name("ghostdeck-ctrl-conn".into())
+                            .spawn(move || {
+                                let _slot = slot;
+                                if let Err(error) = handle_client(stream, dispatch.as_ref()) {
+                                    eprintln!(
+                                        "ghostdeck: control connection error for pid={} uid={}: {error}",
+                                        peer.pid, peer.uid
+                                    );
+                                }
+                            })
+                            .ok();
+                    }
+                    Err(error) => {
+                        eprintln!("ghostdeck: control accept error: {error}");
+                    }
+                }
+            }
+        })
+        .expect("failed to spawn control server thread");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_v2_request_directly() {
+        let request = parse_request(r#"{"id":"1","method":"system.ping","params":{}}"#)
+            .expect("v2 request should parse");
+        assert_eq!(request.id, Some(Value::String("1".to_string())));
+        assert_eq!(request.method, "system.ping");
+    }
+
+    #[test]
+    fn parses_v1_request_envelope() {
+        let request = parse_request(r#"{"command":"workspace.create","args":{"cwd":"/tmp"}}"#)
+            .expect("v1 request should parse");
+        assert_eq!(request.method, "workspace.create");
+        assert_eq!(request.params["cwd"], "/tmp");
+    }
+
+    #[test]
+    fn workspace_target_prefers_handle_over_index() {
+        let params = json!({
+            "workspace_id": "workspace:abc",
+            "index": 2
+        });
+        let target =
+            parse_optional_workspace_target(params.as_object().expect("object params"), true)
+                .expect("target should parse");
+        assert_eq!(target, WorkspaceTarget::Handle("workspace:abc".to_string()));
+    }
+
+    #[test]
+    fn workspace_target_treats_cli_workspace_id_as_name_when_allowed() {
+        let params = json!({
+            "workspace_id": "claude"
+        });
+        let target =
+            parse_optional_workspace_target(params.as_object().expect("object params"), true)
+                .expect("target should parse");
+        assert_eq!(target, WorkspaceTarget::Name("claude".to_string()));
+    }
+
+    #[test]
+    fn workspace_target_preserves_raw_uuid_workspace_ids_when_names_are_allowed() {
+        let workspace_id = "2b8b5ca4-0200-4433-9f7c-d5c9f725be50";
+        let params = json!({
+            "workspace_id": workspace_id
+        });
+        let target =
+            parse_optional_workspace_target(params.as_object().expect("object params"), true)
+                .expect("target should parse");
+        assert_eq!(target, WorkspaceTarget::Handle(workspace_id.to_string()));
+    }
+
+    #[test]
+    fn workspace_select_requires_explicit_target() {
+        let params = Map::new();
+        let error = parse_required_workspace_target(&params, true, "workspace.select")
+            .expect_err("workspace.select should require a target");
+        assert_eq!(error.code, INVALID_PARAMS_CODE);
+    }
+
+    #[test]
+    fn surface_health_route_accepts_surface_refs() {
+        let response = dispatch_request(
+            r#"{"id":1,"method":"surface.health","params":{"workspace_id":"codex","surface_id":"surface:4:tab"}}"#,
+            &|command| match command {
+                ControlCommand::SurfaceHealth {
+                    target,
+                    surface_hint,
+                    reply,
+                } => {
+                    assert_eq!(target, WorkspaceTarget::Name("codex".to_string()));
+                    assert_eq!(surface_hint, Some("4:tab".to_string()));
+                    let _ = reply.send(Ok(json!({ "surfaces": [] })));
+                }
+                other => panic!("unexpected command: {other:?}"),
+            },
+        );
+
+        assert_eq!(response.error, None);
+        assert!(response.result.is_some());
+    }
+
+    #[test]
+    fn read_text_route_accepts_capture_alias_and_surface_refs() {
+        let response = dispatch_request(
+            r#"{"id":1,"method":"capture-pane","params":{"surface_id":"surface:9:tab"}}"#,
+            &|command| match command {
+                ControlCommand::ReadSurfaceText {
+                    target,
+                    surface_hint,
+                    reply,
+                } => {
+                    assert_eq!(target, WorkspaceTarget::Active);
+                    assert_eq!(surface_hint, Some("9:tab".to_string()));
+                    let _ = reply.send(Ok(json!({ "text": "ready" })));
+                }
+                other => panic!("unexpected command: {other:?}"),
+            },
+        );
+
+        assert_eq!(response.error, None);
+        assert_eq!(response.result.expect("result")["text"], "ready");
+    }
+}

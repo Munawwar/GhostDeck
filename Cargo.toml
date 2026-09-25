@@ -1,16 +1,16 @@
 [workspace]
 members = [
-  "rust/limux-protocol",
-  "rust/limux-core",
-  "rust/limux-control",
-  "rust/limux-cli",
-  "rust/limux-ghostty-sys",
-  "rust/limux-host-linux",
+  "rust/ghostdeck-protocol",
+  "rust/ghostdeck-core",
+  "rust/ghostdeck-control",
+  "rust/ghostdeck-cli",
+  "rust/ghostdeck-ghostty-sys",
+  "rust/ghostdeck-host-linux",
 ]
 resolver = "2"
 
 [workspace.package]
-authors = ["limux contributors"]
+authors = ["ghostdeck contributors"]
 edition = "2021"
 license = "MIT"
 version = "0.1.19"

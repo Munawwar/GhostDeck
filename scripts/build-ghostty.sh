@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-TEMP_DIR="$(mktemp -d -t limux-ghostty-XXXXXX)"
+TEMP_DIR="$(mktemp -d -t ghostdeck-ghostty-XXXXXX)"
 SOURCE_DIR="$TEMP_DIR/source"
 
 trap 'git -C "$ROOT_DIR/ghostty" worktree remove --force "$SOURCE_DIR" >/dev/null 2>&1 || true; rm -rf "$TEMP_DIR"' EXIT

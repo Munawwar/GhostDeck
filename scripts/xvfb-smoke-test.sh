@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 # scripts/xvfb-smoke-test.sh - Headless end-to-end smoke test for the
-# limux agent-integrations stack. Runs a real limux GTK host under Xvfb,
-# exercises limux-cli against the live Unix socket, asserts expected
+# ghostdeck agent-integrations stack. Runs a real ghostdeck GTK host under Xvfb,
+# exercises ghostdeck-cli against the live Unix socket, asserts expected
 # behavior, then tears down. Zero display hardware required.
 #
 # Usage:
 #   ./scripts/xvfb-smoke-test.sh                # release build
-#   LIMUX_SMOKE_PROFILE=debug ./scripts/xvfb-smoke-test.sh
+#   GHOSTDECK_SMOKE_PROFILE=debug ./scripts/xvfb-smoke-test.sh
 set -euo pipefail
 
-PROFILE="${LIMUX_SMOKE_PROFILE:-release}"
+PROFILE="${GHOSTDECK_SMOKE_PROFILE:-release}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
-DEMO_DIR="$(mktemp -d -t limux-smoke-XXXXXX)"
+DEMO_DIR="$(mktemp -d -t ghostdeck-smoke-XXXXXX)"
 LOG_DIR="$DEMO_DIR/logs"
 mkdir -p "$LOG_DIR"
 
-echo "== limux agent-integrations smoke test =="
+echo "== ghostdeck agent-integrations smoke test =="
 echo "profile:   $PROFILE"
 echo "demo dir:  $DEMO_DIR"
 echo "log dir:   $LOG_DIR"
@@ -39,16 +39,16 @@ else
   BIN_DIR="target/debug"
 fi
 
-echo "-- building limux-cli ($PROFILE)..."
-cargo build $CARGO_FLAGS -p limux-cli --bin limux-cli 2>&1 | tail -3
+echo "-- building ghostdeck-cli ($PROFILE)..."
+cargo build $CARGO_FLAGS -p ghostdeck-cli --bin ghostdeck-cli 2>&1 | tail -3
 
-echo "-- building limux-host-linux ($PROFILE)..."
-cargo build $CARGO_FLAGS -p limux-host-linux 2>&1 | tail -3
+echo "-- building ghostdeck-host-linux ($PROFILE)..."
+cargo build $CARGO_FLAGS -p ghostdeck-host-linux 2>&1 | tail -3
 
-LIMUX_HOST="$ROOT_DIR/$BIN_DIR/limux"
-LIMUX_CLI="$ROOT_DIR/$BIN_DIR/limux-cli"
-[ -x "$LIMUX_HOST" ] || { echo "FAIL: host binary missing at $LIMUX_HOST"; exit 2; }
-[ -x "$LIMUX_CLI" ]  || { echo "FAIL: cli binary missing at $LIMUX_CLI"; exit 2; }
+GHOSTDECK_HOST="$ROOT_DIR/$BIN_DIR/ghostdeck"
+GHOSTDECK_CLI="$ROOT_DIR/$BIN_DIR/ghostdeck-cli"
+[ -x "$GHOSTDECK_HOST" ] || { echo "FAIL: host binary missing at $GHOSTDECK_HOST"; exit 2; }
+[ -x "$GHOSTDECK_CLI" ]  || { echo "FAIL: cli binary missing at $GHOSTDECK_CLI"; exit 2; }
 
 # Both host profiles load the locally built libghostty.so.
 LIBGHOSTTY_DIR="$ROOT_DIR/ghostty/zig-out/lib"
@@ -60,7 +60,7 @@ fi
 # Fast sanity pass — if this fails nothing else will work.
 echo
 echo "== stage 0: agent-team --dry-run (no host) =="
-"$LIMUX_CLI" agent-team --dry-run \
+"$GHOSTDECK_CLI" agent-team --dry-run \
   --agents codex,claude,opencode \
   --cwd "$DEMO_DIR" \
   2>&1 | tee "$LOG_DIR/stage0.txt"
@@ -72,18 +72,18 @@ echo "stage 0: OK"
 
 # --- 4. Launch the live host under Xvfb ----------------------------------
 # Each smoke run gets its own socket path so we don't collide with the
-# user's real limux session.
-SOCKET="$DEMO_DIR/limux.sock"
-export LIMUX_SOCKET="$SOCKET"
-export LIMUX_SOCKET_PATH="$SOCKET"
-export LIMUX_SOCKET_MODE="runtime"
+# user's real ghostdeck session.
+SOCKET="$DEMO_DIR/ghostdeck.sock"
+export GHOSTDECK_SOCKET="$SOCKET"
+export GHOSTDECK_SOCKET_PATH="$SOCKET"
+export GHOSTDECK_SOCKET_MODE="runtime"
 export XDG_DATA_HOME="$DEMO_DIR/data"
 export XDG_STATE_HOME="$DEMO_DIR/state"
 export XDG_CONFIG_HOME="$DEMO_DIR/config"
 export XDG_RUNTIME_DIR="$DEMO_DIR/runtime"
-mkdir -p "$XDG_DATA_HOME/limux" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR"
+mkdir -p "$XDG_DATA_HOME/ghostdeck" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
-cat > "$XDG_DATA_HOME/limux/session.json" <<SMOKE_SESSION
+cat > "$XDG_DATA_HOME/ghostdeck/session.json" <<SMOKE_SESSION
 {
   "version": 1,
   "active_workspace_index": 0,
@@ -92,7 +92,7 @@ cat > "$XDG_DATA_HOME/limux/session.json" <<SMOKE_SESSION
   "workspaces": [
     {
       "id": "00000000-0000-4000-8000-000000000001",
-      "name": "limux",
+      "name": "ghostdeck",
       "favorite": false,
       "cwd": "$DEMO_DIR",
       "folder_path": "$DEMO_DIR",
@@ -116,7 +116,7 @@ cat > "$XDG_DATA_HOME/limux/session.json" <<SMOKE_SESSION
 SMOKE_SESSION
 
 echo
-echo "== stage 1: boot limux host under xvfb-run =="
+echo "== stage 1: boot ghostdeck host under xvfb-run =="
 # Under Xvfb there is no GPU, so Mesa would fall back to llvmpipe, which
 # has historically crashed on Ghostty's shader variants. Force softpipe
 # (slower but stable), and pin GL version to avoid newer-feature probes.
@@ -125,7 +125,7 @@ export GALLIUM_DRIVER=softpipe
 export LP_NUM_THREADS=1
 export MESA_GL_VERSION_OVERRIDE="${MESA_GL_VERSION_OVERRIDE:-3.3}"
 xvfb-run -a -s "-screen 0 1280x800x24 +extension GLX +render" \
-  "$LIMUX_HOST" >"$LOG_DIR/host.stdout" 2>"$LOG_DIR/host.stderr" &
+  "$GHOSTDECK_HOST" >"$LOG_DIR/host.stdout" 2>"$LOG_DIR/host.stderr" &
 HOST_PID=$!
 echo "host PID: $HOST_PID (socket=$SOCKET)"
 
@@ -167,7 +167,7 @@ done
 
 [ -S "$SOCKET" ] || { echo "FAIL: socket $SOCKET never appeared"; exit 1; }
 for _ in $(seq 1 40); do
-  "$LIMUX_CLI" --json surface-health --workspace 00000000-0000-4000-8000-000000000001 \
+  "$GHOSTDECK_CLI" --json surface-health --workspace 00000000-0000-4000-8000-000000000001 \
     > "$LOG_DIR/initial-surface-health.json" 2>/dev/null || true
   grep -Fq '"healthy":true' "$LOG_DIR/initial-surface-health.json" && break
   sleep 0.25
@@ -180,25 +180,25 @@ echo
 echo "== stage 1b: terminal cwd reaches the persisted session =="
 CWD_TARGET="$DEMO_DIR/terminal-cwd"
 mkdir -p "$CWD_TARGET"
-env LIMUX_WORKSPACE_ID=00000000-0000-4000-8000-000000000001 \
-  LIMUX_TAB_ID=terminal-0 LIMUX_SURFACE_ID=1:terminal-0:leaf-0 \
-  "$LIMUX_CLI" --json --id-format both add-surface --cwd "$CWD_TARGET" > "$LOG_DIR/stage1b-add.json"
+env GHOSTDECK_WORKSPACE_ID=00000000-0000-4000-8000-000000000001 \
+  GHOSTDECK_TAB_ID=terminal-0 GHOSTDECK_SURFACE_ID=1:terminal-0:leaf-0 \
+  "$GHOSTDECK_CLI" --json --id-format both add-surface --cwd "$CWD_TARGET" > "$LOG_DIR/stage1b-add.json"
 CWD_SURFACE_ID="$(sed -n 's/.*"surface_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$LOG_DIR/stage1b-add.json" | head -1)"
 sleep 0.25
-"$LIMUX_CLI" rename-workspace \
+"$GHOSTDECK_CLI" rename-workspace \
   --workspace 00000000-0000-4000-8000-000000000001 \
-  limux-cwd-test >/dev/null
+  ghostdeck-cwd-test >/dev/null
 
 for _ in $(seq 1 20); do
-  grep -Fq "\"cwd\": \"$CWD_TARGET\"" "$XDG_DATA_HOME/limux/session.json" && break
+  grep -Fq "\"cwd\": \"$CWD_TARGET\"" "$XDG_DATA_HOME/ghostdeck/session.json" && break
   sleep 0.25
 done
 
-grep -Fq "\"cwd\": \"$CWD_TARGET\"" "$XDG_DATA_HOME/limux/session.json" \
+grep -Fq "\"cwd\": \"$CWD_TARGET\"" "$XDG_DATA_HOME/ghostdeck/session.json" \
   || { echo "FAIL: terminal cwd was not persisted"; exit 1; }
-env LIMUX_WORKSPACE_ID=00000000-0000-4000-8000-000000000001 \
-  LIMUX_TAB_ID=terminal-0 LIMUX_SURFACE_ID=1:terminal-0:leaf-0 \
-  "$LIMUX_CLI" close-surface --surface "$CWD_SURFACE_ID" >/dev/null
+env GHOSTDECK_WORKSPACE_ID=00000000-0000-4000-8000-000000000001 \
+  GHOSTDECK_TAB_ID=terminal-0 GHOSTDECK_SURFACE_ID=1:terminal-0:leaf-0 \
+  "$GHOSTDECK_CLI" close-surface --surface "$CWD_SURFACE_ID" >/dev/null
 echo "stage 1b: OK"
 
 # --- 5. Stage 1c: caller-owned surface lifecycle --------------------------
@@ -207,13 +207,13 @@ echo "== stage 1c: add, run in, and close a caller-owned surface =="
 CALLER_WORKSPACE_ID="00000000-0000-4000-8000-000000000001"
 CALLER_TAB_ID="terminal-0"
 CALLER_SURFACE_ID="1:terminal-0:leaf-0"
-CALLER_ENV=("LIMUX_WORKSPACE_ID=$CALLER_WORKSPACE_ID" "LIMUX_TAB_ID=$CALLER_TAB_ID" "LIMUX_SURFACE_ID=$CALLER_SURFACE_ID")
-env "${CALLER_ENV[@]}" "$LIMUX_CLI" --json --id-format both add-surface > "$LOG_DIR/stage1c-add.json"
+CALLER_ENV=("GHOSTDECK_WORKSPACE_ID=$CALLER_WORKSPACE_ID" "GHOSTDECK_TAB_ID=$CALLER_TAB_ID" "GHOSTDECK_SURFACE_ID=$CALLER_SURFACE_ID")
+env "${CALLER_ENV[@]}" "$GHOSTDECK_CLI" --json --id-format both add-surface > "$LOG_DIR/stage1c-add.json"
 CHILD_SURFACE_ID="$(sed -n 's/.*"surface_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$LOG_DIR/stage1c-add.json" | head -1)"
 [ -n "$CHILD_SURFACE_ID" ] || { echo "FAIL: add-surface response missing surface_id"; exit 1; }
 
 RUN_PROOF="$DEMO_DIR/run-surface-proof"
-env "${CALLER_ENV[@]}" "$LIMUX_CLI" run --surface "$CHILD_SURFACE_ID" --cmd "printf run-ok > '$RUN_PROOF'"
+env "${CALLER_ENV[@]}" "$GHOSTDECK_CLI" run --surface "$CHILD_SURFACE_ID" --cmd "printf run-ok > '$RUN_PROOF'"
 for _ in $(seq 1 50); do
   [ -f "$RUN_PROOF" ] && break
   sleep 0.1
@@ -221,12 +221,12 @@ done
 [ -f "$RUN_PROOF" ] && [ "$(cat "$RUN_PROOF")" = "run-ok" ] \
   || { echo "FAIL: run did not execute in the added surface"; exit 1; }
 
-if env "${CALLER_ENV[@]}" "$LIMUX_CLI" close-surface --surface "$CALLER_SURFACE_ID" >/dev/null 2>&1; then
+if env "${CALLER_ENV[@]}" "$GHOSTDECK_CLI" close-surface --surface "$CALLER_SURFACE_ID" >/dev/null 2>&1; then
   echo "FAIL: close-surface allowed closing the caller source"; exit 1
 fi
 
-env "${CALLER_ENV[@]}" "$LIMUX_CLI" close-surface --surface "$CHILD_SURFACE_ID"
-env "${CALLER_ENV[@]}" "$LIMUX_CLI" --json list-panels --workspace "$CALLER_WORKSPACE_ID" \
+env "${CALLER_ENV[@]}" "$GHOSTDECK_CLI" close-surface --surface "$CHILD_SURFACE_ID"
+env "${CALLER_ENV[@]}" "$GHOSTDECK_CLI" --json list-panels --workspace "$CALLER_WORKSPACE_ID" \
   > "$LOG_DIR/stage1c-panels.json"
 if grep -Fq "$CHILD_SURFACE_ID" "$LOG_DIR/stage1c-panels.json"; then
   echo "FAIL: closed surface remains in the caller tab"; exit 1
@@ -239,7 +239,7 @@ echo "== stage 2: agent-team against live host (--no-launch) =="
 # --no-launch keeps the workspace commands from actually spawning codex/
 # claude binaries (which may not be installed in CI); the bridge + AGENTS.md
 # + allow_name=true path are still fully exercised.
-env "${CALLER_ENV[@]}" "$LIMUX_CLI" --id-format both agent-team \
+env "${CALLER_ENV[@]}" "$GHOSTDECK_CLI" --id-format both agent-team \
   --agents codex,claude \
   --cwd "$DEMO_DIR" \
   --no-launch \
@@ -257,27 +257,27 @@ grep -q "\bclaude\b"  "$DEMO_DIR/AGENTS.md" || { echo "FAIL: AGENTS.md missing c
 echo "stage 2: OK (AGENTS.md + 2 peer surfaces)"
 
 for name in codex claude; do
-  created="$("$LIMUX_CLI" --json --id-format both new-workspace --cwd "$DEMO_DIR")"
+  created="$("$GHOSTDECK_CLI" --json --id-format both new-workspace --cwd "$DEMO_DIR")"
   workspace_id="$(printf '%s\n' "$created" | sed -n 's/.*"workspace_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
-  "$LIMUX_CLI" rename-workspace --workspace "$workspace_id" "$name" >/dev/null
+  "$GHOSTDECK_CLI" rename-workspace --workspace "$workspace_id" "$name" >/dev/null
 done
 
 # --- 6. Stage 3: list-workspaces sanity -----------------------------------
 echo
 echo "== stage 3: list-workspaces sees both peers =="
-"$LIMUX_CLI" list-workspaces 2>&1 | tee "$LOG_DIR/stage3.txt"
+"$GHOSTDECK_CLI" list-workspaces 2>&1 | tee "$LOG_DIR/stage3.txt"
 grep -q codex  "$LOG_DIR/stage3.txt" || { echo "FAIL: list-workspaces missing codex"; exit 1; }
 grep -q claude "$LOG_DIR/stage3.txt" || { echo "FAIL: list-workspaces missing claude"; exit 1; }
 echo "stage 3: OK"
 
 # --- 7. Stage 4: by-name send (the phase-5 allow_name=true unlock) --------
 # This is the single most important assertion in the whole harness —
-# it proves that `limux send --workspace <name>` resolves to the right
+# it proves that `ghostdeck send --workspace <name>` resolves to the right
 # workspace via the bridge. Without allow_name=true this errors out.
 echo
 echo "== stage 4: surface.send_text by workspace name =="
 ENVELOPE=$'<agent-msg from="codex" to="claude" id="smoke-1" ts="2026-04-19T23:59:00Z"><request>smoke test ping</request></agent-msg>\n'
-if "$LIMUX_CLI" send --workspace claude "$ENVELOPE" 2>&1 | tee "$LOG_DIR/stage4.txt"; then
+if "$GHOSTDECK_CLI" send --workspace claude "$ENVELOPE" 2>&1 | tee "$LOG_DIR/stage4.txt"; then
   echo "stage 4: OK (by-name send accepted)"
 else
   echo "FAIL: by-name send to 'claude' failed — allow_name=true may be regressed"
@@ -287,7 +287,7 @@ fi
 # --- 8. Stage 5: by-name notify -------------------------------------------
 echo
 echo "== stage 5: notification.create by workspace name =="
-if "$LIMUX_CLI" notify --workspace claude --subtitle "smoke" --body "all good" "Smoke test" \
+if "$GHOSTDECK_CLI" notify --workspace claude --subtitle "smoke" --body "all good" "Smoke test" \
      2>&1 | tee "$LOG_DIR/stage5.txt"; then
   echo "stage 5: OK (by-name notify accepted)"
 else

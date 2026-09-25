@@ -1,13 +1,13 @@
-# Limux Agent Hooks
+# GhostDeck Agent Hooks
 
-These templates wire supported coding-agent hook systems into Limux session
+These templates wire supported coding-agent hook systems into GhostDeck session
 restore tracking. They are intentionally limited to Codex, Claude Code, and
 Gemini CLI until the OpenCode hook path is ready.
 
 The preferred install path is the CLI installer:
 
 ```bash
-limux hooks setup
+ghostdeck hooks setup
 ```
 
 That writes the equivalent configuration into each agent's user config:
@@ -25,11 +25,11 @@ manually repairing an agent config:
 - `claude-settings.json`
 - `gemini-settings.json`
 
-Each command calls `limux --json hooks <agent> <event>` and is guarded by a
+Each command calls `ghostdeck --json hooks <agent> <event>` and is guarded by a
 per-agent disable variable:
 
 ```bash
-LIMUX_CODEX_HOOKS_DISABLED=1
-LIMUX_CLAUDE_HOOKS_DISABLED=1
-LIMUX_GEMINI_HOOKS_DISABLED=1
+GHOSTDECK_CODEX_HOOKS_DISABLED=1
+GHOSTDECK_CLAUDE_HOOKS_DISABLED=1
+GHOSTDECK_GEMINI_HOOKS_DISABLED=1
 ```

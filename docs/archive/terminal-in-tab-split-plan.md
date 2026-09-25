@@ -7,7 +7,7 @@ and terminal tabs own their Ghostty surface split trees.
 ## Goal
 
 Add a new terminal feature, "Split within", that creates splits inside the
-current terminal tab instead of creating a new top-level Limux pane. Keep the
+current terminal tab instead of creating a new top-level GhostDeck pane. Keep the
 existing workspace-level pane split behavior unchanged.
 
 The intended long-term model is:
@@ -45,7 +45,7 @@ not the same abstraction.
 - Existing sessions must still load.
 - Existing CLI/control behavior must continue to work for non-split terminal
   tabs.
-- Vendored Ghostty remains read-only. Limux must integrate through the C API.
+- Vendored Ghostty remains read-only. GhostDeck must integrate through the C API.
 
 ## Compatibility Scope
 
@@ -196,13 +196,13 @@ Behavioral requirements:
 
 Every launched shell in a leaf must inherit:
 
-- `LIMUX_WORKSPACE_ID`
-- `LIMUX_PANE_ID`
-- `LIMUX_TAB_ID`
-- `LIMUX_SURFACE_ID`
-- `LIMUX_SOCKET`
+- `GHOSTDECK_WORKSPACE_ID`
+- `GHOSTDECK_PANE_ID`
+- `GHOSTDECK_TAB_ID`
+- `GHOSTDECK_SURFACE_ID`
+- `GHOSTDECK_SOCKET`
 
-with `LIMUX_SURFACE_ID = pane:tab:leaf`.
+with `GHOSTDECK_SURFACE_ID = pane:tab:leaf`.
 
 Agent restore must also bind to leaf-level surface ids, not tab-only ids.
 
@@ -239,8 +239,8 @@ Notes:
 
 - Ghostty exposes split-related API, but the embedder still owns host UI state
   and persistence
-- we should not assume Ghostty will create/manage nested GTK widgets for Limux
-- this feature may still be implemented mostly on the Limux side even if some
+- we should not assume Ghostty will create/manage nested GTK widgets for GhostDeck
+- this feature may still be implemented mostly on the GhostDeck side even if some
   Ghostty split actions become useful
 
 ### 10. Add UI entry points without regressing current behavior

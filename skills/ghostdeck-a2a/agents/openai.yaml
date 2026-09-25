@@ -1,0 +1,7 @@
+interface:
+  display_name: "GhostDeck A2A"
+  short_description: "Run and control visible GhostDeck terminals"
+  default_prompt: "Use $ghostdeck-a2a to run or coordinate visible terminal work."
+
+policy:
+  allow_implicit_invocation: true

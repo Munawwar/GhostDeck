@@ -11,22 +11,22 @@ DEB_ARCH="amd64"
 RPM_ARCH="x86_64"
 [ "$ARCH" = "aarch64" ] && RPM_ARCH="aarch64"
 
-PKG_BASE="limux-${VERSION}-linux-${ARCH}"
-STAGE="/tmp/limux-staging"
-GHOSTTY_INSTALL_ROOT="/tmp/limux-ghostty-install"
+PKG_BASE="ghostdeck-${VERSION}-linux-${ARCH}"
+STAGE="/tmp/ghostdeck-staging"
+GHOSTTY_INSTALL_ROOT="/tmp/ghostdeck-ghostty-install"
 GHOSTTY_SO="${ROOT_DIR}/ghostty/zig-out/lib/libghostty.so"
-MAX_GLIBC_VERSION="${LIMUX_MAX_GLIBC:-2.39}"
+MAX_GLIBC_VERSION="${GHOSTDECK_MAX_GLIBC:-2.39}"
 GHOSTTY_SHARE_DIR=""
 GHOSTTY_TERMINFO_DIR=""
-ICONS_DIR="${ROOT_DIR}/rust/limux-host-linux/icons"
-APP_ICONS_DIR="${ROOT_DIR}/rust/limux-host-linux/icons/app"
+ICONS_DIR="${ROOT_DIR}/rust/ghostdeck-host-linux/icons"
+APP_ICONS_DIR="${ROOT_DIR}/rust/ghostdeck-host-linux/icons/app"
 SKILLS_DIR="${ROOT_DIR}/skills"
-DESKTOP_FILE="${ROOT_DIR}/rust/limux-host-linux/dev.limux.linux.desktop"
-METADATA_FILE="${ROOT_DIR}/rust/limux-host-linux/dev.limux.linux.metainfo.xml"
+DESKTOP_FILE="${ROOT_DIR}/rust/ghostdeck-host-linux/dev.ghostdeck.linux.desktop"
+METADATA_FILE="${ROOT_DIR}/rust/ghostdeck-host-linux/dev.ghostdeck.linux.metainfo.xml"
 OUT_DIR="${ROOT_DIR}/dist"
 GHOSTTY_ZIG_ARGS=(-Doptimize=ReleaseFast -Dcpu=baseline)
-CLI_ENTRYPOINT_NAME="limux"
-HOST_ENTRYPOINT_NAME="limux-host"
+CLI_ENTRYPOINT_NAME="ghostdeck"
+HOST_ENTRYPOINT_NAME="ghostdeck-host"
 
 remove_tree() {
     local path="$1"
@@ -74,7 +74,7 @@ assert_glibc_compatibility() {
     if version_gt "$required_glibc" "$MAX_GLIBC_VERSION"; then
         echo "ERROR: ${label} requires GLIBC_${required_glibc}, which exceeds the supported release baseline GLIBC_${MAX_GLIBC_VERSION}."
         echo "Build release artifacts inside an environment pinned to GLIBC_${MAX_GLIBC_VERSION}."
-        echo "Override the baseline intentionally with LIMUX_MAX_GLIBC=<version> if you are targeting a newer distro on purpose."
+        echo "Override the baseline intentionally with GHOSTDECK_MAX_GLIBC=<version> if you are targeting a newer distro on purpose."
         exit 1
     fi
 
@@ -85,8 +85,8 @@ assert_cli_entrypoint() {
     local path="$1"
     local label="$2"
 
-    if ! "$path" --help 2>&1 | grep -q "limux CLI"; then
-        echo "ERROR: ${label} is not the limux CLI entrypoint: ${path}"
+    if ! "$path" --help 2>&1 | grep -q "ghostdeck CLI"; then
+        echo "ERROR: ${label} is not the ghostdeck CLI entrypoint: ${path}"
         exit 1
     fi
 }
@@ -97,7 +97,7 @@ assert_no_legacy_host_entrypoint() {
 
     if [ -e "$path" ]; then
         echo "ERROR: ${label} contains legacy host entrypoint at ${path}"
-        echo "Only the CLI may be named 'limux'; the GTK host must be 'limux-host'."
+        echo "Only the CLI may be named 'ghostdeck'; the GTK host must be 'ghostdeck-host'."
         exit 1
     fi
 }
@@ -189,7 +189,7 @@ build_ghostty_resources() {
         -Demit-docs=false
 }
 
-echo "=== Limux Packager ==="
+echo "=== GhostDeck Packager ==="
 echo "Version: ${VERSION}"
 echo "Arch:    ${ARCH}"
 echo "GLIBC:   <= ${MAX_GLIBC_VERSION}"
@@ -247,8 +247,8 @@ fi
 echo "Building release binary..."
 cargo build --release --manifest-path "${ROOT_DIR}/Cargo.toml"
 
-CLI_BINARY="${ROOT_DIR}/target/release/limux-cli"
-HOST_BINARY="${ROOT_DIR}/target/release/limux"
+CLI_BINARY="${ROOT_DIR}/target/release/ghostdeck-cli"
+HOST_BINARY="${ROOT_DIR}/target/release/ghostdeck"
 if [ ! -f "$CLI_BINARY" ]; then
     echo "ERROR: CLI binary not found at ${CLI_BINARY}"
     exit 1
@@ -259,9 +259,9 @@ if [ ! -f "$HOST_BINARY" ]; then
 fi
 
 assert_glibc_compatibility "$GHOSTTY_SO" "libghostty.so"
-assert_glibc_compatibility "$CLI_BINARY" "limux CLI"
-assert_glibc_compatibility "$HOST_BINARY" "limux host"
-assert_cli_entrypoint "$CLI_BINARY" "target/release/limux-cli"
+assert_glibc_compatibility "$CLI_BINARY" "ghostdeck CLI"
+assert_glibc_compatibility "$HOST_BINARY" "ghostdeck host"
+assert_cli_entrypoint "$CLI_BINARY" "target/release/ghostdeck-cli"
 
 # Clean staging and output
 remove_tree "$STAGE"
@@ -276,9 +276,9 @@ populate_tree() {
     local prefix="${2:-/usr/local}"
     local strip_files="${3:-true}"
     local bindir="$dest${prefix}/bin"
-    local libexecdir="$dest${prefix}/libexec/limux"
-    local libdir="$dest${prefix}/lib/limux"
-    local ghostty_datadir="$dest${prefix}/share/limux"
+    local libexecdir="$dest${prefix}/libexec/ghostdeck"
+    local libdir="$dest${prefix}/lib/ghostdeck"
+    local ghostty_datadir="$dest${prefix}/share/ghostdeck"
     local ghostty_resdir="$ghostty_datadir/ghostty"
     local appdir="$dest${prefix}/share/applications"
     local metadatadir="$dest${prefix}/share/metainfo"
@@ -289,14 +289,14 @@ populate_tree() {
     # Public CLI and private GTK host binary.
     cp "$CLI_BINARY" "$bindir/$CLI_ENTRYPOINT_NAME"
     cp "$HOST_BINARY" "$libexecdir/$HOST_ENTRYPOINT_NAME"
-    rm -f "$libexecdir/limux"
+    rm -f "$libexecdir/ghostdeck"
     if [ "$strip_files" = "true" ]; then
         strip "$bindir/$CLI_ENTRYPOINT_NAME"
         strip "$libexecdir/$HOST_ENTRYPOINT_NAME"
     fi
     chmod 755 "$bindir/$CLI_ENTRYPOINT_NAME" "$libexecdir/$HOST_ENTRYPOINT_NAME"
     assert_cli_entrypoint "$bindir/$CLI_ENTRYPOINT_NAME" "packaged $prefix/bin/$CLI_ENTRYPOINT_NAME"
-    assert_no_legacy_host_entrypoint "$libexecdir/limux" "packaged $prefix libexec tree"
+    assert_no_legacy_host_entrypoint "$libexecdir/ghostdeck" "packaged $prefix libexec tree"
 
     # Shared library
     cp "$GHOSTTY_SO" "$libdir/libghostty.so"
@@ -310,9 +310,9 @@ populate_tree() {
     cp -r "$SKILLS_DIR" "$ghostty_datadir/skills"
 
     # Desktop file. Use the absolute CLI path so desktop launchers do not
-    # accidentally resolve an older GTK host binary named `limux` from PATH.
-    install_desktop_file "$DESKTOP_FILE" "$appdir/dev.limux.linux.desktop" "$prefix/bin/$CLI_ENTRYPOINT_NAME"
-    cp "$METADATA_FILE" "$metadatadir/dev.limux.linux.metainfo.xml"
+    # accidentally resolve an older GTK host binary named `ghostdeck` from PATH.
+    install_desktop_file "$DESKTOP_FILE" "$appdir/dev.ghostdeck.linux.desktop" "$prefix/bin/$CLI_ENTRYPOINT_NAME"
+    cp "$METADATA_FILE" "$metadatadir/dev.ghostdeck.linux.metainfo.xml"
 
     # Action icons
     if [ -d "$ICONS_DIR/hicolor" ]; then
@@ -328,7 +328,7 @@ populate_tree() {
             src="${APP_ICONS_DIR}/${size}.png"
             if [ -f "$src" ]; then
                 mkdir -p "$icondir/${size}x${size}/apps"
-                cp "$src" "$icondir/${size}x${size}/apps/limux.png"
+                cp "$src" "$icondir/${size}x${size}/apps/ghostdeck.png"
             fi
         done
     fi
@@ -342,14 +342,14 @@ build_rpm_source_tree() {
     populate_tree "$dest" "/usr" "false"
 
     mkdir -p "$dest/etc/ld.so.conf.d"
-    echo "/usr/lib/limux" > "$dest/etc/ld.so.conf.d/limux.conf"
+    echo "/usr/lib/ghostdeck" > "$dest/etc/ld.so.conf.d/ghostdeck.conf"
 }
 
 build_rpm_package() {
-    local rpm_src_dir="/tmp/limux-$VERSION"
-    local rpm_tarball="/tmp/limux-$VERSION.tar.gz"
+    local rpm_src_dir="/tmp/ghostdeck-$VERSION"
+    local rpm_tarball="/tmp/ghostdeck-$VERSION.tar.gz"
     local rpmbuild_dir="/tmp/rpmbuild-$VERSION"
-    local rpm_output="$rpmbuild_dir/RPMS/${RPM_ARCH}/limux-${VERSION}-1.${RPM_ARCH}.rpm"
+    local rpm_output="$rpmbuild_dir/RPMS/${RPM_ARCH}/ghostdeck-${VERSION}-1.${RPM_ARCH}.rpm"
 
     if ! command -v rpmbuild >/dev/null 2>&1; then
         echo "  WARNING: rpmbuild not found, skipping RPM"
@@ -357,23 +357,23 @@ build_rpm_package() {
     fi
 
     build_rpm_source_tree "$rpm_src_dir"
-    tar -czf "$rpm_tarball" -C /tmp "limux-$VERSION"
+    tar -czf "$rpm_tarball" -C /tmp "ghostdeck-$VERSION"
     remove_tree "$rpm_src_dir"
 
     remove_tree "$rpmbuild_dir"
     mkdir -p "$rpmbuild_dir"/{BUILD,RPMS,SOURCES,SPECS}
     cp "$rpm_tarball" "$rpmbuild_dir/SOURCES/"
-    cp "$ROOT_DIR/scripts/limux.spec" "$rpmbuild_dir/SPECS/"
+    cp "$ROOT_DIR/scripts/ghostdeck.spec" "$rpmbuild_dir/SPECS/"
 
     rpmbuild -bb \
         --define "_topdir $rpmbuild_dir" \
         --define "version $VERSION" \
         --target "$RPM_ARCH" \
-        "$rpmbuild_dir/SPECS/limux.spec" 2>&1
+        "$rpmbuild_dir/SPECS/ghostdeck.spec" 2>&1
 
     if [ -f "$rpm_output" ]; then
         cp "$rpm_output" "$OUT_DIR/"
-        echo "  -> dist/limux-${VERSION}-1.${RPM_ARCH}.rpm"
+        echo "  -> dist/ghostdeck-${VERSION}-1.${RPM_ARCH}.rpm"
     else
         echo "  WARNING: rpmbuild did not produce expected RPM file"
     fi
@@ -388,22 +388,22 @@ echo ""
 echo "--- Building tarball ---"
 TARBALL_STAGE="/tmp/${PKG_BASE}"
 remove_tree "$TARBALL_STAGE"
-mkdir -p "$TARBALL_STAGE"/{lib,libexec/limux,share/limux/ghostty,share/limux/terminfo,share/applications,share/icons/hicolor/scalable/actions}
+mkdir -p "$TARBALL_STAGE"/{lib,libexec/ghostdeck,share/ghostdeck/ghostty,share/ghostdeck/terminfo,share/applications,share/icons/hicolor/scalable/actions}
 mkdir -p "$TARBALL_STAGE/share/metainfo"
 
-cp "$CLI_BINARY" "$TARBALL_STAGE/limux"
-cp "$HOST_BINARY" "$TARBALL_STAGE/libexec/limux/limux-host"
-strip "$TARBALL_STAGE/limux"
-strip "$TARBALL_STAGE/libexec/limux/limux-host"
-chmod 755 "$TARBALL_STAGE/limux" "$TARBALL_STAGE/libexec/limux/limux-host"
-assert_cli_entrypoint "$TARBALL_STAGE/limux" "tarball limux"
+cp "$CLI_BINARY" "$TARBALL_STAGE/ghostdeck"
+cp "$HOST_BINARY" "$TARBALL_STAGE/libexec/ghostdeck/ghostdeck-host"
+strip "$TARBALL_STAGE/ghostdeck"
+strip "$TARBALL_STAGE/libexec/ghostdeck/ghostdeck-host"
+chmod 755 "$TARBALL_STAGE/ghostdeck" "$TARBALL_STAGE/libexec/ghostdeck/ghostdeck-host"
+assert_cli_entrypoint "$TARBALL_STAGE/ghostdeck" "tarball ghostdeck"
 cp "$GHOSTTY_SO" "$TARBALL_STAGE/lib/libghostty.so"
 strip --strip-debug "$TARBALL_STAGE/lib/libghostty.so"
-cp -r "$GHOSTTY_SHARE_DIR"/. "$TARBALL_STAGE/share/limux/ghostty"
-copy_ghostty_terminfo_entries "$GHOSTTY_TERMINFO_DIR" "$TARBALL_STAGE/share/limux/terminfo"
-cp -r "$SKILLS_DIR" "$TARBALL_STAGE/share/limux/skills"
-cp "$DESKTOP_FILE" "$TARBALL_STAGE/share/applications/dev.limux.linux.desktop"
-cp "$METADATA_FILE" "$TARBALL_STAGE/share/metainfo/dev.limux.linux.metainfo.xml"
+cp -r "$GHOSTTY_SHARE_DIR"/. "$TARBALL_STAGE/share/ghostdeck/ghostty"
+copy_ghostty_terminfo_entries "$GHOSTTY_TERMINFO_DIR" "$TARBALL_STAGE/share/ghostdeck/terminfo"
+cp -r "$SKILLS_DIR" "$TARBALL_STAGE/share/ghostdeck/skills"
+cp "$DESKTOP_FILE" "$TARBALL_STAGE/share/applications/dev.ghostdeck.linux.desktop"
+cp "$METADATA_FILE" "$TARBALL_STAGE/share/metainfo/dev.ghostdeck.linux.metainfo.xml"
 
 if [ -d "$ICONS_DIR/hicolor" ]; then
     cp -r "$ICONS_DIR/hicolor/scalable" "$TARBALL_STAGE/share/icons/hicolor/" 2>/dev/null || true
@@ -416,7 +416,7 @@ if [ -d "$APP_ICONS_DIR" ]; then
         src="${APP_ICONS_DIR}/${size}.png"
         if [ -f "$src" ]; then
             mkdir -p "$TARBALL_STAGE/share/icons/hicolor/${size}x${size}/apps"
-            cp "$src" "$TARBALL_STAGE/share/icons/hicolor/${size}x${size}/apps/limux.png"
+            cp "$src" "$TARBALL_STAGE/share/icons/hicolor/${size}x${size}/apps/ghostdeck.png"
         fi
     done
 fi
@@ -461,7 +461,7 @@ install_desktop_file() {
     chmod 644 "$dest"
 }
 
-legacy_limux_paths() {
+legacy_ghostdeck_paths() {
     local sudo_home=""
 
     if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
@@ -469,63 +469,63 @@ legacy_limux_paths() {
     fi
 
     printf '%s\n' \
-        "$PREFIX/libexec/limux/limux" \
-        /usr/local/libexec/limux/limux \
-        /usr/libexec/limux/limux \
-        /usr/local/bin/limux \
-        /usr/bin/limux
+        "$PREFIX/libexec/ghostdeck/ghostdeck" \
+        /usr/local/libexec/ghostdeck/ghostdeck \
+        /usr/libexec/ghostdeck/ghostdeck \
+        /usr/local/bin/ghostdeck \
+        /usr/bin/ghostdeck
 
     if [ -n "$sudo_home" ]; then
         printf '%s\n' \
-            "$sudo_home/.local/libexec/limux/limux" \
-            "$sudo_home/.local/bin/limux"
+            "$sudo_home/.local/libexec/ghostdeck/ghostdeck" \
+            "$sudo_home/.local/bin/ghostdeck"
     fi
 }
 
-is_legacy_limux_host() {
+is_legacy_ghostdeck_host() {
     local path="$1"
     local help
 
     [ -x "$path" ] || return 1
     help="$("$path" --help 2>&1 || true)"
-    printf '%s\n' "$help" | grep -q "limux CLI" && return 1
+    printf '%s\n' "$help" | grep -q "ghostdeck CLI" && return 1
     printf '%s\n' "$help" | grep -q "GApplication" && return 0
-    "$path" --json identify >/tmp/limux-installer-probe.log 2>&1 && return 1
-    grep -q "Unknown option --json" /tmp/limux-installer-probe.log
+    "$path" --json identify >/tmp/ghostdeck-installer-probe.log 2>&1 && return 1
+    grep -q "Unknown option --json" /tmp/ghostdeck-installer-probe.log
 }
 
-clean_legacy_limux_entrypoints() {
+clean_legacy_ghostdeck_entrypoints() {
     local path
 
     while IFS= read -r path; do
         [ -n "$path" ] || continue
-        [ "$path" = "$PREFIX/bin/limux" ] && continue
-        if [ "${path%/bin/limux}" != "$path" ]; then
-            if is_legacy_limux_host "$path"; then
+        [ "$path" = "$PREFIX/bin/ghostdeck" ] && continue
+        if [ "${path%/bin/ghostdeck}" != "$path" ]; then
+            if is_legacy_ghostdeck_host "$path"; then
                 rm -f "$path"
-                echo "Removed legacy Limux host entrypoint: $path"
+                echo "Removed legacy GhostDeck host entrypoint: $path"
             fi
         elif [ -e "$path" ]; then
             rm -f "$path"
-            echo "Removed legacy Limux host entrypoint: $path"
+            echo "Removed legacy GhostDeck host entrypoint: $path"
         fi
     done <<EOF_PATHS
-$(legacy_limux_paths)
+$(legacy_ghostdeck_paths)
 EOF_PATHS
 }
 
-warn_if_limux_is_shadowed() {
-    local expected="$PREFIX/bin/limux"
+warn_if_ghostdeck_is_shadowed() {
+    local expected="$PREFIX/bin/ghostdeck"
     local first
 
-    first="$(PATH="$PREFIX/bin:$PATH" command -v limux 2>/dev/null || true)"
+    first="$(PATH="$PREFIX/bin:$PATH" command -v ghostdeck 2>/dev/null || true)"
     if [ "$first" != "$expected" ]; then
-        echo "WARNING: the first limux on PATH is '$first', expected '$expected'."
-        echo "         Agent/CLI commands require the Limux CLI entrypoint."
+        echo "WARNING: the first ghostdeck on PATH is '$first', expected '$expected'."
+        echo "         Agent/CLI commands require the GhostDeck CLI entrypoint."
     fi
 
-    if ! "$expected" --help 2>&1 | grep -q "limux CLI"; then
-        echo "ERROR: installed limux entrypoint is not the CLI: $expected" >&2
+    if ! "$expected" --help 2>&1 | grep -q "ghostdeck CLI"; then
+        echo "ERROR: installed ghostdeck entrypoint is not the CLI: $expected" >&2
         exit 1
     fi
 }
@@ -544,59 +544,60 @@ remove_tree() {
 
 if $UNINSTALL; then
     need_root "$@"
-    echo "Uninstalling Limux..."
-    rm -f "$PREFIX/bin/limux"
-    remove_tree "$PREFIX/libexec/limux"
-    remove_tree "$PREFIX/lib/limux"
-    remove_tree "$PREFIX/share/limux"
-    rm -f /etc/ld.so.conf.d/limux.conf
+    echo "Uninstalling GhostDeck..."
+    rm -f "$PREFIX/bin/ghostdeck"
+    remove_tree "$PREFIX/libexec/ghostdeck"
+    remove_tree "$PREFIX/lib/ghostdeck"
+    remove_tree "$PREFIX/share/ghostdeck"
+    rm -f /etc/ld.so.conf.d/ghostdeck.conf
     ldconfig 2>/dev/null || true
-    rm -f "$PREFIX/share/applications/limux.desktop"
-    rm -f "$PREFIX/share/applications/dev.limux.linux.desktop"
-    rm -f "$PREFIX/share/metainfo/dev.limux.linux.metainfo.xml"
+    rm -f "$PREFIX/share/applications/ghostdeck.desktop"
+    rm -f "$PREFIX/share/applications/dev.ghostdeck.linux.desktop"
+    rm -f "$PREFIX/share/metainfo/dev.ghostdeck.linux.metainfo.xml"
     for size in 16 32 128 256 512; do
-        rm -f "$PREFIX/share/icons/hicolor/${size}x${size}/apps/limux.png"
+        rm -f "$PREFIX/share/icons/hicolor/${size}x${size}/apps/ghostdeck.png"
     done
-    rm -f "$PREFIX/share/icons/hicolor/scalable/actions/limux-globe-symbolic.svg"
-    rm -f "$PREFIX/share/icons/hicolor/scalable/actions/limux-split-horizontal-symbolic.svg"
-    rm -f "$PREFIX/share/icons/hicolor/scalable/actions/limux-split-vertical-symbolic.svg"
+    rm -f "$PREFIX/share/icons/hicolor/scalable/apps/ghostdeck.svg"
+    rm -f "$PREFIX/share/icons/hicolor/scalable/actions/ghostdeck-globe-symbolic.svg"
+    rm -f "$PREFIX/share/icons/hicolor/scalable/actions/ghostdeck-split-horizontal-symbolic.svg"
+    rm -f "$PREFIX/share/icons/hicolor/scalable/actions/ghostdeck-split-vertical-symbolic.svg"
     gtk-update-icon-cache -f -t "$PREFIX/share/icons/hicolor" 2>/dev/null || true
     update-desktop-database "$PREFIX/share/applications" 2>/dev/null || true
     appstreamcli refresh-cache --force 2>/dev/null || true
-    echo "Limux uninstalled."
+    echo "GhostDeck uninstalled."
     exit 0
 fi
 
 need_root "$@"
-echo "Installing Limux to ${PREFIX}..."
+echo "Installing GhostDeck to ${PREFIX}..."
 
-install -Dm755 "$SCRIPT_DIR/limux" "$PREFIX/bin/limux"
-clean_legacy_limux_entrypoints
-install -Dm755 "$SCRIPT_DIR/libexec/limux/limux-host" "$PREFIX/libexec/limux/limux-host"
-install -Dm644 "$SCRIPT_DIR/lib/libghostty.so" "$PREFIX/lib/limux/libghostty.so"
-if [ -d "$SCRIPT_DIR/share/limux" ]; then
-    cp -r "$SCRIPT_DIR/share/limux" "$PREFIX/share/"
+install -Dm755 "$SCRIPT_DIR/ghostdeck" "$PREFIX/bin/ghostdeck"
+clean_legacy_ghostdeck_entrypoints
+install -Dm755 "$SCRIPT_DIR/libexec/ghostdeck/ghostdeck-host" "$PREFIX/libexec/ghostdeck/ghostdeck-host"
+install -Dm644 "$SCRIPT_DIR/lib/libghostty.so" "$PREFIX/lib/ghostdeck/libghostty.so"
+if [ -d "$SCRIPT_DIR/share/ghostdeck" ]; then
+    cp -r "$SCRIPT_DIR/share/ghostdeck" "$PREFIX/share/"
 fi
-echo "$PREFIX/lib/limux" > /etc/ld.so.conf.d/limux.conf
+echo "$PREFIX/lib/ghostdeck" > /etc/ld.so.conf.d/ghostdeck.conf
 ldconfig 2>/dev/null || true
-rm -f "$PREFIX/share/applications/limux.desktop"
+rm -f "$PREFIX/share/applications/ghostdeck.desktop"
 mkdir -p "$PREFIX/share/applications"
-install_desktop_file "$SCRIPT_DIR/share/applications/dev.limux.linux.desktop" "$PREFIX/share/applications/dev.limux.linux.desktop" "$PREFIX/bin/limux"
-install -Dm644 "$SCRIPT_DIR/share/metainfo/dev.limux.linux.metainfo.xml" "$PREFIX/share/metainfo/dev.limux.linux.metainfo.xml"
+install_desktop_file "$SCRIPT_DIR/share/applications/dev.ghostdeck.linux.desktop" "$PREFIX/share/applications/dev.ghostdeck.linux.desktop" "$PREFIX/bin/ghostdeck"
+install -Dm644 "$SCRIPT_DIR/share/metainfo/dev.ghostdeck.linux.metainfo.xml" "$PREFIX/share/metainfo/dev.ghostdeck.linux.metainfo.xml"
 if [ -d "$SCRIPT_DIR/share/icons" ]; then
     cp -r "$SCRIPT_DIR/share/icons/hicolor" "$PREFIX/share/icons/"
 fi
 gtk-update-icon-cache -f -t "$PREFIX/share/icons/hicolor" 2>/dev/null || true
 update-desktop-database "$PREFIX/share/applications" 2>/dev/null || true
 appstreamcli refresh-cache --force 2>/dev/null || true
-warn_if_limux_is_shadowed
+warn_if_ghostdeck_is_shadowed
 
 echo ""
-echo "Limux installed successfully!"
-echo "  CLI:     $PREFIX/bin/limux"
-echo "  Host:    $PREFIX/libexec/limux/limux-host"
-echo "  Library: $PREFIX/lib/limux/libghostty.so"
-echo "  App:     limux"
+echo "GhostDeck installed successfully!"
+echo "  CLI:     $PREFIX/bin/ghostdeck"
+echo "  Host:    $PREFIX/libexec/ghostdeck/ghostdeck-host"
+echo "  Library: $PREFIX/lib/ghostdeck/libghostty.so"
+echo "  App:     ghostdeck"
 echo ""
 echo "System dependencies (install if missing):"
 echo "  sudo apt install libgtk-4-1 libadwaita-1-0"
@@ -618,13 +619,13 @@ populate_tree "$DEB_ROOT" "/usr"
 
 # ldconfig trigger
 mkdir -p "$DEB_ROOT/etc/ld.so.conf.d"
-echo "/usr/lib/limux" > "$DEB_ROOT/etc/ld.so.conf.d/limux.conf"
+echo "/usr/lib/ghostdeck" > "$DEB_ROOT/etc/ld.so.conf.d/ghostdeck.conf"
 
 # Control file
 INSTALLED_SIZE=$(du -sk "$DEB_ROOT" | cut -f1)
 mkdir -p "$DEB_ROOT/DEBIAN"
 cat > "$DEB_ROOT/DEBIAN/control" << EOF
-Package: limux
+Package: ghostdeck
 Version: ${VERSION}
 Section: utils
 Priority: optional
@@ -633,9 +634,9 @@ Installed-Size: ${INSTALLED_SIZE}
 Depends: libgtk-4-1, libadwaita-1-0
 Maintainer: Will R <will@limux.dev>
 Description: GPU-accelerated terminal workspace manager for Linux
- Limux is a terminal workspace manager powered by Ghostty's
+ GhostDeck is a terminal workspace manager powered by Ghostty's
  GPU-rendered terminal engine, with split surfaces and tabbed workspaces.
-Homepage: https://github.com/am-will/limux
+Homepage: https://github.com/Munawwar/GhostDeck
 EOF
 
 # Post-install: run ldconfig and update caches
@@ -643,24 +644,24 @@ cat > "$DEB_ROOT/DEBIAN/postinst" << 'EOF'
 #!/bin/bash
 set -e
 
-is_legacy_limux_host() {
+is_legacy_ghostdeck_host() {
     path="$1"
     [ -x "$path" ] || return 1
     help="$("$path" --help 2>&1 || true)"
-    echo "$help" | grep -q "limux CLI" && return 1
+    echo "$help" | grep -q "ghostdeck CLI" && return 1
     echo "$help" | grep -q "GApplication" && return 0
-    "$path" --json identify >/tmp/limux-postinst-probe.log 2>&1 && return 1
-    grep -q "Unknown option --json" /tmp/limux-postinst-probe.log
+    "$path" --json identify >/tmp/ghostdeck-postinst-probe.log 2>&1 && return 1
+    grep -q "Unknown option --json" /tmp/ghostdeck-postinst-probe.log
 }
 
 ldconfig 2>/dev/null || true
-rm -f /usr/libexec/limux/limux
-rm -f /usr/local/libexec/limux/limux
-if is_legacy_limux_host /usr/local/bin/limux; then
-    rm -f /usr/local/bin/limux
+rm -f /usr/libexec/ghostdeck/ghostdeck
+rm -f /usr/local/libexec/ghostdeck/ghostdeck
+if is_legacy_ghostdeck_host /usr/local/bin/ghostdeck; then
+    rm -f /usr/local/bin/ghostdeck
 fi
-rm -f /usr/share/applications/limux.desktop
-rm -f /usr/local/share/applications/limux.desktop
+rm -f /usr/share/applications/ghostdeck.desktop
+rm -f /usr/local/share/applications/ghostdeck.desktop
 gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
 update-desktop-database /usr/share/applications 2>/dev/null || true
 appstreamcli refresh-cache --force 2>/dev/null || true
@@ -677,9 +678,9 @@ appstreamcli refresh-cache --force 2>/dev/null || true
 EOF
 chmod 755 "$DEB_ROOT/DEBIAN/postrm"
 
-DEB_FILE="$OUT_DIR/limux_${VERSION}_${DEB_ARCH}.deb"
+DEB_FILE="$OUT_DIR/ghostdeck_${VERSION}_${DEB_ARCH}.deb"
 dpkg-deb --build --root-owner-group "$DEB_ROOT" "$DEB_FILE"
-echo "  -> dist/limux_${VERSION}_${DEB_ARCH}.deb"
+echo "  -> dist/ghostdeck_${VERSION}_${DEB_ARCH}.deb"
 
 # =========================================================================
 # 3. RPM package
@@ -693,21 +694,21 @@ build_rpm_package
 # =========================================================================
 echo ""
 echo "--- Building AppImage ---"
-APPDIR="$STAGE/Limux.AppDir"
+APPDIR="$STAGE/GhostDeck.AppDir"
 remove_tree "$APPDIR"
-mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib" "$APPDIR/usr/libexec/limux" \
+mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib" "$APPDIR/usr/libexec/ghostdeck" \
          "$APPDIR/usr/share/applications" \
          "$APPDIR/usr/share/metainfo" \
          "$APPDIR/usr/share/icons/hicolor/scalable/actions" \
-         "$APPDIR/usr/share/limux"
+         "$APPDIR/usr/share/ghostdeck"
 
 # Public CLI and private GTK host binary.
-cp "$CLI_BINARY" "$APPDIR/usr/bin/limux"
-cp "$HOST_BINARY" "$APPDIR/usr/libexec/limux/limux-host"
-strip "$APPDIR/usr/bin/limux"
-strip "$APPDIR/usr/libexec/limux/limux-host"
-chmod 755 "$APPDIR/usr/bin/limux" "$APPDIR/usr/libexec/limux/limux-host"
-assert_cli_entrypoint "$APPDIR/usr/bin/limux" "AppImage usr/bin/limux"
+cp "$CLI_BINARY" "$APPDIR/usr/bin/ghostdeck"
+cp "$HOST_BINARY" "$APPDIR/usr/libexec/ghostdeck/ghostdeck-host"
+strip "$APPDIR/usr/bin/ghostdeck"
+strip "$APPDIR/usr/libexec/ghostdeck/ghostdeck-host"
+chmod 755 "$APPDIR/usr/bin/ghostdeck" "$APPDIR/usr/libexec/ghostdeck/ghostdeck-host"
+assert_cli_entrypoint "$APPDIR/usr/bin/ghostdeck" "AppImage usr/bin/ghostdeck"
 
 # Shared library
 cp "$GHOSTTY_SO" "$APPDIR/usr/lib/libghostty.so"
@@ -717,13 +718,13 @@ strip --strip-debug "$APPDIR/usr/lib/libghostty.so"
 copy_appimage_library_closure "$APPDIR/usr/lib" "$CLI_BINARY" "$HOST_BINARY" "$GHOSTTY_SO"
 
 # Ghostty resources required for named themes and shell integration
-cp -r "$GHOSTTY_SHARE_DIR" "$APPDIR/usr/share/limux/ghostty"
-cp -r "$SKILLS_DIR" "$APPDIR/usr/share/limux/skills"
+cp -r "$GHOSTTY_SHARE_DIR" "$APPDIR/usr/share/ghostdeck/ghostty"
+cp -r "$SKILLS_DIR" "$APPDIR/usr/share/ghostdeck/skills"
 
 # Desktop file (at AppDir root and in usr/share)
-cp "$DESKTOP_FILE" "$APPDIR/dev.limux.linux.desktop"
-cp "$DESKTOP_FILE" "$APPDIR/usr/share/applications/dev.limux.linux.desktop"
-cp "$METADATA_FILE" "$APPDIR/usr/share/metainfo/dev.limux.linux.metainfo.xml"
+cp "$DESKTOP_FILE" "$APPDIR/dev.ghostdeck.linux.desktop"
+cp "$DESKTOP_FILE" "$APPDIR/usr/share/applications/dev.ghostdeck.linux.desktop"
+cp "$METADATA_FILE" "$APPDIR/usr/share/metainfo/dev.ghostdeck.linux.metainfo.xml"
 
 # Icons
 if [ -d "$ICONS_DIR/hicolor" ]; then
@@ -737,14 +738,14 @@ if [ -d "$APP_ICONS_DIR" ]; then
         src="${APP_ICONS_DIR}/${size}.png"
         if [ -f "$src" ]; then
             mkdir -p "$APPDIR/usr/share/icons/hicolor/${size}x${size}/apps"
-            cp "$src" "$APPDIR/usr/share/icons/hicolor/${size}x${size}/apps/limux.png"
+            cp "$src" "$APPDIR/usr/share/icons/hicolor/${size}x${size}/apps/ghostdeck.png"
         fi
     done
 fi
 
-# AppImage icon (must be at root as .DirIcon and limux.png)
+# AppImage icon (must be at root as .DirIcon and ghostdeck.png)
 if [ -f "$APP_ICONS_DIR/256.png" ]; then
-    cp "$APP_ICONS_DIR/256.png" "$APPDIR/limux.png"
+    cp "$APP_ICONS_DIR/256.png" "$APPDIR/ghostdeck.png"
     cp "$APP_ICONS_DIR/256.png" "$APPDIR/.DirIcon"
 fi
 
@@ -755,12 +756,12 @@ HERE="$(dirname "$(readlink -f "$0")")"
 cd "$HERE"
 export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH:-}"
 export XDG_DATA_DIRS="${HERE}/usr/share:${XDG_DATA_DIRS:-/usr/share}"
-exec "${HERE}/usr/bin/limux" "$@"
+exec "${HERE}/usr/bin/ghostdeck" "$@"
 APPRUN_EOF
 chmod 755 "$APPDIR/AppRun"
 
 # Build AppImage
-APPIMAGE_FILE="$OUT_DIR/Limux-${VERSION}-${ARCH}.AppImage"
+APPIMAGE_FILE="$OUT_DIR/GhostDeck-${VERSION}-${ARCH}.AppImage"
 if command -v appimagetool &>/dev/null; then
     APPIMAGETOOL="appimagetool"
 elif [ -x /tmp/appimagetool ]; then
@@ -772,7 +773,7 @@ fi
 
 if [ -n "$APPIMAGETOOL" ]; then
     ARCH="$ARCH" "$APPIMAGETOOL" "$APPDIR" "$APPIMAGE_FILE" 2>&1 | tail -3
-    echo "  -> dist/Limux-${VERSION}-${ARCH}.AppImage"
+    echo "  -> dist/GhostDeck-${VERSION}-${ARCH}.AppImage"
 fi
 
 # =========================================================================
@@ -784,6 +785,6 @@ ls -lh "$OUT_DIR"/ 2>/dev/null
 echo ""
 echo "Install options:"
 echo "  Tarball:   tar xzf dist/${PKG_BASE}.tar.gz && cd ${PKG_BASE} && sudo ./install.sh"
-echo "  Deb:       sudo dpkg -i ./dist/limux_${VERSION}_${DEB_ARCH}.deb"
-echo "  RPM:       sudo rpm -i ./dist/limux-${VERSION}-1.${RPM_ARCH}.rpm"
-echo "  AppImage:  chmod +x dist/Limux-${VERSION}-${ARCH}.AppImage && ./dist/Limux-${VERSION}-${ARCH}.AppImage"
+echo "  Deb:       sudo dpkg -i ./dist/ghostdeck_${VERSION}_${DEB_ARCH}.deb"
+echo "  RPM:       sudo rpm -i ./dist/ghostdeck-${VERSION}-1.${RPM_ARCH}.rpm"
+echo "  AppImage:  chmod +x dist/GhostDeck-${VERSION}-${ARCH}.AppImage && ./dist/GhostDeck-${VERSION}-${ARCH}.AppImage"

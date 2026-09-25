@@ -1,0 +1,23 @@
+[package]
+name = "ghostdeck-control"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+libc = "0.2"
+ghostdeck-core = { path = "../ghostdeck-core" }
+ghostdeck-protocol = { path = "../ghostdeck-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true

@@ -410,6 +410,82 @@ dependencies = [
 ]
 
 [[package]]
+name = "ghostdeck-cli"
+version = "0.1.19"
+dependencies = [
+ "anyhow",
+ "clap",
+ "dirs",
+ "ghostdeck-control",
+ "ghostdeck-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "ghostdeck-control"
+version = "0.1.19"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ghostdeck-core",
+ "ghostdeck-protocol",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "ghostdeck-core"
+version = "0.1.19"
+dependencies = [
+ "anyhow",
+ "ghostdeck-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "ghostdeck-ghostty-sys"
+version = "0.1.19"
+dependencies = [
+ "cc",
+]
+
+[[package]]
+name = "ghostdeck-host-linux"
+version = "0.1.19"
+dependencies = [
+ "dirs",
+ "gdk4-wayland",
+ "ghostdeck-control",
+ "ghostdeck-ghostty-sys",
+ "ghostdeck-protocol",
+ "gtk4",
+ "libadwaita",
+ "serde",
+ "serde_json",
+ "shell-quote",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "ghostdeck-protocol"
+version = "0.1.19"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "gio"
 version = "0.22.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -710,82 +786,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1744e39d1d6a9948f4f388969627434e31128196de472883b39f148769bfe30a"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "limux-cli"
-version = "0.1.19"
-dependencies = [
- "anyhow",
- "clap",
- "dirs",
- "limux-control",
- "limux-protocol",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "limux-control"
-version = "0.1.19"
-dependencies = [
- "anyhow",
- "clap",
- "libc",
- "limux-core",
- "limux-protocol",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "limux-core"
-version = "0.1.19"
-dependencies = [
- "anyhow",
- "limux-protocol",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "limux-ghostty-sys"
-version = "0.1.19"
-dependencies = [
- "cc",
-]
-
-[[package]]
-name = "limux-host-linux"
-version = "0.1.19"
-dependencies = [
- "dirs",
- "gdk4-wayland",
- "gtk4",
- "libadwaita",
- "limux-control",
- "limux-ghostty-sys",
- "limux-protocol",
- "serde",
- "serde_json",
- "shell-quote",
- "tempfile",
- "uuid",
-]
-
-[[package]]
-name = "limux-protocol"
-version = "0.1.19"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
 ]
 
 [[package]]

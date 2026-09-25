@@ -89,7 +89,7 @@ jobs:
       - name: Build Linux packages
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
-          LIMUX_MAX_GLIBC: "2.39"
+          GHOSTDECK_MAX_GLIBC: "2.39"
         run: ./scripts/package.sh "${{ steps.version.outputs.version }}"
 
       - name: Upload packages to release
@@ -105,6 +105,6 @@ jobs:
       - name: Upload packages as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: limux-linux-packages-${{ steps.version.outputs.version }}
+          name: ghostdeck-linux-packages-${{ steps.version.outputs.version }}
           path: dist/*
           retention-days: 30
