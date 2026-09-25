@@ -1,6 +1,6 @@
 # GhostDeck
 
-A GPU-accelerated terminal workspace manager for Linux, powered by Ghostty's rendering engine.
+Ghostty terminal workspace with built-in desktop and agent integration
 
 ![GhostDeck showing a workspace with split, tabbed terminals](docs/images/ghostdeck-workspaces.png)
 
