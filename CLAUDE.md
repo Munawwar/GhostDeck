@@ -1,8 +1,7 @@
 # CLAUDE.md — project context for Claude Code
 
 Short, Claude-oriented companion to [`AGENTS.md`](AGENTS.md). For
-architecture and the full CLI surface, read `AGENTS.md`. For roadmap
-status, read [`docs/cmux-parity-plan.md`](docs/cmux-parity-plan.md).
+architecture and the full CLI surface, read `AGENTS.md`.
 
 ## What is this project?
 
@@ -89,7 +88,6 @@ rg -n "PaneCallbacks \{"                           rust/ghostdeck-host-linux/src
 ## In case of doubt
 
 - **Architecture / full CLI** → `AGENTS.md`
-- **Roadmap & phase status** → `docs/cmux-parity-plan.md`
 - **Maintainability rules** → `docs/maintainability.md`
 - **User install/usage** → `README.md`
 - **Inter-agent message format** → the AGENTS.md that `ghostdeck agent-team`

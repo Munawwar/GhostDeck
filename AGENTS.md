@@ -75,7 +75,7 @@ There are two control-server paths:
 When fixing user-visible CLI behavior, verify the production GTK bridge path,
 not only the standalone dispatcher. The live bridge supports workspace, pane,
 surface, terminal send/key/read/health, notification, and agent surface-create
-commands. Check `docs/cmux-parity-plan.md` before changing agent automation.
+commands.
 
 ## IDs And Env
 
@@ -134,6 +134,5 @@ name addressing, and by-name send path.
 
 Useful references:
 
-- Roadmap/current bridge status: `docs/cmux-parity-plan.md`
 - Maintainability rules: `docs/maintainability.md`
 - CLI usage: `README.md` and `./target/debug/ghostdeck-cli --help`
