@@ -411,7 +411,7 @@ dependencies = [
 
 [[package]]
 name = "ghostdeck-cli"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -426,7 +426,7 @@ dependencies = [
 
 [[package]]
 name = "ghostdeck-control"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -441,7 +441,7 @@ dependencies = [
 
 [[package]]
 name = "ghostdeck-core"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ghostdeck-protocol",
@@ -453,14 +453,14 @@ dependencies = [
 
 [[package]]
 name = "ghostdeck-ghostty-sys"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "ghostdeck-host-linux"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "dirs",
  "gdk4-wayland",
@@ -478,7 +478,7 @@ dependencies = [
 
 [[package]]
 name = "ghostdeck-protocol"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",

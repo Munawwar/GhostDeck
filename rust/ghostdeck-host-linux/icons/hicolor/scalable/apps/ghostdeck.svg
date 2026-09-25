@@ -2,17 +2,11 @@
   <title>GhostDeck — terminal panes</title>
   <desc>A dark rounded terminal window divided into one tall left pane and two smaller right panes.</desc>
   <defs>
-    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
-      <stop stop-color="#303844"/>
-      <stop offset="1" stop-color="#161B24"/>
-    </linearGradient>
     <linearGradient id="screen" x1="0" y1="0" x2="1" y2="1">
       <stop stop-color="#202B44"/>
       <stop offset="1" stop-color="#101727"/>
     </linearGradient>
   </defs>
-  <rect x="8" y="10" width="112" height="112" rx="10" fill="#0B101A"/>
-  <rect x="8" y="6" width="112" height="112" rx="10" fill="url(#body)"/>
   <rect x="17" y="15" width="94" height="94" rx="5" fill="url(#screen)" stroke="#69778D" stroke-width="2"/>
   <path fill="#203B67" d="M25 20h35v84H25a3 3 0 0 1-3-3V23a3 3 0 0 1 3-3Z"/>
   <path fill="none" stroke="#69778D" stroke-width="2" d="M64 16v92m0-46h46"/>

@@ -1,10 +1,8 @@
 # GhostDeck
 
-A GPU-accelerated terminal workspace manager for Linux, powered by Ghostty's rendering engine. A special thanks to the cmux contributors who inspired this build. 
+A GPU-accelerated terminal workspace manager for Linux, powered by Ghostty's rendering engine.
 
-If you are on Mac, please visit https://github.com/manaflow-ai/cmux to download the original. 
-
-https://github.com/user-attachments/assets/6f3047c2-e2b6-49f2-b536-570a1570d0f8
+![GhostDeck showing a workspace with split, tabbed terminals](docs/images/ghostdeck-workspaces.png)
 
 ## Features
 
@@ -13,22 +11,22 @@ https://github.com/user-attachments/assets/6f3047c2-e2b6-49f2-b536-570a1570d0f8
 - **Ghostty surface splits** (horizontal/vertical) with keyboard navigation
 - **Tabbed terminals** within each workspace
 - **Right-click context menu** with copy, paste, split, clear
-- **Drag-and-drop** workspace reordering with favorites/pinning
+- **Drag-and-drop** workspace reordering with favorites; terminal tabs can be pinned
 - **Animated sidebar** collapse/expand
 
 ## Install
 
-Download the latest release from [GitHub Releases](https://github.com/Munawwar/GhostDeck/releases).
+When release packages are published, they will be available from [GitHub Releases](https://github.com/Munawwar/GhostDeck/releases).
 
 **Debian/Ubuntu (.deb)** — recommended:
 ```bash
-sudo dpkg -i ./ghostdeck_0.1.19_amd64.deb
+sudo dpkg -i ./ghostdeck_*_amd64.deb
 ```
 
 **AppImage** — portable across Ubuntu 24.04-era desktops and newer, no install needed:
 ```bash
-chmod +x GhostDeck-0.1.19-x86_64.AppImage
-./GhostDeck-0.1.19-x86_64.AppImage
+chmod +x GhostDeck-*-x86_64.AppImage
+./GhostDeck-*-x86_64.AppImage
 ```
 
 Release AppImages are built and checked on the Ubuntu 24.04 `GLIBC_2.39`
@@ -42,13 +40,6 @@ tar xzf ghostdeck-*-linux-x86_64.tar.gz
 cd ghostdeck-*-linux-x86_64
 sudo ./install.sh
 ```
-
-**Arch Linux (unofficial AUR package)** — community-maintained by [antonbarchukov](https://github.com/antonbarchukov):
-```bash
-yay -S ghostdeck-bin
-```
-
-The AUR package is available at [`ghostdeck-bin`](https://aur.archlinux.org/packages/ghostdeck-bin). Thanks to [antonbarchukov](https://github.com/antonbarchukov) for packaging GhostDeck for Arch users. Arch packaging is not currently maintained by upstream; please report AUR packaging issues to the package maintainer first. See [issue #5](https://github.com/Munawwar/GhostDeck/issues/5).
 
 To uninstall:
 ```bash
@@ -71,33 +62,34 @@ sudo apt install libgtk-4-1 libadwaita-1-0
 ### Prerequisites
 
 - Rust toolchain (stable)
-- Zig
+- Zig 0.15.2 (the version used by the current CI workflow)
 - GTK4 and libadwaita dev packages
 - Initialized Ghostty submodule
 
 ```bash
 # Install dev dependencies (Ubuntu/Debian)
-sudo apt install libgtk-4-dev libadwaita-1-dev pkg-config build-essential
+sudo apt install blueprint-compiler build-essential libadwaita-1-dev libepoxy-dev libgtk-4-dev libwebkitgtk-6.0-dev pkg-config
 
 # Initialize Ghostty and build the embedded library with GhostDeck's Linux patch
 git submodule update --init --recursive
-./scripts/build-ghostty.sh -Dapp-runtime=none -Doptimize=ReleaseFast
+./scripts/build-ghostty.sh -Dapp-runtime=none -Doptimize=ReleaseFast -Dcpu=baseline
 
 # Build ghostdeck
 cargo build --release
 
 # Run (point to libghostty.so location)
-LD_LIBRARY_PATH=ghostty/zig-out/lib:$LD_LIBRARY_PATH ./target/release/ghostdeck
+LD_LIBRARY_PATH="ghostty/zig-out/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ./target/release/ghostdeck
 ```
 
-### Package a release tarball
+Source builds produce `target/release/ghostdeck` for the GTK host and `target/release/ghostdeck-cli` for CLI commands. Installed packages expose the CLI as `ghostdeck`.
+
+### Package a release
 
 ```bash
 ./scripts/package.sh
 ```
 
-This builds the binary, bundles `libghostty.so`, icons, and an install script into a tarball.
-`package.sh` also rebuilds `libghostty.so` with `ReleaseFast` and `-Dcpu=baseline`, applying GhostDeck's Linux embedded patch in a temporary worktree.
+This builds a tarball and Debian package, plus an AppImage when `appimagetool` is installed and an RPM when `rpmbuild` is available. Packages are written to `dist/`. The script also rebuilds `libghostty.so` with `ReleaseFast` and `-Dcpu=baseline`, applying GhostDeck's Linux embedded patch in a temporary worktree.
 
 ## Development
 
@@ -111,8 +103,8 @@ Repository maintainability rules live in [`docs/maintainability.md`](docs/mainta
 
 ## Agent integrations
 
-GhostDeck ships first-class hooks for coding agents (Codex, Claude Code, and
-Gemini CLI). Every terminal ghostdeck spawns auto-exports
+GhostDeck provides hooks for Codex, Claude Code, and Gemini CLI by default;
+OpenCode hooks can be installed explicitly. Every terminal GhostDeck spawns auto-exports
 `GHOSTDECK_WORKSPACE_ID` / `GHOSTDECK_SURFACE_ID` / `GHOSTDECK_PANE_ID` /
 `GHOSTDECK_TAB_ID` / `GHOSTDECK_SOCKET`, so the CLI auto-targets the right place
 with no flags needed from inside the agent's own terminal.
@@ -160,18 +152,17 @@ ghostdeck send --workspace "$GHOSTDECK_WORKSPACE_ID" --surface "<peer-surface-id
 See the auto-generated `AGENTS.md` (written into the shared cwd) for
 the full protocol spec, peer table, and editable Policies section.
 
-Checked-in hook templates live in [`hooks/`](hooks/). They mirror
-`ghostdeck hooks setup` for Codex, Claude Code, and Gemini CLI; OpenCode is
-omitted until its hook integration is ready.
+Checked-in hook templates live in [`hooks/`](hooks/). They mirror the default
+`ghostdeck hooks setup` targets: Codex, Claude Code, and Gemini CLI. Install the
+OpenCode integration explicitly with `ghostdeck hooks setup opencode`.
 
 Coding agents working on **ghostdeck itself** should read [`AGENTS.md`](AGENTS.md)
 and [`CLAUDE.md`](CLAUDE.md) in the repo root — those cover the build
-loop, crate map, and the `feat/cmux-parity` roadmap tracked in
-[`docs/cmux-parity-plan.md`](docs/cmux-parity-plan.md).
+loop and crate map.
 
 ## Keyboard shortcuts
 
-Most default shortcuts use `Ctrl`. Fullscreen defaults to `F11`. Custom remaps may also use `Cmd`, which GhostDeck maps to either the Linux `Meta` or `Super` modifier. `Opt` maps to `Alt`.
+Most default shortcuts use `Ctrl`. Fullscreen defaults to `F11`. Custom remaps may also use `Cmd`, which GhostDeck maps to either the Linux `Meta` or `Super` modifier. `Option` maps to `Alt`.
 
 ### App
 
@@ -198,7 +189,7 @@ Most default shortcuts use `Ctrl`. Fullscreen defaults to `F11`. Custom remaps m
 | `Ctrl+K` | Clear scrollback |
 | `Ctrl+Shift+C` | Copy selection |
 | `Ctrl+Shift+V` | Paste |
-| `Ctrl++` | Increase font size |
+| `Ctrl+=` | Increase font size |
 | `Ctrl+-` | Decrease font size |
 | `Ctrl+Shift+0` | Reset font size |
 
@@ -216,9 +207,10 @@ Most default shortcuts use `Ctrl`. Fullscreen defaults to `F11`. Custom remaps m
 | `Ctrl+M` | Toggle sidebar |
 | `Ctrl+Shift+M` | Toggle top bar |
 | `Ctrl+T` | New terminal tab |
-| `Ctrl+Shift+,/.` | Focus surface left or right |
-| `Ctrl+PageDown/Up` | Next or previous workspace |
-| `Ctrl+1-9` | Switch to workspace by number |
+| `Ctrl+Shift+,` / `Ctrl+Shift+.` | Focus surface left or right |
+| `Ctrl+Shift+Up/Down` | Previous or next workspace |
+| `Ctrl+1-8` | Switch to workspace by number |
+| `Ctrl+9` | Switch to the last workspace |
 
 ## Architecture
 
