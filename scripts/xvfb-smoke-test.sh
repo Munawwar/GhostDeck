@@ -61,11 +61,11 @@ fi
 echo
 echo "== stage 0: agent-team --dry-run (no host) =="
 "$GHOSTDECK_CLI" agent-team --dry-run \
-  --agents codex,claude,opencode \
+  --agents codex,claude,opencode,gemini \
   --cwd "$DEMO_DIR" \
   2>&1 | tee "$LOG_DIR/stage0.txt"
 
-grep -q "peers=\[codex, claude, opencode\]" \
+grep -q "peers=\[codex, claude, opencode, gemini\]" \
   "$LOG_DIR/stage0.txt" \
   || { echo "FAIL: stage 0 dry-run did not report expected peers"; exit 1; }
 echo "stage 0: OK"
@@ -203,14 +203,33 @@ echo "stage 1b: OK"
 
 # --- 5. Stage 1c: caller-owned surface lifecycle --------------------------
 echo
-echo "== stage 1c: add, run in, and close a caller-owned surface =="
+echo "== stage 1c: add seven surfaces, run in the last, and close them =="
 CALLER_WORKSPACE_ID="00000000-0000-4000-8000-000000000001"
 CALLER_TAB_ID="terminal-0"
 CALLER_SURFACE_ID="1:terminal-0:leaf-0"
 CALLER_ENV=("GHOSTDECK_WORKSPACE_ID=$CALLER_WORKSPACE_ID" "GHOSTDECK_TAB_ID=$CALLER_TAB_ID" "GHOSTDECK_SURFACE_ID=$CALLER_SURFACE_ID")
-env "${CALLER_ENV[@]}" "$GHOSTDECK_CLI" --json --id-format both add-surface > "$LOG_DIR/stage1c-add.json"
-CHILD_SURFACE_ID="$(sed -n 's/.*"surface_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$LOG_DIR/stage1c-add.json" | head -1)"
-[ -n "$CHILD_SURFACE_ID" ] || { echo "FAIL: add-surface response missing surface_id"; exit 1; }
+ADDED_SURFACES=()
+for index in $(seq 1 7); do
+  ADD_JSON="$LOG_DIR/stage1c-add-$index.json"
+  env "${CALLER_ENV[@]}" "$GHOSTDECK_CLI" --json --id-format both add-surface > "$ADD_JSON"
+  surface_id="$(sed -n 's/.*"surface_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ADD_JSON" | head -1)"
+  [ -n "$surface_id" ] || { echo "FAIL: add-surface response missing surface_id"; exit 1; }
+  ADDED_SURFACES+=("$surface_id")
+done
+CHILD_SURFACE_ID="${ADDED_SURFACES[6]}"
+
+for _ in $(seq 1 50); do
+  "$GHOSTDECK_CLI" --json list-panels --workspace "$CALLER_WORKSPACE_ID" \
+    > "$LOG_DIR/stage1c-panels.json"
+  surface_count="$( (grep -o '"surface_id"' "$LOG_DIR/stage1c-panels.json" || true) | wc -l )"
+  [ "$surface_count" -eq 8 ] && grep -Fq "$CHILD_SURFACE_ID" \
+    "$LOG_DIR/stage1c-panels.json" && break
+  sleep 0.1
+done
+[ "$surface_count" -eq 8 ] \
+  || { echo "FAIL: expected caller plus 7 added surfaces, got $surface_count"; exit 1; }
+grep -Fq "$CHILD_SURFACE_ID" "$LOG_DIR/stage1c-panels.json" \
+  || { echo "FAIL: seventh added surface is not listed"; exit 1; }
 
 RUN_PROOF="$DEMO_DIR/run-surface-proof"
 env "${CALLER_ENV[@]}" "$GHOSTDECK_CLI" run --surface "$CHILD_SURFACE_ID" --cmd "printf run-ok > '$RUN_PROOF'"
@@ -225,13 +244,17 @@ if env "${CALLER_ENV[@]}" "$GHOSTDECK_CLI" close-surface --surface "$CALLER_SURF
   echo "FAIL: close-surface allowed closing the caller source"; exit 1
 fi
 
-env "${CALLER_ENV[@]}" "$GHOSTDECK_CLI" close-surface --surface "$CHILD_SURFACE_ID"
+for surface_id in "${ADDED_SURFACES[@]}"; do
+  env "${CALLER_ENV[@]}" "$GHOSTDECK_CLI" close-surface --surface "$surface_id"
+done
 env "${CALLER_ENV[@]}" "$GHOSTDECK_CLI" --json list-panels --workspace "$CALLER_WORKSPACE_ID" \
   > "$LOG_DIR/stage1c-panels.json"
-if grep -Fq "$CHILD_SURFACE_ID" "$LOG_DIR/stage1c-panels.json"; then
-  echo "FAIL: closed surface remains in the caller tab"; exit 1
-fi
-echo "stage 1c: OK (add, run, source protection, close)"
+for surface_id in "${ADDED_SURFACES[@]}"; do
+  if grep -Fq "$surface_id" "$LOG_DIR/stage1c-panels.json"; then
+    echo "FAIL: closed surface remains in the caller tab"; exit 1
+  fi
+done
+echo "stage 1c: OK (7 added surfaces, run in seventh, source protection, close)"
 
 # --- 5. Stage 2: live agent-team ------------------------------------------
 echo

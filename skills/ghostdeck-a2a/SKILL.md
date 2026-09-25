@@ -14,7 +14,7 @@ created="$(ghostdeck --json add-surface --cwd apps/web --cmd 'npm run dev')"
 surface="$(printf '%s\n' "$created" | jq -r '.surface_id')"
 ```
 
-Relative `--cwd` paths use your current directory. `--cmd` is sent verbatim to the configured shell. GhostDeck stacks at most three added surfaces to the right in the caller's tab.
+Relative `--cwd` paths use your current directory. `--cmd` is sent verbatim to the configured shell. GhostDeck arranges added surfaces in columns of up to three in the caller's tab.
 
 Run another command in an added surface after its shell prompt returns:
 

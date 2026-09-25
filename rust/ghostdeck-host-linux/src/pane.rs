@@ -303,6 +303,21 @@ impl TerminalSplitNode {
         }
     }
 
+    fn vertical_column_count(&self) -> Option<usize> {
+        match self {
+            Self::Leaf(_) => Some(1),
+            Self::Split {
+                orientation,
+                start,
+                end,
+                ..
+            } if *orientation == gtk::Orientation::Vertical => {
+                Some(start.vertical_column_count()? + end.vertical_column_count()?)
+            }
+            Self::Split { .. } => None,
+        }
+    }
+
     fn replace_leaf(&mut self, leaf_id: &str, replacement: TerminalSplitNode) -> bool {
         match self {
             Self::Leaf(leaf) => {
@@ -385,8 +400,6 @@ pub enum TerminalTabSurfaceError {
     SurfaceNotOwned,
     CannotCloseSource,
     CommandNotWritable,
-    UnsupportedLayout,
-    LimitReached,
 }
 
 impl TerminalTabState {
@@ -2073,51 +2086,6 @@ pub fn add_surface_to_terminal_tab(
             .cloned()
             .ok_or(TerminalTabSurfaceError::SourceNotFound)?
     };
-    let leaf_count = terminal_tab_state.leaf_count();
-    if leaf_count >= 4 {
-        return Err(TerminalTabSurfaceError::LimitReached);
-    }
-
-    {
-        let tree = terminal_tab_state.inner.tree.borrow();
-        let valid = match (&*tree, leaf_count) {
-            (TerminalSplitNode::Leaf(_), 1) => true,
-            (
-                TerminalSplitNode::Split {
-                    orientation,
-                    start,
-                    end,
-                    ..
-                },
-                2,
-            ) => {
-                *orientation == gtk::Orientation::Horizontal
-                    && matches!(start.as_ref(), TerminalSplitNode::Leaf(_))
-                    && matches!(end.as_ref(), TerminalSplitNode::Leaf(_))
-            }
-            (
-                TerminalSplitNode::Split {
-                    orientation,
-                    start,
-                    end,
-                    ..
-                },
-                3,
-            ) => {
-                *orientation == gtk::Orientation::Horizontal
-                    && matches!(start.as_ref(), TerminalSplitNode::Leaf(_))
-                    && matches!(end.as_ref(), TerminalSplitNode::Split { orientation, start, end, .. }
-                        if *orientation == gtk::Orientation::Vertical
-                            && matches!(start.as_ref(), TerminalSplitNode::Leaf(_))
-                            && matches!(end.as_ref(), TerminalSplitNode::Leaf(_)))
-            }
-            _ => false,
-        };
-        if !valid {
-            return Err(TerminalTabSurfaceError::UnsupportedLayout);
-        }
-    }
-
     let surface_cwd = cwd
         .map(str::to_string)
         .or_else(|| source_leaf.cwd.borrow().clone());
@@ -2133,15 +2101,19 @@ pub fn add_surface_to_terminal_tab(
     let new_surface_id = terminal_surface_id(internals.pane_id, tab_id, &new_leaf.leaf_id);
     {
         let mut tree = terminal_tab_state.inner.tree.borrow_mut();
-        if leaf_count == 1 {
-            *tree = TerminalSplitNode::Split {
+        let last_column_count = match &*tree {
+            TerminalSplitNode::Split {
                 orientation: gtk::Orientation::Horizontal,
-                ratio: Rc::new(RefCell::new(layout_state::DEFAULT_SPLIT_RATIO)),
-                start: Box::new(tree.clone()),
-                end: Box::new(TerminalSplitNode::Leaf(new_leaf.clone())),
+                end,
+                ..
+            } => end.vertical_column_count(),
+            _ => None,
+        };
+        if let Some(count @ 1..=2) = last_column_count {
+            let TerminalSplitNode::Split { end, .. } = &mut *tree else {
+                unreachable!();
             };
-        } else if let TerminalSplitNode::Split { end, .. } = &mut *tree {
-            let mut column_leaves = Vec::with_capacity(leaf_count);
+            let mut column_leaves = Vec::with_capacity(count + 1);
             end.for_each_leaf(|leaf| column_leaves.push(leaf.clone()));
             column_leaves.push(new_leaf.clone());
             let mut column = TerminalSplitNode::Leaf(column_leaves.remove(0));
@@ -2155,6 +2127,24 @@ pub fn add_surface_to_terminal_tab(
                 };
             }
             **end = column;
+        } else {
+            let mut columns = 1;
+            let mut prefix = &*tree;
+            while let TerminalSplitNode::Split {
+                orientation: gtk::Orientation::Horizontal,
+                start,
+                ..
+            } = prefix
+            {
+                columns += 1;
+                prefix = start;
+            }
+            *tree = TerminalSplitNode::Split {
+                orientation: gtk::Orientation::Horizontal,
+                ratio: Rc::new(RefCell::new(columns as f64 / (columns + 1) as f64)),
+                start: Box::new(tree.clone()),
+                end: Box::new(TerminalSplitNode::Leaf(new_leaf.clone())),
+            };
         }
     }
 

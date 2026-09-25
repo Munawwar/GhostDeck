@@ -200,10 +200,10 @@ fn parse_global_args() -> Result<GlobalOptions> {
 
 fn print_help() {
     println!(
-        "ghostdeck CLI\n\nUsage: ghostdeck [--socket <path>] [--json] [--id-format refs|both|uuids] <command> [args...]\n       ghostdeck\n\nRunning `ghostdeck` with no arguments launches the GTK app.\n\nCommon commands:\n  identify [--workspace <id|ref>] [--surface <id|ref>]\n  list-panels [--workspace <id|ref>]\n  list-panes [--workspace <id|ref>]\n  list-workspaces\n  surface-health [--workspace <id|ref>]\n  send [--workspace <id|ref>] [--surface <id|ref>] <text>\n  send-key [--workspace <id|ref>] [--surface <id|ref>] <key>\n  new-workspace [--cwd <path>] [--command <text>]\n  close-workspace --workspace <id|ref>\n  sidebar-state --workspace <id|ref>\n  new-surface [--workspace <id|ref>]\n  rename-workspace [--workspace <id|ref>] <title>\n  rename-window [--workspace <id|ref>] <title>\n  rename-tab [--workspace <id|ref>] [--tab <id|ref>] <title>\n  read-screen [--workspace <id|ref>] [--surface <id|ref>] [--scrollback] [--lines <n>]\n  capture-pane (alias of read-screen)\n  tab-action --action <name> [--workspace <id|ref>] [--tab <id|ref>] [--title <text>]\n\nAgent integrations:\n  notify [--workspace <id|ref>] [--subtitle <text>] [--body <text>] <title>\n  hooks setup [agent] | hooks uninstall [agent] | hooks <agent> <event>\n  claude-hook | opencode-hook | gemini-hook --event <name> [--subtitle <text>] [--body <text>] [--title <text>]\n  agent-team [--agents codex,claude[,opencode,gemini]] [--cwd <path>] [--no-launch] [--dry-run]\n      Adds up to three peer surfaces in the caller's tab, launches each CLI\n      there, and writes AGENTS.md describing the <agent-msg>\n      XML protocol so peers can talk via\n      `ghostdeck send --surface <peer-surface-id> <envelope>`.\n"
+        "ghostdeck CLI\n\nUsage: ghostdeck [--socket <path>] [--json] [--id-format refs|both|uuids] <command> [args...]\n       ghostdeck\n\nRunning `ghostdeck` with no arguments launches the GTK app.\n\nCommon commands:\n  identify [--workspace <id|ref>] [--surface <id|ref>]\n  list-panels [--workspace <id|ref>]\n  list-panes [--workspace <id|ref>]\n  list-workspaces\n  surface-health [--workspace <id|ref>]\n  send [--workspace <id|ref>] [--surface <id|ref>] <text>\n  send-key [--workspace <id|ref>] [--surface <id|ref>] <key>\n  new-workspace [--cwd <path>] [--command <text>]\n  close-workspace --workspace <id|ref>\n  sidebar-state --workspace <id|ref>\n  new-surface [--workspace <id|ref>]\n  rename-workspace [--workspace <id|ref>] <title>\n  rename-window [--workspace <id|ref>] <title>\n  rename-tab [--workspace <id|ref>] [--tab <id|ref>] <title>\n  read-screen [--workspace <id|ref>] [--surface <id|ref>] [--scrollback] [--lines <n>]\n  capture-pane (alias of read-screen)\n  tab-action --action <name> [--workspace <id|ref>] [--tab <id|ref>] [--title <text>]\n\nAgent integrations:\n  notify [--workspace <id|ref>] [--subtitle <text>] [--body <text>] <title>\n  hooks setup [agent] | hooks uninstall [agent] | hooks <agent> <event>\n  claude-hook | opencode-hook | gemini-hook --event <name> [--subtitle <text>] [--body <text>] [--title <text>]\n  agent-team [--agents codex,claude[,opencode,gemini]] [--cwd <path>] [--no-launch] [--dry-run]\n      Adds peer surfaces in the caller's tab, launches each CLI\n      there, and writes AGENTS.md describing the <agent-msg>\n      XML protocol so peers can talk via\n      `ghostdeck send --surface <peer-surface-id> <envelope>`.\n"
     );
     println!(
-        "  add-surface [--cwd <directory>] [--cmd <shell-command>]\n      Adds up to 3 terminal surfaces to the caller's tab using GhostDeck's fixed layout."
+        "  add-surface [--cwd <directory>] [--cmd <shell-command>]\n      Adds terminal surfaces to the caller's tab in columns of up to 3."
     );
     println!("  run --surface <id> --cmd <shell-command> | close-surface --surface <id>");
     println!("  skill setup [codex] | skill uninstall [codex]");
@@ -1986,9 +1986,6 @@ async fn run_agent_team(client: &mut Client, args: &[String]) -> Result<Value> {
         bail!("agent-team: no valid agents spawned");
     }
 
-    if resolved.len() > 3 {
-        bail!("agent-team supports at most three peers in one tab");
-    }
     let agents_md_path = std::path::Path::new(&cwd).join("AGENTS.md");
 
     if dry_run {
@@ -2108,7 +2105,7 @@ async fn run_agent_team(client: &mut Client, args: &[String]) -> Result<Value> {
         .and_then(|row| get_string(&row, &["name", "title"]))
         .unwrap_or_else(|| "active workspace".to_string());
 
-    // 4. Add peers to the orchestrator's tab. The host owns their fixed layout.
+    // 4. Add peers to the orchestrator's tab. The host places them in columns.
     let tab_id = orchestrator_tab_env
         .or_else(|| {
             orchestrator_surface
@@ -2117,16 +2114,6 @@ async fn run_agent_team(client: &mut Client, args: &[String]) -> Result<Value> {
                 .map(ToOwned::to_owned)
         })
         .ok_or_else(|| anyhow!("agent-team: could not determine orchestrator tab"))?;
-    let existing_surfaces = surface_rows
-        .iter()
-        .filter(|row| {
-            get_string(row, &["surface_id"])
-                .is_some_and(|id| id.split(':').nth(1) == Some(tab_id.as_str()))
-        })
-        .count();
-    if existing_surfaces + resolved.len() > 4 {
-        bail!("agent-team: caller tab has room for at most three peer surfaces");
-    }
     let cwd = fs::canonicalize(&cwd)
         .with_context(|| format!("agent-team: invalid working directory {cwd}"))?
         .to_string_lossy()
@@ -2305,8 +2292,8 @@ fn build_agents_md(
     out.push_str("ghostdeck add-surface --cwd apps/web --cmd 'npm run dev'\n");
     out.push_str("```\n\n");
     out.push_str(
-        "GhostDeck starts your agent surface on the left and stacks up to three\n\
-         added surfaces in the right column. Relative --cwd paths use your\n\
+        "GhostDeck starts your agent surface in the first column and arranges\n\
+         added surfaces in columns of up to three. Relative --cwd paths use your\n\
          current directory; --cmd is sent to the terminal's configured shell.\n\n",
     );
     out.push_str(

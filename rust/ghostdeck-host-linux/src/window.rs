@@ -228,12 +228,6 @@ fn terminal_tab_surface_error(error: pane::TerminalTabSurfaceError) -> BridgeErr
         pane::TerminalTabSurfaceError::CommandNotWritable => {
             BridgeError::conflict("target surface is not ready for input")
         }
-        pane::TerminalTabSurfaceError::UnsupportedLayout => {
-            BridgeError::conflict("surface.add requires the caller's fixed agent layout")
-        }
-        pane::TerminalTabSurfaceError::LimitReached => {
-            BridgeError::conflict("maximum of 3 additional surfaces reached")
-        }
     }
 }
 
