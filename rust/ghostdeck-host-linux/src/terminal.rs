@@ -241,6 +241,9 @@ impl TerminalHandle {
     pub fn perform_binding_action(&self, action: &str) -> bool {
         let surface = *self.surface_cell.borrow();
         surface_action(surface, action);
+        if surface.is_some() && action == "paste_from_clipboard" {
+            (self.callbacks.borrow().on_input)();
+        }
         surface.is_some()
     }
 
@@ -254,6 +257,9 @@ impl TerminalHandle {
 
         unsafe {
             ghostty_surface_text(surface, text.as_ptr() as *const c_char, text.len());
+        }
+        if !text.is_empty() {
+            (self.callbacks.borrow().on_input)();
         }
         true
     }
@@ -307,6 +313,7 @@ impl TerminalHandle {
             ghostty_surface_key(surface, press);
             ghostty_surface_key(surface, release);
         }
+        (self.callbacks.borrow().on_input)();
         true
     }
 
@@ -1128,6 +1135,7 @@ unsafe extern "C" fn ghostty_close_surface_cb(userdata: *mut c_void, _process_al
 // ---------------------------------------------------------------------------
 
 pub struct TerminalCallbacks {
+    pub on_input: Box<VoidCallback>,
     pub on_title_changed: Box<TitleChangedCallback>,
     pub on_pwd_changed: Box<PwdChangedCallback>,
     pub on_desktop_notification: Box<DesktopNotificationCallback>,
@@ -1342,6 +1350,7 @@ pub fn create_terminal(
     {
         let surface_cell = surface_cell.clone();
         let ime_state = ime_state.clone();
+        let callbacks = callbacks.clone();
         im_context.connect_commit(move |_, text| {
             let Some(surface) = *surface_cell.borrow() else {
                 return;
@@ -1352,6 +1361,9 @@ pub fn create_terminal(
                 ImeCommitOutcome::CommitDirectly(text) => {
                     clear_ghostty_preedit(surface);
                     send_committed_text(surface, &text);
+                    if !text.is_empty() {
+                        (callbacks.borrow().on_input)();
+                    }
                 }
             }
         });
@@ -1613,6 +1625,7 @@ pub fn create_terminal(
         let im_context_release = im_context.clone();
         let ime_state_press = ime_state.clone();
         let ime_state_release = ime_state.clone();
+        let callbacks = callbacks.clone();
         let key_controller = gtk::EventControllerKey::new();
         key_controller.connect_key_pressed(move |ctrl, keyval, keycode, modifier| {
             if let Some(surface) = *sc_press.borrow() {
@@ -1654,6 +1667,12 @@ pub fn create_terminal(
                 }
 
                 let consumed = unsafe { ghostty_surface_key(surface, event) };
+                if !current_event
+                    .as_ref()
+                    .is_some_and(gtk::gdk::KeyEvent::is_modifier)
+                {
+                    (callbacks.borrow().on_input)();
+                }
                 if consumed && ime_state_press.borrow().composing {
                     im_context_press.reset();
                     clear_ghostty_preedit(surface);
@@ -1888,6 +1907,7 @@ pub fn create_terminal(
     // shell-escaped paths into the terminal.
     {
         let surface_cell = surface_cell.clone();
+        let callbacks = callbacks.clone();
         let drop_target = gtk::DropTarget::new(
             gtk::gdk::FileList::static_type(),
             gtk::gdk::DragAction::COPY,
@@ -1906,6 +1926,7 @@ pub fn create_terminal(
             unsafe {
                 ghostty_surface_text(surface, text.as_ptr(), text.as_bytes().len());
             }
+            (callbacks.borrow().on_input)();
             true
         });
         gl_area.add_controller(drop_target);
@@ -2045,7 +2066,10 @@ fn show_terminal_context_menu(
                 pop.popdown();
                 match label.as_str() {
                     "Copy" => surface_action(surface, "copy_to_clipboard"),
-                    "Paste" => surface_action(surface, "paste_from_clipboard"),
+                    "Paste" => {
+                        surface_action(surface, "paste_from_clipboard");
+                        (cb.borrow().on_input)();
+                    }
                     "Split Right" => {
                         let callbacks = cb.borrow();
                         (callbacks.on_split_right)();

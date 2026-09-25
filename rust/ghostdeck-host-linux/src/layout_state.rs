@@ -115,6 +115,12 @@ pub struct TabState {
     pub custom_name: Option<String>,
     #[serde(default)]
     pub pinned: bool,
+    #[serde(
+        default,
+        alias = "last_input_at",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub last_activity_at: Option<i64>,
     #[serde(flatten)]
     pub content: TabContentState,
 }
@@ -305,6 +311,7 @@ impl TabState {
             id: id.into(),
             custom_name: None,
             pinned: false,
+            last_activity_at: None,
             content: TabContentState::Terminal {
                 cwd: cwd.map(|value| value.to_string()),
                 agent: None,
@@ -1285,6 +1292,7 @@ mod tests {
                                 id: "browser".to_string(),
                                 custom_name: None,
                                 pinned: false,
+                                last_activity_at: None,
                                 content: TabContentState::Browser {
                                     uri: Some("https://example.com".to_string()),
                                 },
@@ -1410,6 +1418,8 @@ mod tests {
     #[test]
     fn save_session_atomic_writes_canonical_file() {
         let dir = tempdir().expect("tempdir");
+        let mut pane = PaneState::fallback(Some("/tmp"));
+        pane.tabs[0].last_activity_at = Some(1_700_000_000);
         let state = AppSessionState {
             window: WindowState {
                 width: 1280,
@@ -1423,7 +1433,7 @@ mod tests {
                 favorite: false,
                 cwd: Some("/tmp".to_string()),
                 folder_path: Some("/tmp".to_string()),
-                layout: LayoutNodeState::Pane(PaneState::fallback(Some("/tmp"))),
+                layout: LayoutNodeState::Pane(pane),
             }],
             ..AppSessionState::default()
         };
@@ -1440,6 +1450,10 @@ mod tests {
         );
         assert_eq!(decoded.workspaces[0].name, "workspace");
         assert_eq!(decoded.window, state.window);
+        let LayoutNodeState::Pane(pane) = &decoded.workspaces[0].layout else {
+            panic!("expected pane");
+        };
+        assert_eq!(pane.tabs[0].last_activity_at, Some(1_700_000_000));
     }
 
     #[test]
@@ -1712,6 +1726,7 @@ mod tests {
                 id: "tab-a".to_string(),
                 custom_name: None,
                 pinned: false,
+                last_activity_at: None,
                 content: TabContentState::Terminal {
                     cwd: Some("/tmp/project".to_string()),
                     agent: Some(RestorableAgentState {
@@ -1808,6 +1823,7 @@ mod tests {
             id: "tab-a".to_string(),
             custom_name: None,
             pinned: false,
+            last_activity_at: None,
             content: TabContentState::Terminal {
                 cwd: Some("/tmp/project".to_string()),
                 agent: Some(RestorableAgentState {
@@ -1881,6 +1897,7 @@ mod tests {
                 id: "tab-a".to_string(),
                 custom_name: None,
                 pinned: false,
+                last_activity_at: None,
                 content: TabContentState::Terminal {
                     cwd: Some("/tmp/project".to_string()),
                     agent: None,
@@ -1950,6 +1967,7 @@ mod tests {
                 id: "tab-a".to_string(),
                 custom_name: None,
                 pinned: false,
+                last_activity_at: None,
                 content: TabContentState::Terminal {
                     cwd: Some("/tmp/project-a".to_string()),
                     agent: None,
@@ -2041,6 +2059,7 @@ mod tests {
                 id: "tab-a".to_string(),
                 custom_name: None,
                 pinned: false,
+                last_activity_at: None,
                 content: TabContentState::Terminal {
                     cwd: Some("/tmp/project-a".to_string()),
                     agent: None,
@@ -2136,6 +2155,7 @@ mod tests {
                 id: "keybinds-1".to_string(),
                 custom_name: None,
                 pinned: false,
+                last_activity_at: None,
                 content: TabContentState::Keybinds {},
             }],
         });
@@ -2187,6 +2207,7 @@ mod tests {
                         id: "keybinds-1".to_string(),
                         custom_name: None,
                         pinned: false,
+                        last_activity_at: None,
                         content: TabContentState::Keybinds {},
                     }],
                 }),
