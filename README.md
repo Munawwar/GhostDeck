@@ -83,6 +83,9 @@ Source builds produce `target/release/ghostdeck` for the GTK host and `target/re
 
 ### Package a release
 
+Push a `v*` tag to start the GitHub Actions build. It creates a GitHub Release
+with the tarball, Debian package, AppImage, and RPM after packaging succeeds.
+
 ```bash
 ./scripts/package.sh
 ```

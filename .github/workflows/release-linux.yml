@@ -1,26 +1,28 @@
 name: Build Linux Release Packages
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       version:
         description: "Version to build (without v prefix)"
-        required: false
+        required: true
 
 permissions:
   contents: write
 
 jobs:
   packages:
-    name: Build tarball, deb, and AppImage on Ubuntu 24.04
+    name: Build tarball, deb, AppImage, and RPM on Ubuntu 24.04
     runs-on: ubuntu-24.04
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.version && format('v{0}', inputs.version) || github.ref }}
           submodules: recursive
 
       - name: Determine version
@@ -59,7 +61,8 @@ jobs:
             meson \
             ninja-build \
             python3-gi \
-            pkg-config
+            pkg-config \
+            rpm
 
       - name: Install current blueprint-compiler
         run: |
@@ -92,11 +95,14 @@ jobs:
           GHOSTDECK_MAX_GLIBC: "2.39"
         run: ./scripts/package.sh "${{ steps.version.outputs.version }}"
 
+      - name: Verify RPM package
+        run: test -f "dist/ghostdeck-${{ steps.version.outputs.version }}-1.$(uname -m).rpm"
+
       - name: Upload packages to release
-        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.version }}
+          name: GhostDeck v${{ steps.version.outputs.version }}
           files: |
             dist/*
         env:
