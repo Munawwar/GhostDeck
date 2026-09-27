@@ -117,6 +117,7 @@ SMOKE_SESSION
 
 echo
 echo "== stage 1: boot ghostdeck host under xvfb-run =="
+APP_START_LOWER_BOUND="$(date +%s)"
 # Under Xvfb there is no GPU, so Mesa would fall back to llvmpipe, which
 # has historically crashed on Ghostty's shader variants. Force softpipe
 # (slower but stable), and pin GL version to avoid newer-feature probes.
@@ -174,6 +175,7 @@ for _ in $(seq 1 40); do
 done
 grep -Fq '"healthy":true' "$LOG_DIR/initial-surface-health.json" \
   || { echo "FAIL: initial Ghostty surface did not become healthy under Xvfb"; exit 1; }
+APP_START_UPPER_BOUND="$(date +%s)"
 
 # --- 5. Stage 1b: terminal cwd persistence -------------------------------
 echo
@@ -279,11 +281,37 @@ grep -q "\bcodex\b"   "$DEMO_DIR/AGENTS.md" || { echo "FAIL: AGENTS.md missing c
 grep -q "\bclaude\b"  "$DEMO_DIR/AGENTS.md" || { echo "FAIL: AGENTS.md missing claude peer"; exit 1; }
 echo "stage 2: OK (AGENTS.md + 2 peer surfaces)"
 
+while [ "$(date +%s)" -le "$APP_START_UPPER_BOUND" ]; do sleep 0.1; done
 for name in codex claude; do
   created="$("$GHOSTDECK_CLI" --json --id-format both new-workspace --cwd "$DEMO_DIR")"
   workspace_id="$(printf '%s\n' "$created" | sed -n 's/.*"workspace_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
   "$GHOSTDECK_CLI" rename-workspace --workspace "$workspace_id" "$name" >/dev/null
 done
+
+python3 - "$XDG_DATA_HOME/ghostdeck/session.json" "$APP_START_LOWER_BOUND" "$APP_START_UPPER_BOUND" <<'PY'
+import json
+import sys
+import time
+
+path, lower, upper = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+for _ in range(40):
+    with open(path, encoding="utf-8") as session_file:
+        workspaces = json.load(session_file)["workspaces"]
+    if {workspace["name"] for workspace in workspaces} >= {"ghostdeck-cwd-test", "codex", "claude"}:
+        break
+    time.sleep(0.25)
+else:
+    sys.exit("FAIL: new workspaces were not persisted")
+
+for workspace in workspaces:
+    for tab in workspace["layout"]["tabs"]:
+        assert lower <= tab["started_at"] <= int(time.time()), tab
+        if workspace["name"] == "ghostdeck-cwd-test":
+            assert tab["started_at"] <= upper, tab
+        elif workspace["name"] in {"codex", "claude"}:
+            assert tab["started_at"] > upper, tab
+print("tab start times: migrated and new tabs persisted")
+PY
 
 # --- 6. Stage 3: list-workspaces sanity -----------------------------------
 echo

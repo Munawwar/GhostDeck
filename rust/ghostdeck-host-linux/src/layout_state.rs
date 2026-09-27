@@ -115,6 +115,8 @@ pub struct TabState {
     pub custom_name: Option<String>,
     #[serde(default)]
     pub pinned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<i64>,
     #[serde(
         default,
         alias = "last_input_at",
@@ -311,6 +313,7 @@ impl TabState {
             id: id.into(),
             custom_name: None,
             pinned: false,
+            started_at: None,
             last_activity_at: None,
             content: TabContentState::Terminal {
                 cwd: cwd.map(|value| value.to_string()),
@@ -1292,6 +1295,7 @@ mod tests {
                                 id: "browser".to_string(),
                                 custom_name: None,
                                 pinned: false,
+                                started_at: None,
                                 last_activity_at: None,
                                 content: TabContentState::Browser {
                                     uri: Some("https://example.com".to_string()),
@@ -1419,6 +1423,7 @@ mod tests {
     fn save_session_atomic_writes_canonical_file() {
         let dir = tempdir().expect("tempdir");
         let mut pane = PaneState::fallback(Some("/tmp"));
+        pane.tabs[0].started_at = Some(1_699_999_000);
         pane.tabs[0].last_activity_at = Some(1_700_000_000);
         let state = AppSessionState {
             window: WindowState {
@@ -1453,6 +1458,7 @@ mod tests {
         let LayoutNodeState::Pane(pane) = &decoded.workspaces[0].layout else {
             panic!("expected pane");
         };
+        assert_eq!(pane.tabs[0].started_at, Some(1_699_999_000));
         assert_eq!(pane.tabs[0].last_activity_at, Some(1_700_000_000));
     }
 
@@ -1478,6 +1484,10 @@ mod tests {
         let decoded: AppSessionState = serde_json::from_str(raw).expect("decode legacy shape");
         assert_eq!(decoded.workspaces[0].id, None);
         assert_eq!(decoded.window, WindowState::default());
+        let LayoutNodeState::Pane(pane) = &decoded.workspaces[0].layout else {
+            panic!("expected pane");
+        };
+        assert_eq!(pane.tabs[0].started_at, None);
     }
 
     #[test]
@@ -1726,6 +1736,7 @@ mod tests {
                 id: "tab-a".to_string(),
                 custom_name: None,
                 pinned: false,
+                started_at: None,
                 last_activity_at: None,
                 content: TabContentState::Terminal {
                     cwd: Some("/tmp/project".to_string()),
@@ -1823,6 +1834,7 @@ mod tests {
             id: "tab-a".to_string(),
             custom_name: None,
             pinned: false,
+            started_at: None,
             last_activity_at: None,
             content: TabContentState::Terminal {
                 cwd: Some("/tmp/project".to_string()),
@@ -1897,6 +1909,7 @@ mod tests {
                 id: "tab-a".to_string(),
                 custom_name: None,
                 pinned: false,
+                started_at: None,
                 last_activity_at: None,
                 content: TabContentState::Terminal {
                     cwd: Some("/tmp/project".to_string()),
@@ -1967,6 +1980,7 @@ mod tests {
                 id: "tab-a".to_string(),
                 custom_name: None,
                 pinned: false,
+                started_at: None,
                 last_activity_at: None,
                 content: TabContentState::Terminal {
                     cwd: Some("/tmp/project-a".to_string()),
@@ -2059,6 +2073,7 @@ mod tests {
                 id: "tab-a".to_string(),
                 custom_name: None,
                 pinned: false,
+                started_at: None,
                 last_activity_at: None,
                 content: TabContentState::Terminal {
                     cwd: Some("/tmp/project-a".to_string()),
@@ -2155,6 +2170,7 @@ mod tests {
                 id: "keybinds-1".to_string(),
                 custom_name: None,
                 pinned: false,
+                started_at: None,
                 last_activity_at: None,
                 content: TabContentState::Keybinds {},
             }],
@@ -2207,6 +2223,7 @@ mod tests {
                         id: "keybinds-1".to_string(),
                         custom_name: None,
                         pinned: false,
+                        started_at: None,
                         last_activity_at: None,
                         content: TabContentState::Keybinds {},
                     }],

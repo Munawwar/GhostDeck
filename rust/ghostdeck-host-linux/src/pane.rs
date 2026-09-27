@@ -189,6 +189,7 @@ type PaneConfigChangedCallback = dyn Fn(&AppConfig, &AppConfig);
 type PaneWorkspaceLookupCallback = dyn Fn(&gtk::Widget) -> Option<String>;
 
 pub struct PaneCallbacks {
+    pub app_started_at: i64,
     pub on_bell: Box<PaneBellCallback>,
     pub on_desktop_notification: Box<PaneDesktopNotificationCallback>,
     pub current_shortcuts: Box<PaneShortcutStateCallback>,
@@ -1621,6 +1622,7 @@ struct TabEntry {
     content: gtk::Widget,
     custom_name: Option<String>,
     pinned: bool,
+    started_at: i64,
     last_activity_at: Option<i64>,
     kind: TabKind,
 }
@@ -1722,6 +1724,7 @@ struct TerminalTabOptions<'a> {
     id: Option<&'a str>,
     custom_name: Option<&'a str>,
     pinned: bool,
+    started_at: Option<i64>,
     last_activity_at: Option<i64>,
     cwd: Option<&'a str>,
     agent: Option<RestorableAgentState>,
@@ -1733,6 +1736,7 @@ struct KeybindsTabOptions<'a> {
     id: Option<&'a str>,
     custom_name: Option<&'a str>,
     pinned: bool,
+    started_at: Option<i64>,
     last_activity_at: Option<i64>,
 }
 
@@ -1766,6 +1770,7 @@ fn restore_tabs_from_state(
                     id: Some(saved_tab.id.as_str()),
                     custom_name: saved_tab.custom_name.as_deref(),
                     pinned: saved_tab.pinned,
+                    started_at: saved_tab.started_at,
                     last_activity_at: saved_tab.last_activity_at,
                     cwd: cwd.as_deref().or(working_directory),
                     agent: agent.clone(),
@@ -1783,6 +1788,7 @@ fn restore_tabs_from_state(
                         id: Some(saved_tab.id.as_str()),
                         custom_name: saved_tab.custom_name.as_deref(),
                         pinned: saved_tab.pinned,
+                        started_at: saved_tab.started_at,
                         last_activity_at: saved_tab.last_activity_at,
                     }),
                 },
@@ -2483,6 +2489,11 @@ fn add_terminal_tab_inner(
                 .as_ref()
                 .and_then(|value| value.custom_name.map(|name| name.to_string())),
             pinned: options.as_ref().map(|value| value.pinned).unwrap_or(false),
+            started_at: options.as_ref().map_or_else(now_seconds, |value| {
+                value
+                    .started_at
+                    .unwrap_or(internals.callbacks.app_started_at)
+            }),
             last_activity_at: options.as_ref().and_then(|value| value.last_activity_at),
             kind: TabKind::Terminal {
                 state: state.clone(),
@@ -2555,7 +2566,15 @@ fn add_keybind_editor_tab_inner(internals: &Rc<PaneInternals>, input: KeybindsTa
                 .as_ref()
                 .map(|value| value.pinned)
                 .unwrap_or(false),
-            last_activity_at: input.options.as_ref().and_then(|value| value.last_activity_at),
+            started_at: input.options.as_ref().map_or_else(now_seconds, |value| {
+                value
+                    .started_at
+                    .unwrap_or(internals.callbacks.app_started_at)
+            }),
+            last_activity_at: input
+                .options
+                .as_ref()
+                .and_then(|value| value.last_activity_at),
             kind: TabKind::Keybinds,
         });
     }
@@ -2660,6 +2679,7 @@ pub fn snapshot_pane_state(pane_widget: &gtk::Widget) -> Option<PaneState> {
                 id: entry.id.clone(),
                 custom_name: entry.custom_name.clone(),
                 pinned: entry.pinned,
+                started_at: Some(entry.started_at),
                 last_activity_at: entry.last_activity_at,
                 content,
             }
@@ -3030,17 +3050,20 @@ fn build_tab_button_from_label(
         let tab_id = tab_id.to_string();
         let tab_state = internals.tab_state.clone();
         tab_btn.connect_query_tooltip(move |_, _, _, _, tooltip| {
-            let last_activity_at = tab_state
+            let Some((label, timestamp)) = tab_state
                 .borrow()
                 .tabs
                 .iter()
                 .find(|tab| tab.id == tab_id)
-                .and_then(|tab| tab.last_activity_at);
-            let Some(last_activity_at) = last_activity_at else {
+                .map(|tab| match tab.last_activity_at {
+                    Some(at) => ("Last activity", at),
+                    None => ("Started", tab.started_at),
+                })
+            else {
                 return false;
             };
             let now = now_seconds();
-            let elapsed = now.saturating_sub(last_activity_at);
+            let elapsed = now.saturating_sub(timestamp);
             let age = if elapsed < 60 {
                 "just now".to_string()
             } else if elapsed < 3_600 {
@@ -3050,7 +3073,7 @@ fn build_tab_button_from_label(
             } else {
                 format!("{}d ago", elapsed / 86_400)
             };
-            tooltip.set_text(Some(&format!("Last activity: {age}")));
+            tooltip.set_text(Some(&format!("{label}: {age}")));
             true
         });
     }

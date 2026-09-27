@@ -148,6 +148,11 @@ fn main() {
         return;
     }
 
+    let app_started_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
     // Ghostty requires desktop OpenGL, not GLES. Must set the GTK renderer
     // environment before GTK initializes, and the exact knobs differ by GTK
     // runtime version. Match Ghostty's GTK logic closely here so modern GTK
@@ -175,7 +180,7 @@ fn main() {
         .build();
 
     app.connect_activate(move |app| {
-        window::build_window(app);
+        window::build_window(app, app_started_at);
     });
     app.run();
 }

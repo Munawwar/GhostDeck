@@ -100,6 +100,7 @@ fn window_close_state_from_response(response: i32) -> WindowCloseState {
 
 pub(crate) struct AppState {
     app: adw::Application,
+    app_started_at: i64,
     window: adw::ApplicationWindow,
     top_bar: Option<adw::HeaderBar>,
     top_bar_visible: bool,
@@ -1251,7 +1252,7 @@ row:selected .ghostdeck-ws-path {
 // Window construction
 // ---------------------------------------------------------------------------
 
-pub fn build_window(app: &adw::Application) {
+pub fn build_window(app: &adw::Application, app_started_at: i64) {
     let loaded_session = layout_state::load_session();
     let display = gtk::gdk::Display::default().expect("display");
     let gnome_interface_settings = gnome_interface_settings();
@@ -1460,6 +1461,7 @@ pub fn build_window(app: &adw::Application) {
 
     let state: State = Rc::new(RefCell::new(AppState {
         app: app.clone(),
+        app_started_at,
         window: window.clone(),
         top_bar: header.clone(),
         top_bar_visible: true,
@@ -4474,6 +4476,7 @@ pub(crate) fn create_pane_for_workspace(
     let ws_id_for_env = ws_id.to_string();
 
     let callbacks = Rc::new(PaneCallbacks {
+        app_started_at: state.borrow().app_started_at,
         on_bell: Box::new(move |source_focused: bool, pane_id: u32, tab_id: &str| {
             // Defer to avoid RefCell borrow conflicts — bell can fire during state mutation
             let state = state_for_bell.clone();
