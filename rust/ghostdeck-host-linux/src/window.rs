@@ -1146,15 +1146,8 @@ row:selected .ghostdeck-ws-star-btn {
     font-size: 11px;
 }
 .ghostdeck-notify-msg-unread {
-    color: alpha(@accent_bg_color, 0.9);
+    color: alpha(@window_fg_color, 0.65);
     font-size: 11px;
-}
-.ghostdeck-sidebar-row-unread {
-    background-color: alpha(@accent_bg_color, 0.16);
-    border-left: 3px solid @accent_bg_color;
-    border-radius: 6px;
-    margin-left: 0;
-    margin-right: 0;
 }
 .ghostdeck-sidebar-row-unread .ghostdeck-ws-name {
     color: @window_fg_color;
@@ -2751,7 +2744,7 @@ fn build_sidebar_row(
     let path_label = gtk::Label::builder()
         .xalign(0.0)
         .ellipsize(gtk::pango::EllipsizeMode::End)
-        .margin_start(8)
+        .margin_start(18)
         .build();
     path_label.add_css_class("ghostdeck-ws-path");
     if let Some(p) = folder_path {
@@ -2766,7 +2759,7 @@ fn build_sidebar_row(
         .xalign(0.0)
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .visible(false)
-        .margin_start(8)
+        .margin_start(18)
         .build();
     notify_label.add_css_class("ghostdeck-notify-msg");
 
@@ -5238,7 +5231,6 @@ fn mark_workspace_unread_with_message(
             ws.notify_label.remove_css_class("ghostdeck-notify-msg");
             ws.notify_label.add_css_class("ghostdeck-notify-msg-unread");
             ws.notify_label.set_visible(true);
-            // Add glow pulse to the sidebar row box
             if let Some(row_box) = ws.sidebar_row.child() {
                 row_box.add_css_class("ghostdeck-sidebar-row-unread");
             }
