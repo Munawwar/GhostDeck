@@ -40,10 +40,6 @@ struct Workspace {
     name_label: gtk::Label,
     /// Favorite star button in sidebar row.
     favorite_button: gtk::Button,
-    /// Notification dot in the sidebar row.
-    notify_dot: gtk::Label,
-    /// Notification message label in the sidebar row.
-    notify_label: gtk::Label,
     /// Whether this workspace has unread notifications.
     unread: bool,
     /// Whether this workspace is favorited/pinned to top.
@@ -1097,10 +1093,18 @@ const BASE_CSS: &str = r#"
     color: @window_fg_color;
     border-right: 1px solid alpha(@window_fg_color, 0.08);
 }
+.ghostdeck-sidebar .navigation-sidebar {
+    padding: 0;
+}
+.ghostdeck-sidebar row,
+.ghostdeck-sidebar row:selected {
+    border-radius: 0;
+    margin: 0;
+}
 .ghostdeck-sidebar-row-box {
-    padding: 8px 6px 8px 3px;
-    border-radius: 6px;
-    margin: 2px 3px 2px 1px;
+    padding: 12px;
+    border-radius: 0;
+    margin: 0;
 }
 .ghostdeck-ws-name {
     color: alpha(@window_fg_color, 0.72);
@@ -1114,7 +1118,7 @@ row:selected .ghostdeck-ws-name {
     border: none;
     min-height: 0;
     min-width: 0;
-    padding: 0 4px;
+    padding: 0;
     font-size: 22px;
 }
 .ghostdeck-ws-star-btn:hover {
@@ -1131,27 +1135,20 @@ row:selected .ghostdeck-ws-star-btn {
     padding: 0 4px;
     margin: 0;
 }
-.ghostdeck-notify-dot {
-    color: @accent_bg_color;
-    font-size: 10px;
-    margin-right: 6px;
+.ghostdeck-ws-bell {
+    color: mix(@window_fg_color, #ee9851, 0.85);
+    margin-top: 2px;
+    opacity: 0;
 }
-.ghostdeck-notify-dot-hidden {
-    color: transparent;
-    font-size: 10px;
-    margin-right: 6px;
+.ghostdeck-sidebar-row-unread {
+    background-color: alpha(#ff8a30, 0.25);
 }
-.ghostdeck-notify-msg {
-    color: alpha(@window_fg_color, 0.35);
-    font-size: 11px;
-}
-.ghostdeck-notify-msg-unread {
-    color: alpha(@window_fg_color, 0.65);
-    font-size: 11px;
+.ghostdeck-sidebar-row-unread .ghostdeck-ws-bell {
+    opacity: 1;
 }
 .ghostdeck-sidebar-row-unread .ghostdeck-ws-name {
     color: @window_fg_color;
-    font-weight: 700;
+    font-weight: 600;
 }
 .ghostdeck-drop-above .ghostdeck-sidebar-row-box {
     border-radius: 0;
@@ -1175,12 +1172,13 @@ row:selected .ghostdeck-ws-star-btn {
     letter-spacing: 1px;
 }
 .ghostdeck-sidebar-btn {
-    background: alpha(@window_fg_color, 0.08);
+    background: transparent;
     color: alpha(@window_fg_color, 0.7);
     border: 1px solid transparent;
-    border-radius: 6px;
-    padding: 6px 12px;
-    min-height: 0;
+    border-radius: 4px;
+    padding: 4px;
+    min-width: 28px;
+    min-height: 28px;
     transition: all 200ms ease;
 }
 .ghostdeck-sidebar-btn:hover {
@@ -1240,6 +1238,23 @@ row:selected .ghostdeck-ws-path {
     background-color: alpha(@accent_bg_color, 0.45);
 }
 "#;
+
+fn set_new_workspace_button_mode(button: &gtk::Button, removing: bool) {
+    let (icon, label) = if removing {
+        ("user-trash-symbolic", "Drop to remove workspace")
+    } else {
+        ("list-add-symbolic", "New workspace")
+    };
+    button.set_icon_name(icon);
+    button.set_tooltip_text(Some(label));
+    button.update_property(&[gtk::accessible::Property::Label(label)]);
+    if removing {
+        button.add_css_class("ghostdeck-sidebar-btn-trash");
+    } else {
+        button.remove_css_class("ghostdeck-sidebar-btn-trash");
+        button.remove_css_class("ghostdeck-sidebar-btn-trash-hover");
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Window construction
@@ -1400,16 +1415,14 @@ pub fn build_window(app: &adw::Application, app_started_at: i64) {
             event.time(),
         );
     });
-    sidebar_title.add_controller(drag);
+    sidebar_title_label.add_controller(drag);
 
     let new_ws_btn = gtk::Button::builder()
-        .label("New Workspace")
-        .hexpand(true)
-        .margin_start(6)
-        .margin_end(6)
-        .margin_bottom(6)
+        .valign(gtk::Align::Center)
         .build();
     new_ws_btn.add_css_class("ghostdeck-sidebar-btn");
+    set_new_workspace_button_mode(&new_ws_btn, false);
+    sidebar_title.append(&new_ws_btn);
 
     // Drop target on the button: workspace drags delete, tab drags create a new workspace.
     let btn_drop = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::MOVE);
@@ -1441,7 +1454,6 @@ pub fn build_window(app: &adw::Application, app_started_at: i64) {
     sidebar.add_css_class("ghostdeck-sidebar");
     sidebar.append(&sidebar_title);
     sidebar.append(&sidebar_scroll);
-    sidebar.append(&new_ws_btn);
 
     let (main_split, sidebar_shell, sidebar_handle) = build_sidebar_split(&sidebar, &stack);
 
@@ -1596,9 +1608,7 @@ pub fn build_window(app: &adw::Application, app_started_at: i64) {
         let state = state.clone();
         let btn = new_ws_btn.clone();
         btn_drop.connect_drop(move |_, value, _, _| {
-            btn.set_label("New Workspace");
-            btn.remove_css_class("ghostdeck-sidebar-btn-trash");
-            btn.remove_css_class("ghostdeck-sidebar-btn-trash-hover");
+            set_new_workspace_button_mode(&btn, false);
             btn.remove_css_class("ghostdeck-tab-drop-target");
             if let Ok(payload) = value.get::<String>() {
                 if payload.contains(':') {
@@ -2714,12 +2724,7 @@ fn build_sidebar_row(
     gtk::Label,
     gtk::Button,
     gtk::Label,
-    gtk::Label,
-    gtk::Label,
 ) {
-    let notify_dot = gtk::Label::builder().label("\u{25CF}").build();
-    notify_dot.add_css_class("ghostdeck-notify-dot-hidden");
-
     let name_label = gtk::Label::builder()
         .label(name)
         .xalign(0.0)
@@ -2736,15 +2741,9 @@ fn build_sidebar_row(
     favorite_button.set_halign(gtk::Align::End);
     favorite_button.set_tooltip_text(Some("Favorite workspace"));
 
-    let top_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    top_row.append(&notify_dot);
-    top_row.append(&name_label);
-    top_row.append(&favorite_button);
-
     let path_label = gtk::Label::builder()
         .xalign(0.0)
         .ellipsize(gtk::pango::EllipsizeMode::End)
-        .margin_start(18)
         .build();
     path_label.add_css_class("ghostdeck-ws-path");
     if let Some(p) = folder_path {
@@ -2755,32 +2754,38 @@ fn build_sidebar_row(
         path_label.set_visible(false);
     }
 
-    let notify_label = gtk::Label::builder()
-        .xalign(0.0)
-        .ellipsize(gtk::pango::EllipsizeMode::End)
-        .visible(false)
-        .margin_start(18)
-        .build();
-    notify_label.add_css_class("ghostdeck-notify-msg");
-
-    let vbox = gtk::Box::builder()
+    let details = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(2)
+        .hexpand(true)
+        .valign(gtk::Align::Center)
         .build();
-    vbox.add_css_class("ghostdeck-sidebar-row-box");
-    vbox.append(&top_row);
-    vbox.append(&path_label);
-    vbox.append(&notify_label);
+    details.append(&name_label);
+    details.append(&path_label);
+
+    let bell = gtk::Image::builder()
+        .icon_name("notification-symbolic")
+        .pixel_size(18)
+        .accessible_role(gtk::AccessibleRole::Presentation)
+        .build();
+    bell.add_css_class("ghostdeck-ws-bell");
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    actions.set_valign(gtk::Align::Center);
+    actions.append(&bell);
+    actions.append(&favorite_button);
+
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    content.add_css_class("ghostdeck-sidebar-row-box");
+    content.append(&details);
+    content.append(&actions);
 
     let row = gtk::ListBoxRow::new();
-    row.set_child(Some(&vbox));
+    row.set_child(Some(&content));
 
     (
         row,
         name_label,
         favorite_button,
-        notify_dot,
-        notify_label,
         path_label,
     )
 }
@@ -3291,7 +3296,7 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
     );
     let root = pane.clone().upcast::<gtk::Widget>();
 
-    let (row, name_label, favorite_button, notify_dot, notify_label, path_label) =
+    let (row, name_label, favorite_button, path_label) =
         build_sidebar_row(&seed.name, seed.folder_path.as_deref());
     let row_clone = row.clone();
     {
@@ -3307,8 +3312,6 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
             sidebar_row: row,
             name_label,
             favorite_button,
-            notify_dot,
-            notify_label,
             unread: false,
             favorite: false,
             cwd: Rc::new(RefCell::new(seed.cwd.clone())),
@@ -3371,8 +3374,7 @@ fn install_workspace_row_interactions(
         drag_source.connect_drag_begin(move |source, _| {
             let mut s = state.borrow_mut();
             s.workspace_dragging = Some(workspace_id.clone());
-            s.new_ws_btn.set_label("\u{1F5D1}\u{FE0E}");
-            s.new_ws_btn.add_css_class("ghostdeck-sidebar-btn-trash");
+            set_new_workspace_button_mode(&s.new_ws_btn, true);
             drop(s);
             pane::set_workspace_dragging_all(true);
             let icon = gtk::WidgetPaintable::new(Some(&row));
@@ -3384,10 +3386,7 @@ fn install_workspace_row_interactions(
         drag_source.connect_drag_end(move |_, _, _| {
             let mut s = state.borrow_mut();
             s.workspace_dragging = None;
-            s.new_ws_btn.set_label("New Workspace");
-            s.new_ws_btn.remove_css_class("ghostdeck-sidebar-btn-trash");
-            s.new_ws_btn
-                .remove_css_class("ghostdeck-sidebar-btn-trash-hover");
+            set_new_workspace_button_mode(&s.new_ws_btn, false);
             pane::set_workspace_dragging_all(false);
         });
     }
@@ -4411,7 +4410,7 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
             .upcast::<gtk::Widget>();
     stack.add_named(&root, Some(&stack_name));
 
-    let (row, name_label, favorite_button, notify_dot, notify_label, path_label) =
+    let (row, name_label, favorite_button, path_label) =
         build_sidebar_row(&workspace.name, workspace.folder_path.as_deref());
     sidebar_list.append(&row);
     install_workspace_row_interactions(state, &id, &row, &favorite_button);
@@ -4424,8 +4423,6 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
         sidebar_row: row.clone(),
         name_label,
         favorite_button,
-        notify_dot,
-        notify_label,
         unread: false,
         favorite: workspace.favorite,
         cwd,
@@ -4661,11 +4658,7 @@ fn switch_workspace(state: &State, idx: usize) {
         let unread_handles = if s.workspaces[idx].unread {
             let ws = &mut s.workspaces[idx];
             ws.unread = false;
-            Some((
-                ws.notify_dot.clone(),
-                ws.notify_label.clone(),
-                ws.sidebar_row.clone(),
-            ))
+            Some(ws.sidebar_row.clone())
         } else {
             None
         };
@@ -4678,15 +4671,9 @@ fn switch_workspace(state: &State, idx: usize) {
         focus_workspace_entrypoint(&focus_root);
     });
 
-    if let Some((notify_dot, notify_label, sidebar_row)) = unread_handles {
-        notify_dot.remove_css_class("ghostdeck-notify-dot");
-        notify_dot.add_css_class("ghostdeck-notify-dot-hidden");
-        notify_label.remove_css_class("ghostdeck-notify-msg-unread");
-        notify_label.add_css_class("ghostdeck-notify-msg");
-        notify_label.set_visible(false);
-        if let Some(row_box) = sidebar_row.child() {
-            row_box.remove_css_class("ghostdeck-sidebar-row-unread");
-        }
+    if let Some(sidebar_row) = unread_handles {
+        sidebar_row.remove_css_class("ghostdeck-sidebar-row-unread");
+        sidebar_row.update_property(&[gtk::accessible::Property::Description("")]);
     }
 
     request_session_save(state);
@@ -5225,15 +5212,10 @@ fn mark_workspace_unread_with_message(
 
         if idx != active_idx {
             ws.unread = true;
-            ws.notify_dot.remove_css_class("ghostdeck-notify-dot-hidden");
-            ws.notify_dot.add_css_class("ghostdeck-notify-dot");
-            ws.notify_label.set_label(message);
-            ws.notify_label.remove_css_class("ghostdeck-notify-msg");
-            ws.notify_label.add_css_class("ghostdeck-notify-msg-unread");
-            ws.notify_label.set_visible(true);
-            if let Some(row_box) = ws.sidebar_row.child() {
-                row_box.add_css_class("ghostdeck-sidebar-row-unread");
-            }
+            ws.sidebar_row.add_css_class("ghostdeck-sidebar-row-unread");
+            ws.sidebar_row.update_property(&[gtk::accessible::Property::Description(
+                "Unread notification",
+            )]);
         }
 
         return desktop_request;
