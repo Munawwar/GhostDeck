@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 
+pub(crate) const SHELL_NAMES: &[&str] = &[
+    "bash", "zsh", "fish", "nu", "elvish", "sh", "dash", "ksh", "tcsh", "csh",
+];
+
 pub fn surface_cwd(surface_id: &str) -> Option<String> {
     let expected_env = format!("GHOSTDECK_SURFACE_ID={surface_id}");
-    let shells = [
-        "bash", "zsh", "fish", "nu", "elvish", "sh", "dash", "ksh", "tcsh", "csh",
-    ];
     let mut best: Option<(usize, u32, PathBuf)> = None;
 
     for entry in std::fs::read_dir("/proc").ok()?.flatten() {
@@ -19,7 +20,7 @@ pub fn surface_cwd(surface_id: &str) -> Option<String> {
         let Ok(comm) = std::fs::read_to_string(process_dir.join("comm")) else {
             continue;
         };
-        if !shells.contains(&comm.trim()) {
+        if !SHELL_NAMES.contains(&comm.trim()) {
             continue;
         }
         let Ok(environ) = std::fs::read(process_dir.join("environ")) else {

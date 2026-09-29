@@ -35,9 +35,8 @@ impl SocketControlMode {
         match value.trim() {
             "allowAll" | "allow-all" | "allow_all" => Self::AllowAll,
             "localUser" | "local-user" | "local_user" => Self::LocalUser,
-            "cmuxOnly" | "ghostdeckOnly" | "descendantOnly" | "descendant-only" | "descendant_only" => {
-                Self::GhostDeckOnly
-            }
+            "cmuxOnly" | "ghostdeckOnly" | "descendantOnly" | "descendant-only"
+            | "descendant_only" => Self::GhostDeckOnly,
             _ => Self::LocalUser,
         }
     }
@@ -185,7 +184,10 @@ mod tests {
         let _lock = ENV_TEST_LOCK.lock().expect("env lock");
         let _ghostdeck = EnvGuard::set("GHOSTDECK_SOCKET_MODE", Some("cmuxOnly"));
         let _cmux = EnvGuard::set("CMUX_SOCKET_MODE", None);
-        assert_eq!(SocketControlMode::from_env(), SocketControlMode::GhostDeckOnly);
+        assert_eq!(
+            SocketControlMode::from_env(),
+            SocketControlMode::GhostDeckOnly
+        );
     }
 
     #[test]

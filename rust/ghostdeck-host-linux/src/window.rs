@@ -40,8 +40,9 @@ struct Workspace {
     name_label: gtk::Label,
     /// Favorite star button in sidebar row.
     favorite_button: gtk::Button,
-    /// Whether this workspace has unread notifications.
-    unread: bool,
+    /// Button and badge for tabs needing attention.
+    bell_button: gtk::Button,
+    attention_badge: gtk::Label,
     /// Whether this workspace is favorited/pinned to top.
     favorite: bool,
     /// Last known working directory from the terminal (via OSC 7).
@@ -1137,13 +1138,34 @@ row:selected .ghostdeck-ws-star-btn {
 }
 .ghostdeck-ws-bell {
     color: mix(@window_fg_color, #ee9851, 0.85);
-    margin-top: 2px;
     opacity: 0;
 }
-.ghostdeck-sidebar-row-unread {
+.ghostdeck-ws-bell-btn {
+    min-width: 0;
+    min-height: 0;
+    padding: 0;
+}
+.ghostdeck-ws-bell-btn:hover,
+.ghostdeck-ws-bell-btn:focus {
+    background: alpha(#ff8a30, 0.18);
+}
+.ghostdeck-ws-badge {
+    background: #ff8a30;
+    color: #22150b;
+    border-radius: 7px;
+    min-width: 13px;
+    min-height: 13px;
+    padding: 0;
+    font-size: 9px;
+    font-weight: 700;
+    margin-top: -6px;
+    margin-right: -8px;
+}
+.ghostdeck-sidebar-row-unread,
+.ghostdeck-sidebar-row-close-warning {
     background-color: alpha(#ff8a30, 0.25);
 }
-.ghostdeck-sidebar-row-unread .ghostdeck-ws-bell {
+.ghostdeck-sidebar-row-attention .ghostdeck-ws-bell {
     opacity: 1;
 }
 .ghostdeck-sidebar-row-unread .ghostdeck-ws-name {
@@ -1417,9 +1439,7 @@ pub fn build_window(app: &adw::Application, app_started_at: i64) {
     });
     sidebar_title_label.add_controller(drag);
 
-    let new_ws_btn = gtk::Button::builder()
-        .valign(gtk::Align::Center)
-        .build();
+    let new_ws_btn = gtk::Button::builder().valign(gtk::Align::Center).build();
     new_ws_btn.add_css_class("ghostdeck-sidebar-btn");
     set_new_workspace_button_mode(&new_ws_btn, false);
     sidebar_title.append(&new_ws_btn);
@@ -1542,6 +1562,20 @@ pub fn build_window(app: &adw::Application, app_started_at: i64) {
         let state = state.clone();
         window.connect_fullscreened_notify(move |_| {
             sync_top_bar_visibility(&state);
+        });
+    }
+    {
+        let state = state.clone();
+        window.connect_notify_local(Some("focus-widget"), move |_, _| {
+            let state = state.clone();
+            glib::idle_add_local_once(move || clear_focused_notification(&state));
+        });
+    }
+    {
+        let state = state.clone();
+        window.connect_notify_local(Some("is-active"), move |_, _| {
+            let state = state.clone();
+            glib::idle_add_local_once(move || clear_focused_notification(&state));
         });
     }
 
@@ -2723,6 +2757,8 @@ fn build_sidebar_row(
     gtk::ListBoxRow,
     gtk::Label,
     gtk::Button,
+    gtk::Button,
+    gtk::Label,
     gtk::Label,
 ) {
     let name_label = gtk::Label::builder()
@@ -2769,9 +2805,27 @@ fn build_sidebar_row(
         .accessible_role(gtk::AccessibleRole::Presentation)
         .build();
     bell.add_css_class("ghostdeck-ws-bell");
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let attention_badge = gtk::Label::new(None);
+    attention_badge.add_css_class("ghostdeck-ws-badge");
+    attention_badge.set_halign(gtk::Align::End);
+    attention_badge.set_valign(gtk::Align::Start);
+    attention_badge.set_visible(false);
+    let bell_overlay = gtk::Overlay::new();
+    bell_overlay.set_child(Some(&bell));
+    bell_overlay.add_overlay(&attention_badge);
+    let bell_button = gtk::Button::new();
+    bell_button.add_css_class("flat");
+    bell_button.add_css_class("ghostdeck-ws-bell-btn");
+    bell_button.set_child(Some(&bell_overlay));
+    bell_button.set_focus_on_click(false);
+    bell_button.set_sensitive(false);
+    bell_button.set_tooltip_text(Some("Dismiss all alerts in this workspace"));
+    bell_button.update_property(&[gtk::accessible::Property::Label(
+        "Dismiss all alerts in this workspace",
+    )]);
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     actions.set_valign(gtk::Align::Center);
-    actions.append(&bell);
+    actions.append(&bell_button);
     actions.append(&favorite_button);
 
     let content = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -2786,7 +2840,9 @@ fn build_sidebar_row(
         row,
         name_label,
         favorite_button,
+        bell_button,
         path_label,
+        attention_badge,
     )
 }
 
@@ -3296,14 +3352,20 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
     );
     let root = pane.clone().upcast::<gtk::Widget>();
 
-    let (row, name_label, favorite_button, path_label) =
+    let (row, name_label, favorite_button, bell_button, path_label, attention_badge) =
         build_sidebar_row(&seed.name, seed.folder_path.as_deref());
     let row_clone = row.clone();
     {
         let mut app_state = state.borrow_mut();
         app_state.stack.add_named(&root, Some(&stack_name));
         app_state.sidebar_list.append(&row);
-        install_workspace_row_interactions(state, &new_workspace_id, &row, &favorite_button);
+        install_workspace_row_interactions(
+            state,
+            &new_workspace_id,
+            &row,
+            &favorite_button,
+            &bell_button,
+        );
 
         app_state.workspaces.push(Workspace {
             id: new_workspace_id.clone(),
@@ -3312,7 +3374,8 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
             sidebar_row: row,
             name_label,
             favorite_button,
-            unread: false,
+            bell_button,
+            attention_badge,
             favorite: false,
             cwd: Rc::new(RefCell::new(seed.cwd.clone())),
             folder_path: seed.folder_path.clone(),
@@ -3345,7 +3408,24 @@ fn install_workspace_row_interactions(
     workspace_id: &str,
     row: &gtk::ListBoxRow,
     favorite_button: &gtk::Button,
+    bell_button: &gtk::Button,
 ) {
+    {
+        let state = state.clone();
+        let workspace_id = workspace_id.to_string();
+        bell_button.connect_clicked(move |_| {
+            let root = state
+                .borrow()
+                .workspaces
+                .iter()
+                .find(|ws| ws.id == workspace_id)
+                .map(|ws| ws.root.clone());
+            if let Some(root) = root {
+                pane::dismiss_workspace_attention(&root);
+                refresh_workspace_attention(&state, &workspace_id);
+            }
+        });
+    }
     let right_click = gtk::GestureClick::new();
     right_click.set_button(3);
     {
@@ -4328,6 +4408,8 @@ fn handle_control_command(state: &State, command: ControlCommand) {
         }
         ControlCommand::CreateNotification {
             target,
+            pane_id,
+            tab_id,
             title,
             subtitle,
             body,
@@ -4358,10 +4440,27 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 (false, false) => format!("{subtitle} — {body}"),
             };
             let message = workspace_notification_message(&title, &combined_body);
+            let tab_target = {
+                let s = state.borrow();
+                pane_id.zip(tab_id).and_then(|(pane_id, tab_id)| {
+                    let pane_widget =
+                        pane::pane_widget_for_root(&s.workspaces[index].root, pane_id)?;
+                    pane::tab_title(&pane_widget, &tab_id).map(|_| (pane_id, tab_id))
+                })
+            }
+            .or_else(|| {
+                find_leaf_focused_pane(state)
+                    .filter(|(focused_ws_id, _)| focused_ws_id == &ws_id)
+                    .and_then(|(_, pane_widget)| pane::active_tab_target(&pane_widget))
+            })
+            .or_else(|| {
+                let s = state.borrow();
+                pane::active_tab_target(&s.workspaces[index].root)
+            });
             let target = DesktopNotificationTarget {
                 workspace_id: ws_id.clone(),
-                pane_id: None,
-                tab_id: None,
+                pane_id: tab_target.as_ref().map(|(pane_id, _)| *pane_id),
+                tab_id: tab_target.map(|(_, tab_id)| tab_id),
             };
             if let Some(request) =
                 mark_workspace_unread_with_message(state, &ws_id, &message, false, target)
@@ -4410,10 +4509,10 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
             .upcast::<gtk::Widget>();
     stack.add_named(&root, Some(&stack_name));
 
-    let (row, name_label, favorite_button, path_label) =
+    let (row, name_label, favorite_button, bell_button, path_label, attention_badge) =
         build_sidebar_row(&workspace.name, workspace.folder_path.as_deref());
     sidebar_list.append(&row);
-    install_workspace_row_interactions(state, &id, &row, &favorite_button);
+    install_workspace_row_interactions(state, &id, &row, &favorite_button, &bell_button);
 
     let cwd: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(workspace.cwd.clone()));
     let ws = Workspace {
@@ -4423,7 +4522,8 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
         sidebar_row: row.clone(),
         name_label,
         favorite_button,
-        unread: false,
+        bell_button,
+        attention_badge,
         favorite: workspace.favorite,
         cwd,
         folder_path: workspace.folder_path.clone(),
@@ -4535,7 +4635,15 @@ pub(crate) fn create_pane_for_workspace(
         }),
         on_state_changed: Box::new({
             let state = state.clone();
-            move || request_session_save(&state)
+            let ws_id = ws_id.to_string();
+            move || {
+                let refresh_state = state.clone();
+                let refresh_ws_id = ws_id.clone();
+                glib::idle_add_local_once(move || {
+                    refresh_workspace_attention(&refresh_state, &refresh_ws_id)
+                });
+                request_session_save(&state);
+            }
         }),
         current_config: Box::new(move || {
             let s = state_for_config.borrow();
@@ -4645,36 +4753,27 @@ fn close_workspace_by_id_internal(
 }
 
 fn switch_workspace(state: &State, idx: usize) {
-    let (stack, stack_name, unread_handles, focus_root) = {
+    let (stack, stack_name, focus_root, ws_id) = {
         let mut s = state.borrow_mut();
         if idx >= s.workspaces.len() || idx == s.active_idx {
             return;
         }
         s.active_idx = idx;
+        s.workspaces[idx]
+            .sidebar_row
+            .remove_css_class("ghostdeck-sidebar-row-close-warning");
         let stack = s.stack.clone();
         let stack_name = format!("ws-{}", s.workspaces[idx].id);
         let focus_root = s.workspaces[idx].root.clone();
 
-        let unread_handles = if s.workspaces[idx].unread {
-            let ws = &mut s.workspaces[idx];
-            ws.unread = false;
-            Some(ws.sidebar_row.clone())
-        } else {
-            None
-        };
-
-        (stack, stack_name, unread_handles, focus_root)
+        (stack, stack_name, focus_root, s.workspaces[idx].id.clone())
     };
 
+    refresh_workspace_attention(state, &ws_id);
     stack.set_visible_child_name(&stack_name);
     glib::idle_add_local_once(move || {
         focus_workspace_entrypoint(&focus_root);
     });
-
-    if let Some(sidebar_row) = unread_handles {
-        sidebar_row.remove_css_class("ghostdeck-sidebar-row-unread");
-        sidebar_row.update_property(&[gtk::accessible::Property::Description("")]);
-    }
 
     request_session_save(state);
 }
@@ -4888,6 +4987,9 @@ fn find_leaf_focused_pane(state: &State) -> Option<(String, gtk::Widget)> {
     // Get the window's focus widget and walk up to find a pane Box
     let window = stack.root()?.downcast::<gtk::Window>().ok()?;
     let focus = gtk::prelude::GtkWindowExt::focus(&window)?;
+    if !root.is_mapped() || (focus != root && !focus.is_ancestor(&root)) {
+        return None;
+    }
 
     let mut widget: Option<gtk::Widget> = Some(focus);
     while let Some(w) = widget {
@@ -4903,7 +5005,6 @@ fn find_leaf_focused_pane(state: &State) -> Option<(String, gtk::Widget)> {
         widget = w.parent();
     }
 
-    let _ = root;
     None
 }
 
@@ -4946,10 +5047,31 @@ fn request_window_close_confirmation(state: &State) {
         }
         s.window.clone()
     };
+    let running_tabs = pane::highlight_running_process_tabs();
+    {
+        let s = state.borrow();
+        for workspace in &s.workspaces {
+            if pane::tab_attention_counts(&workspace.root).1 > 0 {
+                workspace
+                    .sidebar_row
+                    .add_css_class("ghostdeck-sidebar-row-close-warning");
+            } else {
+                workspace
+                    .sidebar_row
+                    .remove_css_class("ghostdeck-sidebar-row-close-warning");
+            }
+            refresh_workspace_attention(state, &workspace.id);
+        }
+    }
+    let detail = if running_tabs == 0 {
+        "Your current session will be saved before the window closes."
+    } else {
+        "Highlighted tabs have running processes. Closing will end their terminal sessions. Your workspace layout will be saved for the next launch."
+    };
     let dialog = gtk::AlertDialog::builder()
         .modal(true)
         .message("Close GhostDeck?")
-        .detail("Your current session will be saved before the window closes.")
+        .detail(detail)
         .build();
     dialog.set_buttons(&["Don't Close", "Close"]);
     dialog.set_default_button(WINDOW_CLOSE_BUTTON_CANCEL);
@@ -4964,6 +5086,16 @@ fn request_window_close_confirmation(state: &State) {
         if should_close {
             let window = state.borrow().window.clone();
             window.close();
+        } else {
+            let active_id = state.borrow().active_workspace().map(|workspace| {
+                workspace
+                    .sidebar_row
+                    .remove_css_class("ghostdeck-sidebar-row-close-warning");
+                workspace.id.clone()
+            });
+            if let Some(active_id) = active_id {
+                refresh_workspace_attention(&state, &active_id);
+            }
         }
     });
 }
@@ -5186,16 +5318,16 @@ fn mark_workspace_unread_with_message(
     source_focused: bool,
     target: DesktopNotificationTarget,
 ) -> Option<DesktopNotificationRequest> {
-    let mut s = state.borrow_mut();
+    let s = state.borrow();
     let active_idx = s.active_idx;
     let window_active = s.window.is_active();
     let notifications = s.config.borrow().notifications;
-    if let Some((idx, ws)) = s
-        .workspaces
-        .iter_mut()
-        .enumerate()
-        .find(|(_, w)| w.id == ws_id)
-    {
+    let focused_target = find_leaf_focused_pane(state)
+        .and_then(|(_, focused_pane)| pane::focused_tab_target(&focused_pane))
+        .is_some_and(|(pane_id, tab_id)| {
+            target.pane_id == Some(pane_id) && target.tab_id.as_deref() == Some(tab_id.as_str())
+        });
+    if let Some((idx, ws)) = s.workspaces.iter().enumerate().find(|(_, w)| w.id == ws_id) {
         let workspace_is_active = idx == active_idx;
         let desktop_request = should_emit_desktop_notification(
             notifications.enabled,
@@ -5210,18 +5342,81 @@ fn mark_workspace_unread_with_message(
             target: target.clone(),
         });
 
-        if idx != active_idx {
-            ws.unread = true;
-            ws.sidebar_row.add_css_class("ghostdeck-sidebar-row-unread");
-            ws.sidebar_row.update_property(&[gtk::accessible::Property::Description(
-                "Unread notification",
-            )]);
+        if !(window_active && workspace_is_active && (source_focused || focused_target)) {
+            if let (Some(pane_id), Some(tab_id)) = (target.pane_id, target.tab_id.as_deref()) {
+                if pane::set_tab_unread(pane_id, tab_id, true) {
+                    refresh_workspace_attention(state, ws_id);
+                }
+            }
         }
 
         return desktop_request;
     }
 
     None
+}
+
+fn refresh_workspace_attention(state: &State, ws_id: &str) {
+    let s = state.borrow();
+    let Some(ws) = s.workspaces.iter().find(|ws| ws.id == ws_id) else {
+        return;
+    };
+    let (unread, close_warnings, total) = pane::tab_attention_counts(&ws.root);
+    ws.attention_badge.set_label(&total.to_string());
+    ws.attention_badge.set_visible(total > 0);
+    ws.bell_button.set_sensitive(total > 0);
+    if total > 0 {
+        ws.sidebar_row
+            .add_css_class("ghostdeck-sidebar-row-attention");
+    } else {
+        ws.sidebar_row
+            .remove_css_class("ghostdeck-sidebar-row-attention");
+    }
+    if unread > 0 {
+        ws.sidebar_row.add_css_class("ghostdeck-sidebar-row-unread");
+    } else {
+        ws.sidebar_row
+            .remove_css_class("ghostdeck-sidebar-row-unread");
+    }
+    if close_warnings == 0 {
+        ws.sidebar_row
+            .remove_css_class("ghostdeck-sidebar-row-close-warning");
+    }
+    let mut descriptions = Vec::new();
+    if unread > 0 {
+        descriptions.push(if unread == 1 {
+            "1 tab needs attention".to_string()
+        } else {
+            format!("{unread} tabs need attention")
+        });
+    }
+    if close_warnings > 0 {
+        descriptions.push(if close_warnings == 1 {
+            "1 tab has a running process".to_string()
+        } else {
+            format!("{close_warnings} tabs have running processes")
+        });
+    }
+    let description = descriptions.join("; ");
+    ws.sidebar_row
+        .update_property(&[gtk::accessible::Property::Description(&description)]);
+    ws.bell_button
+        .update_property(&[gtk::accessible::Property::Description(&description)]);
+}
+
+fn clear_focused_notification(state: &State) {
+    let s = state.borrow();
+    if !s.window.is_active() || s.window_close.dialog_open {
+        return;
+    }
+    drop(s);
+    if let Some((ws_id, pane_widget)) = find_leaf_focused_pane(state) {
+        if let Some((pane_id, tab_id)) = pane::focused_tab_target(&pane_widget) {
+            if pane::set_tab_unread(pane_id, &tab_id, false) {
+                refresh_workspace_attention(state, &ws_id);
+            }
+        }
+    }
 }
 
 fn desktop_notification_hints(

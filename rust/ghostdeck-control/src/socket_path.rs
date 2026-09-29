@@ -200,7 +200,8 @@ mod tests {
     fn explicit_path_has_highest_precedence() {
         let _lock = ENV_TEST_LOCK.lock().expect("env test lock");
         let _socket = EnvGuard::set(GHOSTDECK_SOCKET_ENV, Some("/tmp/from-env.sock"));
-        let _socket_path = EnvGuard::set(GHOSTDECK_SOCKET_PATH_ENV, Some("/tmp/from-env-path.sock"));
+        let _socket_path =
+            EnvGuard::set(GHOSTDECK_SOCKET_PATH_ENV, Some("/tmp/from-env-path.sock"));
 
         let resolved = resolve_socket_path(
             Some(PathBuf::from("/tmp/from-arg.sock")),
@@ -212,7 +213,10 @@ mod tests {
     #[test]
     fn ghostdeck_socket_has_higher_precedence_than_ghostdeck_socket_path() {
         let _lock = ENV_TEST_LOCK.lock().expect("env test lock");
-        let _socket = EnvGuard::set(GHOSTDECK_SOCKET_ENV, Some("/tmp/from-ghostdeck-socket.sock"));
+        let _socket = EnvGuard::set(
+            GHOSTDECK_SOCKET_ENV,
+            Some("/tmp/from-ghostdeck-socket.sock"),
+        );
         let _socket_path = EnvGuard::set(
             GHOSTDECK_SOCKET_PATH_ENV,
             Some("/tmp/from-ghostdeck-socket-path.sock"),
@@ -232,7 +236,10 @@ mod tests {
         );
 
         let resolved = resolve_socket_path(None, SocketMode::Runtime);
-        assert_eq!(resolved, PathBuf::from("/tmp/from-ghostdeck-socket-path.sock"));
+        assert_eq!(
+            resolved,
+            PathBuf::from("/tmp/from-ghostdeck-socket-path.sock")
+        );
     }
 
     #[test]

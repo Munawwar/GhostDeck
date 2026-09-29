@@ -5,6 +5,7 @@
 //! All on one line. Tabs left-justified, icons right-justified.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -1123,6 +1124,13 @@ pub const PANE_CSS: &str = r#"
     color: @window_fg_color;
     background: alpha(@window_fg_color, 0.08);
 }
+.ghostdeck-tab-unread,
+.ghostdeck-tab-unread:hover,
+.ghostdeck-tab-close-warning,
+.ghostdeck-tab-close-warning:hover {
+    color: @window_fg_color;
+    background: alpha(#ff8a30, 0.25);
+}
 .ghostdeck-tab-close {
     background: none;
     border: none;
@@ -1624,6 +1632,8 @@ struct TabEntry {
     pinned: bool,
     started_at: i64,
     last_activity_at: Option<i64>,
+    unread: bool,
+    close_warning_surfaces: usize,
     kind: TabKind,
 }
 
@@ -1877,7 +1887,10 @@ fn create_terminal_leaf(
     let pane_widget: gtk::Widget = internals.pane_outer.clone().upcast();
     let mut extra_env = vec![
         ("GHOSTDECK_SURFACE_ID".to_string(), surface_id.clone()),
-        ("GHOSTDECK_PANE_ID".to_string(), internals.pane_id.to_string()),
+        (
+            "GHOSTDECK_PANE_ID".to_string(),
+            internals.pane_id.to_string(),
+        ),
         ("GHOSTDECK_TAB_ID".to_string(), tab_id.to_string()),
     ];
     if let Some(workspace_id) = (internals.callbacks.workspace_for_pane)(&pane_widget) {
@@ -2495,6 +2508,8 @@ fn add_terminal_tab_inner(
                     .unwrap_or(internals.callbacks.app_started_at)
             }),
             last_activity_at: options.as_ref().and_then(|value| value.last_activity_at),
+            unread: false,
+            close_warning_surfaces: 0,
             kind: TabKind::Terminal {
                 state: state.clone(),
             },
@@ -2575,6 +2590,8 @@ fn add_keybind_editor_tab_inner(internals: &Rc<PaneInternals>, input: KeybindsTa
                 .options
                 .as_ref()
                 .and_then(|value| value.last_activity_at),
+            unread: false,
+            close_warning_surfaces: 0,
             kind: TabKind::Keybinds,
         });
     }
@@ -2732,6 +2749,120 @@ pub fn tab_working_directory(pane_widget: &gtk::Widget, tab_id: &str) -> Option<
         TabKind::Terminal { state } => state.active_cwd(),
         TabKind::Keybinds => None,
     }
+}
+
+/// Focusing a tab acknowledges both its notification and any close warning.
+pub fn set_tab_unread(pane_id: u32, tab_id: &str, unread: bool) -> bool {
+    let Some(internals) = lookup_pane_internals(pane_id) else {
+        return false;
+    };
+    let mut state = internals.tab_state.borrow_mut();
+    let Some(tab) = state.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+        return false;
+    };
+    if tab.unread == unread && (unread || tab.close_warning_surfaces == 0) {
+        return false;
+    }
+    tab.unread = unread;
+    if unread {
+        tab.tab_button.add_css_class("ghostdeck-tab-unread");
+    } else {
+        tab.tab_button.remove_css_class("ghostdeck-tab-unread");
+        tab.close_warning_surfaces = 0;
+        tab.tab_button
+            .remove_css_class("ghostdeck-tab-close-warning");
+    }
+    true
+}
+
+pub fn focused_tab_target(pane_widget: &gtk::Widget) -> Option<(u32, String)> {
+    let internals = find_pane_internals(pane_widget)?;
+    let focused = internals
+        .pane_outer
+        .root()
+        .and_then(|root| root.downcast::<gtk::Window>().ok())
+        .and_then(|window| gtk::prelude::GtkWindowExt::focus(&window))?;
+    let state = internals.tab_state.borrow();
+    let tab = state.tabs.iter().find(|tab| {
+        state.active_tab.as_deref() == Some(tab.id.as_str())
+            && (focused == tab.content || focused.is_ancestor(&tab.content))
+    })?;
+    Some((internals.pane_id, tab.id.clone()))
+}
+
+pub fn active_tab_target(root: &gtk::Widget) -> Option<(u32, String)> {
+    let internals = pane_internals_for_root(root).into_iter().next()?;
+    let tab_id = internals.tab_state.borrow().active_tab.clone()?;
+    Some((internals.pane_id, tab_id))
+}
+
+pub fn tab_attention_counts(root: &gtk::Widget) -> (usize, usize, usize) {
+    let mut unread = 0;
+    let mut close_warnings = 0;
+    let mut total = 0;
+    for pane in pane_internals_for_root(root) {
+        for tab in &pane.tab_state.borrow().tabs {
+            unread += usize::from(tab.unread);
+            close_warnings += usize::from(tab.close_warning_surfaces > 0);
+            total += usize::from(tab.unread || tab.close_warning_surfaces > 0);
+        }
+    }
+    (unread, close_warnings, total)
+}
+
+pub fn dismiss_workspace_attention(root: &gtk::Widget) {
+    for pane in pane_internals_for_root(root) {
+        for tab in &mut pane.tab_state.borrow_mut().tabs {
+            tab.unread = false;
+            tab.close_warning_surfaces = 0;
+            tab.tab_button.remove_css_class("ghostdeck-tab-unread");
+            tab.tab_button
+                .remove_css_class("ghostdeck-tab-close-warning");
+        }
+    }
+}
+
+pub fn highlight_running_process_tabs() -> usize {
+    let panes: Vec<_> = PANE_REGISTRY.with(|registry| {
+        registry
+            .borrow()
+            .values()
+            .filter_map(|weak| weak.upgrade())
+            .collect()
+    });
+    let mut surface_ids = HashSet::new();
+    for pane in &panes {
+        for tab in &pane.tab_state.borrow().tabs {
+            if let TabKind::Terminal { state } = &tab.kind {
+                state.inner.tree.borrow().for_each_leaf(|leaf| {
+                    surface_ids.insert(leaf.surface_id.clone());
+                });
+            }
+        }
+    }
+    let busy_surfaces = crate::process_usage::busy_surface_ids(&surface_ids);
+    let mut highlighted = 0;
+    for pane in panes {
+        for tab in &mut pane.tab_state.borrow_mut().tabs {
+            let mut count = 0;
+            if let TabKind::Terminal { state } = &tab.kind {
+                state.inner.tree.borrow().for_each_leaf(|leaf| {
+                    if busy_surfaces.contains(&leaf.surface_id) {
+                        count += 1;
+                    }
+                });
+            }
+            tab.close_warning_surfaces = count;
+            if count > 0 {
+                tab.tab_button.add_css_class("ghostdeck-tab-close-warning");
+                highlighted += 1;
+            } else {
+                tab.tab_button
+                    .remove_css_class("ghostdeck-tab-close-warning");
+            }
+        }
+    }
+    highlighted
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3050,14 +3181,14 @@ fn build_tab_button_from_label(
         let tab_id = tab_id.to_string();
         let tab_state = internals.tab_state.clone();
         tab_btn.connect_query_tooltip(move |_, _, _, _, tooltip| {
-            let Some((label, timestamp)) = tab_state
+            let Some((label, timestamp, close_warning_surfaces)) = tab_state
                 .borrow()
                 .tabs
                 .iter()
                 .find(|tab| tab.id == tab_id)
                 .map(|tab| match tab.last_activity_at {
-                    Some(at) => ("Last activity", at),
-                    None => ("Started", tab.started_at),
+                    Some(at) => ("Last activity", at, tab.close_warning_surfaces),
+                    None => ("Started", tab.started_at, tab.close_warning_surfaces),
                 })
             else {
                 return false;
@@ -3073,7 +3204,12 @@ fn build_tab_button_from_label(
             } else {
                 format!("{}d ago", elapsed / 86_400)
             };
-            tooltip.set_text(Some(&format!("{label}: {age}")));
+            let status = match close_warning_surfaces {
+                0 => String::new(),
+                1 => "Process running in 1 surface\n".to_string(),
+                count => format!("Processes running in {count} surfaces\n"),
+            };
+            tooltip.set_text(Some(&format!("{status}{label}: {age}")));
             true
         });
     }
@@ -3462,6 +3598,14 @@ fn rebind_moved_tab_entry(entry: &mut TabEntry, target: &Rc<PaneInternals>) {
         });
     }
     entry.tab_button = build_tab_button_from_label(&entry.title_label, &entry.id, target);
+    if entry.unread {
+        entry.tab_button.add_css_class("ghostdeck-tab-unread");
+    }
+    if entry.close_warning_surfaces > 0 {
+        entry
+            .tab_button
+            .add_css_class("ghostdeck-tab-close-warning");
+    }
     if entry.pinned {
         apply_pin_visuals(&entry.tab_button, true);
     }
@@ -3552,6 +3696,9 @@ fn transfer_tab_between_panes(
             &source.tab_state,
             &next_active,
         );
+    }
+    if !source_empty {
+        (source.callbacks.on_state_changed)();
     }
 
     activate_tab(

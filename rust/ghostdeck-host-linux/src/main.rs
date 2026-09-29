@@ -5,6 +5,7 @@ mod keybind_editor;
 mod layout_state;
 mod pane;
 mod process_cwd;
+mod process_usage;
 mod settings_editor;
 mod shortcut_config;
 mod terminal;

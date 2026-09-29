@@ -7,12 +7,12 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gtk::glib;
-use gtk4 as gtk;
 use ghostdeck_control::auth::{self, SocketControlMode};
 use ghostdeck_control::request_io::{self, read_request_frame};
 use ghostdeck_control::socket_path::{bind_listener, resolve_socket_path, SocketMode};
 use ghostdeck_protocol::{parse_v1_command_envelope, V2Request, V2Response};
+use gtk::glib;
+use gtk4 as gtk;
 use serde_json::{json, Map, Value};
 
 const METHODS: &[&str] = &[
@@ -164,6 +164,8 @@ pub enum ControlCommand {
     /// the currently-active workspace is used.
     CreateNotification {
         target: WorkspaceTarget,
+        pane_id: Option<u32>,
+        tab_id: Option<String>,
         title: String,
         subtitle: String,
         body: String,
@@ -738,6 +740,16 @@ fn handle_method(
             };
             let subtitle = optional_string(params, &["subtitle"]).unwrap_or_default();
             let body = optional_string(params, &["body", "message"]).unwrap_or_default();
+            let pane_id = match optional_index(params, "pane_id").and_then(|pane_id| {
+                pane_id
+                    .map(u32::try_from)
+                    .transpose()
+                    .map_err(|_| BridgeError::invalid_params("pane_id is too large"))
+            }) {
+                Ok(pane_id) => pane_id,
+                Err(error) => return error_response(id, error),
+            };
+            let tab_id = optional_string(params, &["tab_id"]);
             // allow_name = true: lets agent hooks target a peer by name.
             let target = match parse_optional_workspace_target(params, true) {
                 Ok(target) => target,
@@ -747,6 +759,8 @@ fn handle_method(
             (
                 ControlCommand::CreateNotification {
                     target,
+                    pane_id,
+                    tab_id,
                     title,
                     subtitle,
                     body,
@@ -989,6 +1003,30 @@ mod tests {
 
         assert_eq!(response.error, None);
         assert!(response.result.is_some());
+    }
+
+    #[test]
+    fn notification_route_preserves_originating_tab() {
+        let response = dispatch_request(
+            r#"{"id":1,"method":"notification.create","params":{"workspace_id":"codex","pane_id":7,"tab_id":"tab-a","title":"Ready"}}"#,
+            &|command| match command {
+                ControlCommand::CreateNotification {
+                    target,
+                    pane_id,
+                    tab_id,
+                    reply,
+                    ..
+                } => {
+                    assert_eq!(target, WorkspaceTarget::Name("codex".to_string()));
+                    assert_eq!(pane_id, Some(7));
+                    assert_eq!(tab_id.as_deref(), Some("tab-a"));
+                    let _ = reply.send(Ok(json!({ "ok": true })));
+                }
+                other => panic!("unexpected command: {other:?}"),
+            },
+        );
+
+        assert_eq!(response.error, None);
     }
 
     #[test]

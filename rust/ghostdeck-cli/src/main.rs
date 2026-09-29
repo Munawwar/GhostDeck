@@ -763,7 +763,7 @@ async fn run_send_key(client: &mut Client, args: &[String]) -> Result<Value> {
 /// workspace via GHOSTDECK_WORKSPACE_ID when --workspace isn't given.
 async fn run_notify(client: &mut Client, args: &[String]) -> Result<Value> {
     let workspace = parse_opt(args, "--workspace")
-        .or_else(|| env::var("GHOSTDECK_WORKSPACE_ID").ok())
+        .or_else(|| ghostdeck_env_value("GHOSTDECK_WORKSPACE_ID"))
         .filter(|s| !s.is_empty());
 
     // Title can be provided either via --title or as the trailing positional
@@ -785,6 +785,7 @@ async fn run_notify(client: &mut Client, args: &[String]) -> Result<Value> {
     if !body.is_empty() {
         params.insert("body".to_string(), Value::String(body));
     }
+    add_notification_origin(&mut params);
 
     call_in_workspace_scope(
         client,
@@ -793,6 +794,18 @@ async fn run_notify(client: &mut Client, args: &[String]) -> Result<Value> {
         Value::Object(params),
     )
     .await
+}
+
+fn add_notification_origin(params: &mut Map<String, Value>) {
+    if let (Some(pane_id), Some(tab_id)) = (
+        ghostdeck_env_value("GHOSTDECK_PANE_ID"),
+        ghostdeck_env_value("GHOSTDECK_TAB_ID"),
+    ) {
+        if let (Ok(pane_id), false) = (pane_id.parse::<u32>(), tab_id.is_empty()) {
+            params.insert("pane_id".to_string(), Value::from(pane_id));
+            params.insert("tab_id".to_string(), Value::String(tab_id));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -919,7 +932,7 @@ async fn run_agent_hook(
         .unwrap_or_default();
 
     let workspace = parse_opt(args, "--workspace")
-        .or_else(|| env::var("GHOSTDECK_WORKSPACE_ID").ok())
+        .or_else(|| ghostdeck_env_value("GHOSTDECK_WORKSPACE_ID"))
         .filter(|s| !s.is_empty());
 
     let mut params = Map::new();
@@ -930,6 +943,7 @@ async fn run_agent_hook(
     if !body.is_empty() {
         params.insert("body".to_string(), Value::String(body));
     }
+    add_notification_origin(&mut params);
 
     let _ = call_in_workspace_scope(
         client,
@@ -1754,8 +1768,8 @@ fn opencode_plugin_source() -> Result<String> {
 }
 
 fn opencode_plugin_source_with_command(ghostdeck_command: &str) -> Result<String> {
-    let ghostdeck_command_json =
-        serde_json::to_string(ghostdeck_command).context("failed to encode OpenCode hook command")?;
+    let ghostdeck_command_json = serde_json::to_string(ghostdeck_command)
+        .context("failed to encode OpenCode hook command")?;
     Ok(
         r#"// ghostdeck-opencode-session-plugin v2
 // Installed by `ghostdeck hooks opencode install`. Do not edit manually.
@@ -2042,7 +2056,9 @@ async fn run_agent_team(client: &mut Client, args: &[String]) -> Result<Value> {
     let orchestrator_workspace = env::var("GHOSTDECK_WORKSPACE_ID")
         .ok()
         .filter(|s| !s.is_empty());
-    let orchestrator_surface_env = env::var("GHOSTDECK_SURFACE_ID").ok().filter(|s| !s.is_empty());
+    let orchestrator_surface_env = env::var("GHOSTDECK_SURFACE_ID")
+        .ok()
+        .filter(|s| !s.is_empty());
     let orchestrator_pane_env = env::var("GHOSTDECK_PANE_ID").ok().filter(|s| !s.is_empty());
     let orchestrator_tab_env = env::var("GHOSTDECK_TAB_ID").ok().filter(|s| !s.is_empty());
 
@@ -2527,7 +2543,8 @@ async fn run_rename_workspace_like(
     command: &str,
     args: &[String],
 ) -> Result<Value> {
-    let workspace = parse_opt(args, "--workspace").or_else(|| env::var("GHOSTDECK_WORKSPACE_ID").ok());
+    let workspace =
+        parse_opt(args, "--workspace").or_else(|| env::var("GHOSTDECK_WORKSPACE_ID").ok());
     let title = trailing_title(args).ok_or_else(|| {
         if command == "rename-window" {
             anyhow!("rename-window requires a title")
@@ -2576,7 +2593,8 @@ async fn run_tab_action(client: &mut Client, args: &[String]) -> Result<Value> {
 
     let action = parse_opt(args, "--action")
         .ok_or_else(|| anyhow!("tab-action requires --action <name>"))?;
-    let workspace = parse_opt(args, "--workspace").or_else(|| env::var("GHOSTDECK_WORKSPACE_ID").ok());
+    let workspace =
+        parse_opt(args, "--workspace").or_else(|| env::var("GHOSTDECK_WORKSPACE_ID").ok());
     let tab = parse_opt(args, "--tab").or_else(|| env::var("GHOSTDECK_TAB_ID").ok());
     let title = parse_opt(args, "--title").or_else(|| trailing_title(args));
 
@@ -3168,7 +3186,8 @@ mod cli_arg_tests {
 
     #[test]
     fn opencode_plugin_embeds_installer_cli_command() {
-        let source = opencode_plugin_source_with_command("/tmp/ghostdeck-cli").expect("plugin source");
+        let source =
+            opencode_plugin_source_with_command("/tmp/ghostdeck-cli").expect("plugin source");
 
         assert!(source.contains("const GHOSTDECK_COMMAND = \"/tmp/ghostdeck-cli\";"));
         assert!(source.contains("process.env.GHOSTDECK_BIN || GHOSTDECK_COMMAND"));
@@ -3177,7 +3196,8 @@ mod cli_arg_tests {
 
     #[test]
     fn opencode_plugin_removes_only_deleted_sessions() {
-        let source = opencode_plugin_source_with_command("/tmp/ghostdeck-cli").expect("plugin source");
+        let source =
+            opencode_plugin_source_with_command("/tmp/ghostdeck-cli").expect("plugin source");
 
         assert!(
             source.contains("if (type === \"session.error\") send(\"session-end\", ctx, event);")

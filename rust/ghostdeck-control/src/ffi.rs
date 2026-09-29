@@ -56,7 +56,10 @@ pub extern "C" fn ghostdeck_control_init() -> i32 {
 ///
 /// `message_ptr` must point to a readable buffer of exactly `message_len` bytes
 /// for the duration of this call.
-pub unsafe extern "C" fn ghostdeck_control_dispatch(message_ptr: *const u8, message_len: usize) -> i32 {
+pub unsafe extern "C" fn ghostdeck_control_dispatch(
+    message_ptr: *const u8,
+    message_len: usize,
+) -> i32 {
     if message_ptr.is_null() {
         return 2;
     }
