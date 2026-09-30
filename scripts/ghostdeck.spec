@@ -3,17 +3,17 @@
 Name:       ghostdeck
 Version:    %{version}
 Release:    1%{?dist}
-Summary:    GPU-accelerated terminal workspace manager for Linux
+Summary:    Ghostty terminal workspace with built-in desktop and agent integration
 License:    MIT
 URL:        https://github.com/Munawwar/GhostDeck
-Vendor:     Will R <will@limux.dev>
+Vendor:     Munawwar
 ExclusiveArch: x86_64 aarch64
 AutoReq:    yes
 Source0:    ghostdeck-%{version}.tar.gz
 
 %description
-GhostDeck is a terminal workspace manager powered by Ghostty's GPU-rendered
-terminal engine, with split surfaces and tabbed workspaces.
+GhostDeck brings embedded Ghostty terminals and agents into one desktop
+workspace, with tabs, split panes, session restore, and Linux integration.
 
 %prep
 %setup -q

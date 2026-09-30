@@ -632,10 +632,10 @@ Priority: optional
 Architecture: ${DEB_ARCH}
 Installed-Size: ${INSTALLED_SIZE}
 Depends: libgtk-4-1, libadwaita-1-0
-Maintainer: Will R <will@limux.dev>
-Description: GPU-accelerated terminal workspace manager for Linux
- GhostDeck is a terminal workspace manager powered by Ghostty's
- GPU-rendered terminal engine, with split surfaces and tabbed workspaces.
+Maintainer: Munawwar <munawwarfiroz@hotmail.com>
+Description: Ghostty terminal workspace with built-in desktop and agent integration
+ GhostDeck brings embedded Ghostty terminals and agents into one desktop
+ workspace, with tabs, split panes, session restore, and Linux integration.
 Homepage: https://github.com/Munawwar/GhostDeck
 EOF
 

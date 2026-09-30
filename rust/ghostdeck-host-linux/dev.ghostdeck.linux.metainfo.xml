@@ -3,19 +3,19 @@
   <id>dev.ghostdeck.linux</id>
   <launchable type="desktop-id">dev.ghostdeck.linux.desktop</launchable>
   <name>GhostDeck</name>
-  <summary>GPU-accelerated terminal workspace manager for Linux</summary>
+  <summary>Ghostty terminal workspace with built-in desktop and agent integration</summary>
   <metadata_license>MIT</metadata_license>
   <project_license>MIT</project_license>
   <content_rating type="oars-1.1" />
   <developer id="dev.ghostdeck">
-    <name>Will R</name>
+    <name>Munawwar</name>
   </developer>
   <url type="homepage">https://github.com/Munawwar/GhostDeck</url>
   <url type="bugtracker">https://github.com/Munawwar/GhostDeck/issues</url>
   <description>
     <p>
-      GhostDeck is a terminal workspace manager powered by Ghostty&apos;s
-      GPU-rendered terminal engine, with split surfaces and tabbed workspaces.
+      GhostDeck brings embedded Ghostty terminals and agents into one desktop
+      workspace, with tabs, split panes, session restore, and Linux integration.
     </p>
   </description>
   <recommends>

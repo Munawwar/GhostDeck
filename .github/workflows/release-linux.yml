@@ -1,9 +1,7 @@
 name: Build Linux Release Packages
 
 on:
-  push:
-    tags:
-      - 'v*'
+  create:
   workflow_dispatch:
     inputs:
       version:
@@ -15,6 +13,7 @@ permissions:
 
 jobs:
   packages:
+    if: github.event_name != 'create' || (github.event.ref_type == 'tag' && startsWith(github.event.ref, 'v'))
     name: Build tarball, deb, AppImage, and RPM on Ubuntu 24.04
     runs-on: ubuntu-24.04
     outputs:

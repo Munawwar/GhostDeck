@@ -1,7 +1,7 @@
 [Desktop Entry]
 Version=1.0
 Name=GhostDeck
-Comment=GPU-accelerated terminal workspace manager
+Comment=Ghostty terminal workspace with built-in desktop and agent integration
 Exec=ghostdeck
 TryExec=ghostdeck
 Icon=ghostdeck
