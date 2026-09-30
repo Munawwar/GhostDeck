@@ -1092,7 +1092,7 @@ struct TabContextMenuContext {
     callbacks: Rc<PaneCallbacks>,
     pane_outer: gtk::Box,
     label: gtk::Label,
-    pin_icon: gtk::Label,
+    pin_icon: gtk::Image,
 }
 
 // ---------------------------------------------------------------------------
@@ -1222,7 +1222,6 @@ pub const PANE_CSS: &str = r#"
     background: alpha(@window_fg_color, 0.08);
 }
 .ghostdeck-pin-icon {
-    font-size: 9px;
     margin-right: 2px;
 }
 .ghostdeck-tab-rename-entry {
@@ -1296,7 +1295,7 @@ pub fn create_pane(
         .build();
 
     let new_term_btn = icon_button(
-        "utilities-terminal-symbolic",
+        "ghostdeck-terminal-symbolic",
         &pane_action_tooltip(
             &shortcuts,
             "New terminal tab",
@@ -1311,7 +1310,7 @@ pub fn create_pane(
         "ghostdeck-split-vertical-symbolic",
         &pane_action_tooltip(&shortcuts, "Split down", Some(ShortcutId::SplitDown)),
     );
-    let settings_btn = icon_button("emblem-system-symbolic", "Settings");
+    let settings_btn = icon_button("ghostdeck-settings-symbolic", "Settings");
 
     actions.append(&new_term_btn);
     actions.append(&split_h_btn);
@@ -3112,9 +3111,8 @@ fn apply_pin_visuals(tab_button: &gtk::Box, pinned: bool) {
     {
         if let Some(pin_icon) = inner_box
             .first_child()
-            .and_then(|child| child.downcast::<gtk::Label>().ok())
+            .and_then(|child| child.downcast::<gtk::Image>().ok())
         {
-            pin_icon.set_label(if pinned { "📌" } else { "" });
             pin_icon.set_visible(pinned);
         }
     }
@@ -3156,13 +3154,14 @@ fn build_tab_button_from_label(
         parent.remove(label);
     }
 
-    let pin_icon = gtk::Label::new(None);
+    let pin_icon = gtk::Image::from_icon_name("ghostdeck-pin-symbolic");
+    pin_icon.set_pixel_size(9);
     pin_icon.add_css_class("ghostdeck-pin-icon");
     pin_icon.set_visible(false);
     pin_icon.set_can_target(false);
 
     let close_btn = gtk::Button::builder()
-        .icon_name("window-close-symbolic")
+        .icon_name("ghostdeck-close-symbolic")
         .has_frame(false)
         .build();
     close_btn.add_css_class("ghostdeck-tab-close");
@@ -3361,7 +3360,6 @@ fn show_tab_context_menu(tab_btn: &gtk::Box, tab_id: &str, context: &TabContextM
             if let Some(entry) = ts.find_tab_mut(&tid) {
                 entry.pinned = !entry.pinned;
                 apply_pin_visuals(&entry.tab_button, entry.pinned);
-                pin.set_label(if entry.pinned { "📌" } else { "" });
                 pin.set_visible(entry.pinned);
                 if let Some(close_widget) = &close {
                     close_widget.set_visible(!entry.pinned);

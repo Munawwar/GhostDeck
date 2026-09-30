@@ -473,12 +473,15 @@ fn request_terminal_focus(gl_area: &gtk::GLArea, had_focus: &Cell<bool>) {
 
 fn refresh_surface_display(surface: ghostty_surface_t, gl_area: &gtk::GLArea) {
     let alloc = gl_area.allocation();
-    let w = alloc.width() as u32;
-    let h = alloc.height() as u32;
-    if w > 0 && h > 0 {
-        let scale = gl_area.scale_factor() as f64;
+    if alloc.width() > 0 && alloc.height() > 0 {
+        // GTK allocations are logical pixels, while Ghostty's size and font
+        // metrics are physical pixels. At 200% display scaling, passing the
+        // allocation unchanged makes the terminal grid half the viewport.
+        let scale = gl_area.scale_factor().max(1) as u32;
+        let w = (alloc.width() as u32).saturating_mul(scale);
+        let h = (alloc.height() as u32).saturating_mul(scale);
         unsafe {
-            ghostty_surface_set_content_scale(surface, scale, scale);
+            ghostty_surface_set_content_scale(surface, scale as f64, scale as f64);
             ghostty_surface_set_size(surface, w, h);
         }
     }
@@ -1496,8 +1499,8 @@ pub fn create_terminal(
                 }
             }
 
-            // Set initial size — GLArea gives unscaled CSS pixels,
-            // Ghostty handles scaling internally via content_scale.
+            // Set initial size using the same logical-to-physical conversion
+            // used for subsequent resizes.
             let alloc = gl_area.allocation();
             let w = alloc.width() as u32;
             let h = alloc.height() as u32;

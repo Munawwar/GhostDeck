@@ -1120,7 +1120,6 @@ row:selected .ghostdeck-ws-name {
     min-height: 0;
     min-width: 0;
     padding: 0;
-    font-size: 22px;
 }
 .ghostdeck-ws-star-btn:hover {
     color: alpha(@window_fg_color, 0.9);
@@ -1263,9 +1262,9 @@ row:selected .ghostdeck-ws-path {
 
 fn set_new_workspace_button_mode(button: &gtk::Button, removing: bool) {
     let (icon, label) = if removing {
-        ("user-trash-symbolic", "Drop to remove workspace")
+        ("ghostdeck-trash-symbolic", "Drop to remove workspace")
     } else {
-        ("list-add-symbolic", "New workspace")
+        ("ghostdeck-add-symbolic", "New workspace")
     };
     button.set_icon_name(icon);
     button.set_tooltip_text(Some(label));
@@ -1326,7 +1325,7 @@ pub fn build_window(app: &adw::Application, app_started_at: i64) {
         &config.borrow().appearance,
     );
 
-    // Register custom icons — look for icons dir relative to the executable
+    // Register GhostDeck's action icons for source and local debug builds.
     let icon_theme = gtk::IconTheme::for_display(&display);
     let exe_dir = std::env::current_exe()
         .ok()
@@ -1335,11 +1334,21 @@ pub fn build_window(app: &adw::Application, app_started_at: i64) {
     for path in [
         exe_dir
             .as_ref()
+            .map(|d| d.join("icons/hicolor/scalable/actions")),
+        exe_dir
+            .as_ref()
             .map(|d| d.join("../../rust/ghostdeck-host-linux/icons")),
+        exe_dir
+            .as_ref()
+            .map(|d| d.join("../../rust/ghostdeck-host-linux/icons/hicolor/scalable/actions")),
         exe_dir.as_ref().map(|d| d.join("../icons")),
         Some(std::path::PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/icons"
+        ))),
+        Some(std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/icons/hicolor/scalable/actions"
         ))),
     ]
     .iter()
@@ -2769,7 +2778,14 @@ fn build_sidebar_row(
         .build();
     name_label.add_css_class("ghostdeck-ws-name");
 
-    let favorite_button = gtk::Button::with_label("\u{2606}");
+    let favorite_button = gtk::Button::builder()
+        .icon_name("ghostdeck-star-symbolic")
+        .build();
+    favorite_button
+        .child()
+        .and_downcast::<gtk::Image>()
+        .expect("favorite button image")
+        .set_pixel_size(18);
     favorite_button.add_css_class("flat");
     favorite_button.add_css_class("ghostdeck-ws-star-btn");
     favorite_button.set_focus_on_click(false);
@@ -2800,7 +2816,7 @@ fn build_sidebar_row(
     details.append(&path_label);
 
     let bell = gtk::Image::builder()
-        .icon_name("notification-symbolic")
+        .icon_name("ghostdeck-bell-symbolic")
         .pixel_size(18)
         .accessible_role(gtk::AccessibleRole::Presentation)
         .build();
@@ -2818,6 +2834,7 @@ fn build_sidebar_row(
     bell_button.add_css_class("ghostdeck-ws-bell-btn");
     bell_button.set_child(Some(&bell_overlay));
     bell_button.set_focus_on_click(false);
+    bell_button.set_valign(gtk::Align::Center);
     bell_button.set_sensitive(false);
     bell_button.set_tooltip_text(Some("Dismiss all alerts in this workspace"));
     bell_button.update_property(&[gtk::accessible::Property::Label(
@@ -2984,12 +3001,12 @@ fn sync_sidebar_row_order(state: &mut AppState) {
 }
 
 fn set_workspace_favorite_visual(workspace: &Workspace) {
-    let symbol = if workspace.favorite {
-        "\u{2605}"
+    let icon = if workspace.favorite {
+        "ghostdeck-star-filled-symbolic"
     } else {
-        "\u{2606}"
+        "ghostdeck-star-symbolic"
     };
-    workspace.favorite_button.set_label(symbol);
+    workspace.favorite_button.set_icon_name(icon);
     if workspace.favorite {
         workspace
             .favorite_button

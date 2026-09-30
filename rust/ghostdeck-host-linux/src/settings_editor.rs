@@ -70,16 +70,16 @@ fn build_settings_window_content(window: &adw::Window, input: SettingsEditorInpu
 
     let general_page = build_general_page(&input);
     let general_stack_page = stack.add_titled(&general_page, Some("general"), "General");
-    general_stack_page.set_icon_name(Some("preferences-system-symbolic"));
+    general_stack_page.set_icon_name(Some("ghostdeck-settings-symbolic"));
 
     let notifications_page = build_notifications_page(&input);
     let notifications_stack_page =
         stack.add_titled(&notifications_page, Some("notifications"), "Notifications");
-    notifications_stack_page.set_icon_name(Some("preferences-system-notifications-symbolic"));
+    notifications_stack_page.set_icon_name(Some("ghostdeck-bell-symbolic"));
 
     let keybinds_page = keybind_editor::build_keybind_editor(&input.shortcuts, input.on_capture);
     let keybinds_stack_page = stack.add_titled(&keybinds_page, Some("keybindings"), "Keybindings");
-    keybinds_stack_page.set_icon_name(Some("input-keyboard-symbolic"));
+    keybinds_stack_page.set_icon_name(Some("ghostdeck-keyboard-symbolic"));
 
     let switcher = adw::ViewSwitcher::builder()
         .stack(&stack)
@@ -87,7 +87,7 @@ fn build_settings_window_content(window: &adw::Window, input: SettingsEditorInpu
         .build();
 
     let close_button = gtk::Button::builder()
-        .icon_name("window-close-symbolic")
+        .icon_name("ghostdeck-close-symbolic")
         .tooltip_text("Close settings")
         .valign(gtk::Align::Center)
         .build();
@@ -117,7 +117,7 @@ fn build_general_page(input: &SettingsEditorInput) -> gtk::Widget {
     let page = adw::PreferencesPage::new();
     page.set_title("General");
     page.set_name(Some("general"));
-    page.set_icon_name(Some("preferences-system-symbolic"));
+    page.set_icon_name(Some("ghostdeck-settings-symbolic"));
     page.set_hexpand(true);
     page.set_vexpand(true);
 
@@ -228,7 +228,7 @@ fn build_notifications_page(input: &SettingsEditorInput) -> gtk::Widget {
     let page = adw::PreferencesPage::new();
     page.set_title("Notifications");
     page.set_name(Some("notifications"));
-    page.set_icon_name(Some("preferences-system-notifications-symbolic"));
+    page.set_icon_name(Some("ghostdeck-bell-symbolic"));
     page.set_hexpand(true);
     page.set_vexpand(true);
 

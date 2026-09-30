@@ -558,9 +558,9 @@ if $UNINSTALL; then
         rm -f "$PREFIX/share/icons/hicolor/${size}x${size}/apps/ghostdeck.png"
     done
     rm -f "$PREFIX/share/icons/hicolor/scalable/apps/ghostdeck.svg"
-    rm -f "$PREFIX/share/icons/hicolor/scalable/actions/ghostdeck-globe-symbolic.svg"
-    rm -f "$PREFIX/share/icons/hicolor/scalable/actions/ghostdeck-split-horizontal-symbolic.svg"
-    rm -f "$PREFIX/share/icons/hicolor/scalable/actions/ghostdeck-split-vertical-symbolic.svg"
+    for icon in "$PREFIX"/share/icons/hicolor/scalable/actions/ghostdeck-*-symbolic.svg; do
+        [ -f "$icon" ] && rm -f "$icon"
+    done
     gtk-update-icon-cache -f -t "$PREFIX/share/icons/hicolor" 2>/dev/null || true
     update-desktop-database "$PREFIX/share/applications" 2>/dev/null || true
     appstreamcli refresh-cache --force 2>/dev/null || true
