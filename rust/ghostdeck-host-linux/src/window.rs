@@ -1158,8 +1158,8 @@ row:selected .ghostdeck-ws-star-btn {
     padding: 0;
     font-size: 9px;
     font-weight: 700;
-    margin-top: -6px;
-    margin-right: -8px;
+    margin-top: -3px;
+    margin-right: -3px;
 }
 .ghostdeck-sidebar-row-unread,
 .ghostdeck-sidebar-row-close-warning {
