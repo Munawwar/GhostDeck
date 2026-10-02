@@ -104,7 +104,6 @@ cat > "$XDG_DATA_HOME/ghostdeck/session.json" <<SMOKE_SESSION
           {
             "id": "terminal-0",
             "custom_name": null,
-            "pinned": false,
             "tab_kind": "terminal",
             "cwd": "$DEMO_DIR"
           }

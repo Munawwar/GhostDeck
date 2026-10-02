@@ -194,6 +194,8 @@ Most default shortcuts use `Ctrl`. Fullscreen defaults to `F11`. Custom remaps m
 | `Ctrl+-` | Decrease font size |
 | `Ctrl+Shift+0` | Reset font size |
 
+Right-click opens GhostDeck's terminal menu. When an app captures mouse input, choose **Send Right-Click** to pass the click through at its original position.
+
 ### Workspace And Terminal Surfaces
 
 | Shortcut | Action |
@@ -201,6 +203,7 @@ Most default shortcuts use `Ctrl`. Fullscreen defaults to `F11`. Custom remaps m
 | `Ctrl+Shift+N` | New workspace (folder picker) |
 | `Ctrl+Shift+W` | Close workspace |
 | `Ctrl+Shift+Left/Right` | Cycle terminal tabs |
+| `Ctrl+Tab` | Return to the last focused tab, across workspaces |
 | `Ctrl+Shift+D` | Split terminal down |
 | `Ctrl+Shift+T` | New terminal tab |
 | `Ctrl+D` | Split terminal right |

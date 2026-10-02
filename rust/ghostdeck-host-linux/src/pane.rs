@@ -178,6 +178,7 @@ type PaneSignalCallback = dyn Fn();
 type PaneBellCallback = dyn Fn(bool, u32, &str);
 type PanePathCallback = dyn Fn(&str);
 type PaneDesktopNotificationCallback = dyn Fn(&str, &str, bool, u32, &str);
+type PaneTabUnreadCallback = dyn Fn(u32, &str, bool);
 type PaneEmptyCallback = dyn Fn();
 type PaneShortcutStateCallback = dyn Fn() -> Rc<ResolvedShortcutConfig>;
 type PaneShortcutCaptureCallback =
@@ -198,6 +199,7 @@ pub struct PaneCallbacks {
     pub on_pwd_changed: Box<PanePathCallback>,
     pub on_empty: Box<PaneEmptyCallback>,
     pub on_state_changed: Box<PaneSignalCallback>,
+    pub on_tab_unread: Box<PaneTabUnreadCallback>,
     pub current_config: Box<PaneConfigCallback>,
     pub on_config_changed: Rc<PaneConfigChangedCallback>,
     /// Resolve the workspace id for a given pane widget. May be `None` while
@@ -1086,13 +1088,13 @@ pub enum FocusedShortcutTarget {
 
 #[derive(Clone)]
 struct TabContextMenuContext {
+    pane_id: u32,
     tab_strip: gtk::Box,
     content_stack: gtk::Stack,
     tab_state: Rc<RefCell<TabState>>,
     callbacks: Rc<PaneCallbacks>,
     pane_outer: gtk::Box,
     label: gtk::Label,
-    pin_icon: gtk::Image,
 }
 
 // ---------------------------------------------------------------------------
@@ -1220,9 +1222,6 @@ pub const PANE_CSS: &str = r#"
 }
 .ghostdeck-split-btn:hover {
     background: alpha(@window_fg_color, 0.08);
-}
-.ghostdeck-pin-icon {
-    margin-right: 2px;
 }
 .ghostdeck-tab-rename-entry {
     padding: 1px 4px;
@@ -1628,7 +1627,6 @@ struct TabEntry {
     title_label: gtk::Label,
     content: gtk::Widget,
     custom_name: Option<String>,
-    pinned: bool,
     started_at: i64,
     last_activity_at: Option<i64>,
     unread: bool,
@@ -1732,9 +1730,9 @@ fn split_icon_button(orientation: gtk::Orientation, tooltip: &str) -> gtk::Butto
 struct TerminalTabOptions<'a> {
     id: Option<&'a str>,
     custom_name: Option<&'a str>,
-    pinned: bool,
     started_at: Option<i64>,
     last_activity_at: Option<i64>,
+    unread: bool,
     cwd: Option<&'a str>,
     agent: Option<RestorableAgentState>,
     tree: Option<&'a layout_state::TerminalTreeState>,
@@ -1744,9 +1742,9 @@ struct TerminalTabOptions<'a> {
 struct KeybindsTabOptions<'a> {
     id: Option<&'a str>,
     custom_name: Option<&'a str>,
-    pinned: bool,
     started_at: Option<i64>,
     last_activity_at: Option<i64>,
+    unread: bool,
 }
 
 struct KeybindsTabInput<'a> {
@@ -1778,9 +1776,9 @@ fn restore_tabs_from_state(
                 Some(TerminalTabOptions {
                     id: Some(saved_tab.id.as_str()),
                     custom_name: saved_tab.custom_name.as_deref(),
-                    pinned: saved_tab.pinned,
                     started_at: saved_tab.started_at,
                     last_activity_at: saved_tab.last_activity_at,
+                    unread: saved_tab.unread,
                     cwd: cwd.as_deref().or(working_directory),
                     agent: agent.clone(),
                     tree: tree.as_deref(),
@@ -1796,9 +1794,9 @@ fn restore_tabs_from_state(
                     options: Some(KeybindsTabOptions {
                         id: Some(saved_tab.id.as_str()),
                         custom_name: saved_tab.custom_name.as_deref(),
-                        pinned: saved_tab.pinned,
                         started_at: saved_tab.started_at,
                         last_activity_at: saved_tab.last_activity_at,
+                        unread: saved_tab.unread,
                     }),
                 },
             ),
@@ -2463,6 +2461,10 @@ fn add_terminal_tab_inner(
         .and_then(|value| value.id.map(|id| id.to_string()))
         .unwrap_or_else(next_tab_id);
     let (tab_btn, title_label) = build_tab_button("Terminal", &tab_id, internals);
+    let unread = options.as_ref().is_some_and(|value| value.unread);
+    if unread {
+        tab_btn.add_css_class("ghostdeck-tab-unread");
+    }
     let tree = options
         .as_ref()
         .and_then(|value| value.tree)
@@ -2500,14 +2502,13 @@ fn add_terminal_tab_inner(
             custom_name: options
                 .as_ref()
                 .and_then(|value| value.custom_name.map(|name| name.to_string())),
-            pinned: options.as_ref().map(|value| value.pinned).unwrap_or(false),
             started_at: options.as_ref().map_or_else(now_seconds, |value| {
                 value
                     .started_at
                     .unwrap_or(internals.callbacks.app_started_at)
             }),
             last_activity_at: options.as_ref().and_then(|value| value.last_activity_at),
-            unread: false,
+            unread,
             close_warning_surfaces: 0,
             kind: TabKind::Terminal {
                 state: state.clone(),
@@ -2528,18 +2529,6 @@ fn add_terminal_tab_inner(
     if let Some(custom_name) = options.as_ref().and_then(|value| value.custom_name) {
         title_label.set_label(custom_name);
     }
-    if options.as_ref().map(|value| value.pinned).unwrap_or(false) {
-        if let Some(entry) = internals
-            .tab_state
-            .borrow()
-            .tabs
-            .iter()
-            .find(|entry| entry.id == tab_id)
-        {
-            apply_pin_visuals(&entry.tab_button, true);
-        }
-    }
-
     activate_tab(
         &internals.tab_strip,
         &internals.content_stack,
@@ -2560,6 +2549,10 @@ fn add_keybind_editor_tab_inner(internals: &Rc<PaneInternals>, input: KeybindsTa
         .unwrap_or_else(next_tab_id);
 
     let (tab_btn, title_label) = build_tab_button("Keybinds", &tab_id, internals);
+    let unread = input.options.as_ref().is_some_and(|value| value.unread);
+    if unread {
+        tab_btn.add_css_class("ghostdeck-tab-unread");
+    }
 
     let widget = keybind_editor::build_keybind_editor(&input.shortcuts, input.on_capture);
     internals.content_stack.add_named(&widget, Some(&tab_id));
@@ -2575,11 +2568,6 @@ fn add_keybind_editor_tab_inner(internals: &Rc<PaneInternals>, input: KeybindsTa
                 .options
                 .as_ref()
                 .and_then(|value| value.custom_name.map(|name| name.to_string())),
-            pinned: input
-                .options
-                .as_ref()
-                .map(|value| value.pinned)
-                .unwrap_or(false),
             started_at: input.options.as_ref().map_or_else(now_seconds, |value| {
                 value
                     .started_at
@@ -2589,7 +2577,7 @@ fn add_keybind_editor_tab_inner(internals: &Rc<PaneInternals>, input: KeybindsTa
                 .options
                 .as_ref()
                 .and_then(|value| value.last_activity_at),
-            unread: false,
+            unread,
             close_warning_surfaces: 0,
             kind: TabKind::Keybinds,
         });
@@ -2608,23 +2596,6 @@ fn add_keybind_editor_tab_inner(internals: &Rc<PaneInternals>, input: KeybindsTa
     if let Some(custom_name) = input.options.as_ref().and_then(|value| value.custom_name) {
         title_label.set_label(custom_name);
     }
-    if input
-        .options
-        .as_ref()
-        .map(|value| value.pinned)
-        .unwrap_or(false)
-    {
-        if let Some(entry) = internals
-            .tab_state
-            .borrow()
-            .tabs
-            .iter()
-            .find(|entry| entry.id == tab_id)
-        {
-            apply_pin_visuals(&entry.tab_button, true);
-        }
-    }
-
     activate_tab(
         &internals.tab_strip,
         &internals.content_stack,
@@ -2694,9 +2665,9 @@ pub fn snapshot_pane_state(pane_widget: &gtk::Widget) -> Option<PaneState> {
             SavedTabState {
                 id: entry.id.clone(),
                 custom_name: entry.custom_name.clone(),
-                pinned: entry.pinned,
                 started_at: Some(entry.started_at),
                 last_activity_at: entry.last_activity_at,
+                unread: entry.unread,
                 content,
             }
         })
@@ -3101,23 +3072,6 @@ pub fn focused_shortcut_target(pane_widget: &gtk::Widget) -> FocusedShortcutTarg
     target
 }
 
-fn apply_pin_visuals(tab_button: &gtk::Box, pinned: bool) {
-    if let Some(close_widget) = tab_button.last_child() {
-        close_widget.set_visible(!pinned);
-    }
-    if let Some(inner_box) = tab_button
-        .first_child()
-        .and_then(|child| child.downcast::<gtk::Box>().ok())
-    {
-        if let Some(pin_icon) = inner_box
-            .first_child()
-            .and_then(|child| child.downcast::<gtk::Image>().ok())
-        {
-            pin_icon.set_visible(pinned);
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tab button (label + close)
 // ---------------------------------------------------------------------------
@@ -3154,12 +3108,6 @@ fn build_tab_button_from_label(
         parent.remove(label);
     }
 
-    let pin_icon = gtk::Image::from_icon_name("ghostdeck-pin-symbolic");
-    pin_icon.set_pixel_size(9);
-    pin_icon.add_css_class("ghostdeck-pin-icon");
-    pin_icon.set_visible(false);
-    pin_icon.set_can_target(false);
-
     let close_btn = gtk::Button::builder()
         .icon_name("ghostdeck-close-symbolic")
         .has_frame(false)
@@ -3168,7 +3116,6 @@ fn build_tab_button_from_label(
 
     let inner_box = gtk::Box::new(gtk::Orientation::Horizontal, 2);
     inner_box.set_can_target(false);
-    inner_box.append(&pin_icon);
     inner_box.append(label);
 
     let tab_btn = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -3233,13 +3180,13 @@ fn build_tab_button_from_label(
     {
         let tab_id = tab_id.to_string();
         let context = TabContextMenuContext {
+            pane_id: internals.pane_id,
             tab_strip: internals.tab_strip.clone(),
             content_stack: internals.content_stack.clone(),
             tab_state: internals.tab_state.clone(),
             callbacks: internals.callbacks.clone(),
             pane_outer: internals.pane_outer.clone(),
             label: label.clone(),
-            pin_icon: pin_icon.clone(),
         };
         let tab_button = tab_btn.clone();
         right_click.connect_pressed(move |_, _, _, _| {
@@ -3292,21 +3239,14 @@ fn build_tab_button_from_label(
         let callbacks = internals.callbacks.clone();
         let pane_outer = internals.pane_outer.clone();
         close_btn.connect_clicked(move |_| {
-            let is_pinned = tab_state
-                .borrow()
-                .tabs
-                .iter()
-                .any(|entry| entry.id == tab_id && entry.pinned);
-            if !is_pinned {
-                request_tab_close_confirmation(
-                    &tab_strip,
-                    &content_stack,
-                    &tab_state,
-                    &tab_id,
-                    &callbacks,
-                    &pane_outer,
-                );
-            }
+            request_tab_close_confirmation(
+                &tab_strip,
+                &content_stack,
+                &tab_state,
+                &tab_id,
+                &callbacks,
+                &pane_outer,
+            );
         });
     }
 
@@ -3337,36 +3277,26 @@ fn show_tab_context_menu(tab_btn: &gtk::Box, tab_id: &str, context: &TabContextM
         });
     }
 
-    // Pin / Unpin
-    let is_pinned = context
+    let is_unread = context
         .tab_state
         .borrow()
         .tabs
         .iter()
-        .any(|e| e.id == tab_id && e.pinned);
-    let pin_label = if is_pinned { "Unpin" } else { "Pin" };
-    let pin_btn = gtk::Button::with_label(pin_label);
-    pin_btn.add_css_class("flat");
+        .any(|entry| entry.id == tab_id && entry.unread);
+    let unread_btn = gtk::Button::with_label(if is_unread {
+        "Mark Read"
+    } else {
+        "Mark Unread"
+    });
+    unread_btn.add_css_class("flat");
     {
-        let state = context.tab_state.clone();
-        let tid = tab_id.to_string();
-        let pin = context.pin_icon.clone();
-        let close = tab_btn.last_child(); // close button
-        let menu_ref = menu.clone();
         let callbacks = context.callbacks.clone();
-        pin_btn.connect_clicked(move |_| {
+        let pane_id = context.pane_id;
+        let tab_id = tab_id.to_string();
+        let menu_ref = menu.clone();
+        unread_btn.connect_clicked(move |_| {
             menu_ref.popdown();
-            let mut ts = state.borrow_mut();
-            if let Some(entry) = ts.find_tab_mut(&tid) {
-                entry.pinned = !entry.pinned;
-                apply_pin_visuals(&entry.tab_button, entry.pinned);
-                pin.set_visible(entry.pinned);
-                if let Some(close_widget) = &close {
-                    close_widget.set_visible(!entry.pinned);
-                }
-            }
-            drop(ts);
-            (callbacks.on_state_changed)();
+            (callbacks.on_tab_unread)(pane_id, &tab_id, !is_unread);
         });
     }
 
@@ -3388,7 +3318,7 @@ fn show_tab_context_menu(tab_btn: &gtk::Box, tab_id: &str, context: &TabContextM
     }
 
     menu_box.append(&rename_btn);
-    menu_box.append(&pin_btn);
+    menu_box.append(&unread_btn);
     menu_box.append(&close_btn);
     menu.set_child(Some(&menu_box));
     menu.set_parent(tab_btn);
@@ -3603,9 +3533,6 @@ fn rebind_moved_tab_entry(entry: &mut TabEntry, target: &Rc<PaneInternals>) {
         entry
             .tab_button
             .add_css_class("ghostdeck-tab-close-warning");
-    }
-    if entry.pinned {
-        apply_pin_visuals(&entry.tab_button, true);
     }
 }
 

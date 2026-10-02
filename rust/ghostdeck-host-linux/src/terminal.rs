@@ -1745,7 +1745,7 @@ pub fn create_terminal(
             let btn = gesture.current_button();
             // Grab keyboard focus on any click
             request_terminal_focus(&gl_for_focus, &had_focus);
-            // Skip right-click — context menu handles it
+            // The context menu can explicitly forward this click to the app.
             if btn == 3 {
                 return;
             }
@@ -1805,7 +1805,7 @@ pub fn create_terminal(
         gl_area.add_controller(click);
     }
 
-    // Right-click context menu
+    // Right-click always opens GhostDeck's menu; the user can pass it to the app.
     {
         let sc = surface_cell.clone();
         let callbacks = callbacks.clone();
@@ -1814,7 +1814,8 @@ pub fn create_terminal(
         right_click.set_button(3);
         right_click.connect_pressed(move |gesture, _n, x, y| {
             let surface = *sc.borrow();
-            show_terminal_context_menu(&gl, surface, &callbacks, x, y);
+            let mods = translate_mouse_mods(gesture.current_event_state());
+            show_terminal_context_menu(&gl, surface, &callbacks, x, y, mods);
             gesture.set_state(gtk::EventSequenceState::Claimed);
         });
         gl_area.add_controller(right_click);
@@ -2010,6 +2011,7 @@ fn show_terminal_context_menu(
     callbacks: &Rc<RefCell<TerminalCallbacks>>,
     x: f64,
     y: f64,
+    mods: c_int,
 ) {
     let menu_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
     menu_box.set_margin_top(4);
@@ -2021,8 +2023,13 @@ fn show_terminal_context_menu(
     let has_selection = surface
         .map(|s| unsafe { ghostty_surface_has_selection(s) })
         .unwrap_or(false);
+    let mouse_captured = surface.is_some_and(|s| unsafe { ghostty_surface_mouse_captured(s) });
 
-    let items: Vec<(&str, bool)> = vec![
+    let mut items = Vec::new();
+    if mouse_captured {
+        items.extend([("Send Right-Click", true), ("---", false)]);
+    }
+    items.extend([
         ("Copy", has_selection),
         ("Paste", true),
         ("---", false),
@@ -2031,7 +2038,7 @@ fn show_terminal_context_menu(
         ("Swap", true),
         ("---", false),
         ("Clear", true),
-    ];
+    ]);
 
     for (label, enabled) in &items {
         if *label == "---" {
@@ -2068,6 +2075,25 @@ fn show_terminal_context_menu(
             btn.connect_clicked(move |_| {
                 pop.popdown();
                 match label.as_str() {
+                    "Send Right-Click" => {
+                        if let Some(surface) = surface {
+                            unsafe {
+                                ghostty_surface_mouse_pos(surface, x, y, mods);
+                                ghostty_surface_mouse_button(
+                                    surface,
+                                    GHOSTTY_MOUSE_PRESS,
+                                    GHOSTTY_MOUSE_RIGHT,
+                                    mods,
+                                );
+                                ghostty_surface_mouse_button(
+                                    surface,
+                                    GHOSTTY_MOUSE_RELEASE,
+                                    GHOSTTY_MOUSE_RIGHT,
+                                    mods,
+                                );
+                            }
+                        }
+                    }
                     "Copy" => surface_action(surface, "copy_to_clipboard"),
                     "Paste" => {
                         surface_action(surface, "paste_from_clipboard");

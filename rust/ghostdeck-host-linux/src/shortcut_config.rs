@@ -25,6 +25,7 @@ pub enum ShortcutId {
     PrevWorkspace,
     CycleTabPrev,
     CycleTabNext,
+    FocusPreviousTab,
     SplitDown,
     NewTerminalInFocusedPane,
     SplitRight,
@@ -67,6 +68,7 @@ pub enum ShortcutCommand {
     PrevWorkspace,
     CycleTabPrev,
     CycleTabNext,
+    FocusPreviousTab,
     SplitDown,
     NewTerminal,
     SplitRight,
@@ -290,7 +292,7 @@ struct ShortcutConfigFile {
     shortcuts: HashMap<String, serde_json::Value>,
 }
 
-const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 38] = [
+const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 39] = [
     ShortcutDefinition {
         id: ShortcutId::NewWorkspace,
         config_key: "new_workspace",
@@ -411,6 +413,17 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 38] = [
         command: ShortcutCommand::CycleTabNext,
         scope: ShortcutScope::Window,
         editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::FocusPreviousTab,
+        config_key: "focus_previous_tab",
+        action_name: "win.focus-previous-tab",
+        default_accel: "<Ctrl>Tab",
+        label: "Last Focused Tab",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::FocusPreviousTab,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::AlwaysCapture,
     },
     ShortcutDefinition {
         id: ShortcutId::SplitDown,

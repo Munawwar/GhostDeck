@@ -70,6 +70,13 @@ struct WindowCloseState {
     dialog_open: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TabFocusTarget {
+    workspace_id: String,
+    pane_id: u32,
+    tab_id: String,
+}
+
 impl WindowCloseState {
     fn request(&mut self) -> WindowCloseAction {
         if self.confirmed {
@@ -105,6 +112,10 @@ pub(crate) struct AppState {
     system_prefers_dark: Rc<Cell<Option<bool>>>,
     workspaces: Vec<Workspace>,
     active_idx: usize,
+    focused_tab: Option<TabFocusTarget>,
+    previous_tab: Option<TabFocusTarget>,
+    focus_jump_target: Option<TabFocusTarget>,
+    unread_until_focus_leaves: Option<TabFocusTarget>,
     shortcuts: Rc<ResolvedShortcutConfig>,
     stack: gtk::Stack,
     sidebar_list: gtk::ListBox,
@@ -1124,11 +1135,8 @@ row:selected .ghostdeck-ws-name {
 .ghostdeck-ws-star-btn:hover {
     color: alpha(@window_fg_color, 0.9);
 }
-row:selected .ghostdeck-ws-star-btn {
-    color: alpha(@window_fg_color, 0.85);
-}
-.ghostdeck-ws-star-btn-active {
-    color: @accent_bg_color;
+.ghostdeck-ws-star-btn.ghostdeck-ws-star-btn-active {
+    color: mix(@window_fg_color, #ee9851, 0.85);
 }
 .ghostdeck-ws-rename-entry {
     min-height: 0;
@@ -1503,6 +1511,10 @@ pub fn build_window(app: &adw::Application, app_started_at: i64) {
         system_prefers_dark: system_prefers_dark.clone(),
         workspaces: Vec::new(),
         active_idx: 0,
+        focused_tab: None,
+        previous_tab: None,
+        focus_jump_target: None,
+        unread_until_focus_leaves: None,
         shortcuts,
         stack: stack.clone(),
         sidebar_list: sidebar_list.clone(),
@@ -2068,6 +2080,10 @@ fn dispatch_shortcut_command(state: &State, command: ShortcutCommand) -> bool {
         }
         ShortcutCommand::CycleTabNext => {
             cycle_focused_pane_tab(state, 1);
+            true
+        }
+        ShortcutCommand::FocusPreviousTab => {
+            focus_previous_tab(state);
             true
         }
         ShortcutCommand::SplitDown => {
@@ -3440,6 +3456,7 @@ fn install_workspace_row_interactions(
             if let Some(root) = root {
                 pane::dismiss_workspace_attention(&root);
                 refresh_workspace_attention(&state, &workspace_id);
+                request_session_save(&state);
             }
         });
     }
@@ -4533,7 +4550,7 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
 
     let cwd: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(workspace.cwd.clone()));
     let ws = Workspace {
-        id,
+        id: id.clone(),
         name: workspace.name.clone(),
         root,
         sidebar_row: row.clone(),
@@ -4557,6 +4574,7 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
         s.active_idx = s.workspaces.len() - 1;
     }
 
+    refresh_workspace_attention(state, &id);
     stack.set_visible_child_name(&stack_name);
     sidebar_list.select_row(Some(&row));
 }
@@ -4660,6 +4678,29 @@ pub(crate) fn create_pane_for_workspace(
                     refresh_workspace_attention(&refresh_state, &refresh_ws_id)
                 });
                 request_session_save(&state);
+            }
+        }),
+        on_tab_unread: Box::new({
+            let state = state.clone();
+            let ws_id = ws_id.to_string();
+            move |pane_id, tab_id, unread| {
+                let target = TabFocusTarget {
+                    workspace_id: ws_id.clone(),
+                    pane_id,
+                    tab_id: tab_id.to_string(),
+                };
+                {
+                    let mut s = state.borrow_mut();
+                    if unread && s.focused_tab.as_ref() == Some(&target) {
+                        s.unread_until_focus_leaves = Some(target);
+                    } else if s.unread_until_focus_leaves.as_ref() == Some(&target) {
+                        s.unread_until_focus_leaves = None;
+                    }
+                }
+                if pane::set_tab_unread(pane_id, tab_id, unread) {
+                    refresh_workspace_attention(&state, &ws_id);
+                    request_session_save(&state);
+                }
             }
         }),
         current_config: Box::new(move || {
@@ -5257,6 +5298,59 @@ fn cycle_focused_pane_tab(state: &State, delta: i32) {
     }
 }
 
+fn focus_previous_tab(state: &State) {
+    let (target, index, root, row, list, stack, workspace_changed) = {
+        let s = state.borrow();
+        let Some(target) = s.previous_tab.clone() else {
+            return;
+        };
+        let Some(index) = s
+            .workspaces
+            .iter()
+            .position(|ws| ws.id == target.workspace_id)
+        else {
+            drop(s);
+            state.borrow_mut().previous_tab = None;
+            return;
+        };
+        let workspace = &s.workspaces[index];
+        (
+            target,
+            index,
+            workspace.root.clone(),
+            workspace.sidebar_row.clone(),
+            s.sidebar_list.clone(),
+            s.stack.clone(),
+            index != s.active_idx,
+        )
+    };
+    let Some(pane_widget) = pane::pane_widget_for_root(&root, target.pane_id) else {
+        state.borrow_mut().previous_tab = None;
+        return;
+    };
+    if pane::tab_title(&pane_widget, &target.tab_id).is_none() {
+        state.borrow_mut().previous_tab = None;
+        return;
+    }
+    state.borrow_mut().focus_jump_target = Some(target.clone());
+    if workspace_changed {
+        state.borrow_mut().active_idx = index;
+        stack.set_visible_child_name(&format!("ws-{}", target.workspace_id));
+        list.select_row(Some(&row));
+        refresh_workspace_attention(state, &target.workspace_id);
+        request_session_save(state);
+    }
+    pane::activate_tab_in_pane(&pane_widget, &target.tab_id);
+    let state = state.clone();
+    let timeout_target = target;
+    glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
+        let mut s = state.borrow_mut();
+        if s.focus_jump_target.as_ref() == Some(&timeout_target) {
+            s.focus_jump_target = None;
+        }
+    });
+}
+
 fn add_tab_to_focused_pane(state: &State) {
     if let Some((_, pane_widget)) = find_focused_pane(state) {
         pane::add_terminal_tab_to_pane(&pane_widget);
@@ -5359,14 +5453,19 @@ fn mark_workspace_unread_with_message(
             target: target.clone(),
         });
 
+        let mut changed = false;
         if !(window_active && workspace_is_active && (source_focused || focused_target)) {
             if let (Some(pane_id), Some(tab_id)) = (target.pane_id, target.tab_id.as_deref()) {
                 if pane::set_tab_unread(pane_id, tab_id, true) {
                     refresh_workspace_attention(state, ws_id);
+                    changed = true;
                 }
             }
         }
-
+        drop(s);
+        if changed {
+            request_session_save(state);
+        }
         return desktop_request;
     }
 
@@ -5427,12 +5526,40 @@ fn clear_focused_notification(state: &State) {
         return;
     }
     drop(s);
-    if let Some((ws_id, pane_widget)) = find_leaf_focused_pane(state) {
-        if let Some((pane_id, tab_id)) = pane::focused_tab_target(&pane_widget) {
-            if pane::set_tab_unread(pane_id, &tab_id, false) {
-                refresh_workspace_attention(state, &ws_id);
+    let Some((workspace_id, pane_widget)) = find_leaf_focused_pane(state) else {
+        return;
+    };
+    let Some((pane_id, tab_id)) = pane::focused_tab_target(&pane_widget) else {
+        return;
+    };
+    let focused = TabFocusTarget {
+        workspace_id,
+        pane_id,
+        tab_id,
+    };
+    let keep_unread = {
+        let mut s = state.borrow_mut();
+        if let Some(target) = &s.focus_jump_target {
+            if target != &focused {
+                return;
             }
+            s.focus_jump_target = None;
         }
+        if s.focused_tab.as_ref() != Some(&focused) {
+            if s.focused_tab.is_none() {
+                s.unread_until_focus_leaves = Some(focused.clone());
+            }
+            s.previous_tab = s.focused_tab.replace(focused.clone());
+        }
+        let keep_unread = s.unread_until_focus_leaves.as_ref() == Some(&focused);
+        if !keep_unread {
+            s.unread_until_focus_leaves = None;
+        }
+        keep_unread
+    };
+    if !keep_unread && pane::set_tab_unread(pane_id, &focused.tab_id, false) {
+        refresh_workspace_attention(state, &focused.workspace_id);
+        request_session_save(state);
     }
 }
 

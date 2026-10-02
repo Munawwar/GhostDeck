@@ -113,8 +113,6 @@ pub struct TabState {
     pub id: String,
     #[serde(default)]
     pub custom_name: Option<String>,
-    #[serde(default)]
-    pub pinned: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<i64>,
     #[serde(
@@ -123,6 +121,8 @@ pub struct TabState {
         skip_serializing_if = "Option::is_none"
     )]
     pub last_activity_at: Option<i64>,
+    #[serde(default)]
+    pub unread: bool,
     #[serde(flatten)]
     pub content: TabContentState,
 }
@@ -312,9 +312,9 @@ impl TabState {
         Self {
             id: id.into(),
             custom_name: None,
-            pinned: false,
             started_at: None,
             last_activity_at: None,
+            unread: false,
             content: TabContentState::Terminal {
                 cwd: cwd.map(|value| value.to_string()),
                 agent: None,
@@ -1294,9 +1294,9 @@ mod tests {
                             TabState {
                                 id: "browser".to_string(),
                                 custom_name: None,
-                                pinned: false,
                                 started_at: None,
                                 last_activity_at: None,
+                                unread: false,
                                 content: TabContentState::Browser {
                                     uri: Some("https://example.com".to_string()),
                                 },
@@ -1735,9 +1735,9 @@ mod tests {
             tabs: vec![TabState {
                 id: "tab-a".to_string(),
                 custom_name: None,
-                pinned: false,
                 started_at: None,
                 last_activity_at: None,
+                unread: false,
                 content: TabContentState::Terminal {
                     cwd: Some("/tmp/project".to_string()),
                     agent: Some(RestorableAgentState {
@@ -1833,9 +1833,9 @@ mod tests {
         let tab = TabState {
             id: "tab-a".to_string(),
             custom_name: None,
-            pinned: false,
             started_at: None,
             last_activity_at: None,
+            unread: false,
             content: TabContentState::Terminal {
                 cwd: Some("/tmp/project".to_string()),
                 agent: Some(RestorableAgentState {
@@ -1908,9 +1908,9 @@ mod tests {
             tabs: vec![TabState {
                 id: "tab-a".to_string(),
                 custom_name: None,
-                pinned: false,
                 started_at: None,
                 last_activity_at: None,
+                unread: false,
                 content: TabContentState::Terminal {
                     cwd: Some("/tmp/project".to_string()),
                     agent: None,
@@ -1979,9 +1979,9 @@ mod tests {
             tabs: vec![TabState {
                 id: "tab-a".to_string(),
                 custom_name: None,
-                pinned: false,
                 started_at: None,
                 last_activity_at: None,
+                unread: false,
                 content: TabContentState::Terminal {
                     cwd: Some("/tmp/project-a".to_string()),
                     agent: None,
@@ -2072,9 +2072,9 @@ mod tests {
             tabs: vec![TabState {
                 id: "tab-a".to_string(),
                 custom_name: None,
-                pinned: false,
                 started_at: None,
                 last_activity_at: None,
+                unread: false,
                 content: TabContentState::Terminal {
                     cwd: Some("/tmp/project-a".to_string()),
                     agent: None,
@@ -2169,9 +2169,9 @@ mod tests {
             tabs: vec![TabState {
                 id: "keybinds-1".to_string(),
                 custom_name: None,
-                pinned: false,
                 started_at: None,
                 last_activity_at: None,
+                unread: false,
                 content: TabContentState::Keybinds {},
             }],
         });
@@ -2222,9 +2222,9 @@ mod tests {
                     tabs: vec![TabState {
                         id: "keybinds-1".to_string(),
                         custom_name: None,
-                        pinned: false,
                         started_at: None,
                         last_activity_at: None,
+                        unread: true,
                         content: TabContentState::Keybinds {},
                     }],
                 }),
@@ -2240,6 +2240,7 @@ mod tests {
             panic!("expected pane");
         };
         assert_eq!(pane.active_tab_id.as_deref(), Some("keybinds-1"));
+        assert!(pane.tabs[0].unread);
         assert!(matches!(pane.tabs[0].content, TabContentState::Keybinds {}));
     }
 
