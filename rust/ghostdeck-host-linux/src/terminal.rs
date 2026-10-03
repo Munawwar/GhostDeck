@@ -2026,9 +2026,6 @@ fn show_terminal_context_menu(
     let mouse_captured = surface.is_some_and(|s| unsafe { ghostty_surface_mouse_captured(s) });
 
     let mut items = Vec::new();
-    if mouse_captured {
-        items.extend([("Send Right-Click", true), ("---", false)]);
-    }
     items.extend([
         ("Copy", has_selection),
         ("Paste", true),
@@ -2039,6 +2036,9 @@ fn show_terminal_context_menu(
         ("---", false),
         ("Clear", true),
     ]);
+    if mouse_captured {
+        items.push(("Send Right-Click", true));
+    }
 
     for (label, enabled) in &items {
         if *label == "---" {
