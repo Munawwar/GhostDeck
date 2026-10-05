@@ -26,6 +26,7 @@ pub enum ShortcutId {
     CycleTabPrev,
     CycleTabNext,
     FocusPreviousTab,
+    FocusNextTab,
     SplitDown,
     NewTerminalInFocusedPane,
     SplitRight,
@@ -69,6 +70,7 @@ pub enum ShortcutCommand {
     CycleTabPrev,
     CycleTabNext,
     FocusPreviousTab,
+    FocusNextTab,
     SplitDown,
     NewTerminal,
     SplitRight,
@@ -292,7 +294,7 @@ struct ShortcutConfigFile {
     shortcuts: HashMap<String, serde_json::Value>,
 }
 
-const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 39] = [
+const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 40] = [
     ShortcutDefinition {
         id: ShortcutId::NewWorkspace,
         config_key: "new_workspace",
@@ -419,9 +421,20 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 39] = [
         config_key: "focus_previous_tab",
         action_name: "win.focus-previous-tab",
         default_accel: "<Ctrl>Tab",
-        label: "Last Focused Tab",
+        label: "Back in Tab History",
         registers_gtk_accel: false,
         command: ShortcutCommand::FocusPreviousTab,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::AlwaysCapture,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::FocusNextTab,
+        config_key: "focus_next_tab",
+        action_name: "win.focus-next-tab",
+        default_accel: "<Ctrl><Shift>Tab",
+        label: "Forward in Tab History",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::FocusNextTab,
         scope: ShortcutScope::Window,
         editable_capture_policy: EditableCapturePolicy::AlwaysCapture,
     },
@@ -1524,6 +1537,7 @@ fn normalize_runtime_key(key: &str) -> String {
         "pageup" => "page_up".to_string(),
         "pagedown" => "page_down".to_string(),
         "return" => "enter".to_string(),
+        "iso_left_tab" => "tab".to_string(),
         "esc" => "escape".to_string(),
         other => other.to_string(),
     }
@@ -1624,6 +1638,13 @@ mod tests {
         let shortcut = NormalizedShortcut::parse("<Shift><Ctrl>Page_Down").unwrap();
         assert_eq!(shortcut.to_config_accel(), "<Ctrl><Shift>Page_Down");
         assert_eq!(shortcut.to_runtime_combo(), "ctrl+shift+page_down");
+
+        let reverse_tab = NormalizedShortcut::from_gdk_key(
+            gdk::Key::ISO_Left_Tab,
+            gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK,
+        )
+        .unwrap();
+        assert_eq!(reverse_tab.to_runtime_combo(), "ctrl+shift+tab");
     }
 
     #[test]
@@ -2028,6 +2049,14 @@ mod tests {
         assert_eq!(
             resolved.command_for_runtime_combo("ctrl+shift+t"),
             Some(ShortcutCommand::NewTerminal)
+        );
+        assert_eq!(
+            resolved.command_for_runtime_combo("ctrl+tab"),
+            Some(ShortcutCommand::FocusPreviousTab)
+        );
+        assert_eq!(
+            resolved.command_for_runtime_combo("ctrl+shift+tab"),
+            Some(ShortcutCommand::FocusNextTab)
         );
         assert_eq!(resolved.command_for_runtime_combo("ctrl+alt+d"), None);
         assert_eq!(resolved.command_for_runtime_combo("ctrl+alt+shift+d"), None);

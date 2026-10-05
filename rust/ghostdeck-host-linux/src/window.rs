@@ -77,6 +77,8 @@ struct TabFocusTarget {
     tab_id: String,
 }
 
+const TAB_FOCUS_HISTORY_LIMIT: usize = 128;
+
 impl WindowCloseState {
     fn request(&mut self) -> WindowCloseAction {
         if self.confirmed {
@@ -113,7 +115,8 @@ pub(crate) struct AppState {
     workspaces: Vec<Workspace>,
     active_idx: usize,
     focused_tab: Option<TabFocusTarget>,
-    previous_tab: Option<TabFocusTarget>,
+    tab_focus_history: Vec<TabFocusTarget>,
+    tab_focus_history_index: Option<usize>,
     focus_jump_target: Option<TabFocusTarget>,
     unread_until_focus_leaves: Option<TabFocusTarget>,
     shortcuts: Rc<ResolvedShortcutConfig>,
@@ -1512,7 +1515,8 @@ pub fn build_window(app: &adw::Application, app_started_at: i64) {
         workspaces: Vec::new(),
         active_idx: 0,
         focused_tab: None,
-        previous_tab: None,
+        tab_focus_history: Vec::new(),
+        tab_focus_history_index: None,
         focus_jump_target: None,
         unread_until_focus_leaves: None,
         shortcuts,
@@ -2083,7 +2087,11 @@ fn dispatch_shortcut_command(state: &State, command: ShortcutCommand) -> bool {
             true
         }
         ShortcutCommand::FocusPreviousTab => {
-            focus_previous_tab(state);
+            navigate_tab_focus_history(state, -1);
+            true
+        }
+        ShortcutCommand::FocusNextTab => {
+            navigate_tab_focus_history(state, 1);
             true
         }
         ShortcutCommand::SplitDown => {
@@ -5298,57 +5306,75 @@ fn cycle_focused_pane_tab(state: &State, delta: i32) {
     }
 }
 
-fn focus_previous_tab(state: &State) {
-    let (target, index, root, row, list, stack, workspace_changed) = {
-        let s = state.borrow();
-        let Some(target) = s.previous_tab.clone() else {
-            return;
+fn navigate_tab_focus_history(state: &State, direction: isize) {
+    loop {
+        let (cursor, target_index, target) = {
+            let s = state.borrow();
+            let Some(cursor) = s.tab_focus_history_index else {
+                return;
+            };
+            let target_index = cursor as isize + direction;
+            if !(0..s.tab_focus_history.len() as isize).contains(&target_index) {
+                return;
+            }
+            let target_index = target_index as usize;
+            (
+                cursor,
+                target_index,
+                s.tab_focus_history[target_index].clone(),
+            )
         };
-        let Some(index) = s
-            .workspaces
-            .iter()
-            .position(|ws| ws.id == target.workspace_id)
+        let resolved = {
+            let s = state.borrow();
+            s.workspaces
+                .iter()
+                .position(|workspace| workspace.id == target.workspace_id)
+                .and_then(|workspace_index| {
+                    let workspace = &s.workspaces[workspace_index];
+                    let pane_widget = pane::pane_widget_for_root(&workspace.root, target.pane_id)?;
+                    pane::tab_title(&pane_widget, &target.tab_id)?;
+                    Some((
+                        workspace_index,
+                        pane_widget,
+                        workspace.sidebar_row.clone(),
+                        s.sidebar_list.clone(),
+                        s.stack.clone(),
+                        workspace_index != s.active_idx,
+                    ))
+                })
+        };
+        let Some((workspace_index, pane_widget, row, list, stack, workspace_changed)) = resolved
         else {
-            drop(s);
-            state.borrow_mut().previous_tab = None;
-            return;
+            let mut s = state.borrow_mut();
+            s.tab_focus_history.remove(target_index);
+            s.tab_focus_history_index = Some(cursor - usize::from(target_index < cursor));
+            continue;
         };
-        let workspace = &s.workspaces[index];
-        (
-            target,
-            index,
-            workspace.root.clone(),
-            workspace.sidebar_row.clone(),
-            s.sidebar_list.clone(),
-            s.stack.clone(),
-            index != s.active_idx,
-        )
-    };
-    let Some(pane_widget) = pane::pane_widget_for_root(&root, target.pane_id) else {
-        state.borrow_mut().previous_tab = None;
-        return;
-    };
-    if pane::tab_title(&pane_widget, &target.tab_id).is_none() {
-        state.borrow_mut().previous_tab = None;
-        return;
-    }
-    state.borrow_mut().focus_jump_target = Some(target.clone());
-    if workspace_changed {
-        state.borrow_mut().active_idx = index;
-        stack.set_visible_child_name(&format!("ws-{}", target.workspace_id));
-        list.select_row(Some(&row));
-        refresh_workspace_attention(state, &target.workspace_id);
-        request_session_save(state);
-    }
-    pane::activate_tab_in_pane(&pane_widget, &target.tab_id);
-    let state = state.clone();
-    let timeout_target = target;
-    glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
-        let mut s = state.borrow_mut();
-        if s.focus_jump_target.as_ref() == Some(&timeout_target) {
-            s.focus_jump_target = None;
+
+        {
+            let mut s = state.borrow_mut();
+            s.tab_focus_history_index = Some(target_index);
+            s.focus_jump_target = Some(target.clone());
+            if workspace_changed {
+                s.active_idx = workspace_index;
+            }
         }
-    });
+        if workspace_changed {
+            stack.set_visible_child_name(&format!("ws-{}", target.workspace_id));
+            list.select_row(Some(&row));
+            refresh_workspace_attention(state, &target.workspace_id);
+            request_session_save(state);
+        }
+        pane::activate_tab_in_pane(&pane_widget, &target.tab_id);
+        let state = state.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
+            let mut s = state.borrow_mut();
+            if s.focus_jump_target.as_ref() == Some(&target) {
+                s.focus_jump_target = None;
+            }
+        });
+        return;
+    }
 }
 
 fn add_tab_to_focused_pane(state: &State) {
@@ -5539,17 +5565,31 @@ fn clear_focused_notification(state: &State) {
     };
     let keep_unread = {
         let mut s = state.borrow_mut();
-        if let Some(target) = &s.focus_jump_target {
+        let history_jump = if let Some(target) = &s.focus_jump_target {
             if target != &focused {
                 return;
             }
             s.focus_jump_target = None;
-        }
+            true
+        } else {
+            false
+        };
         if s.focused_tab.as_ref() != Some(&focused) {
             if s.focused_tab.is_none() {
                 s.unread_until_focus_leaves = Some(focused.clone());
             }
-            s.previous_tab = s.focused_tab.replace(focused.clone());
+            s.focused_tab = Some(focused.clone());
+            if !history_jump {
+                let new_len = s.tab_focus_history_index.map_or(0, |cursor| cursor + 1);
+                s.tab_focus_history.truncate(new_len);
+                if s.tab_focus_history.last() != Some(&focused) {
+                    s.tab_focus_history.push(focused.clone());
+                }
+                if s.tab_focus_history.len() > TAB_FOCUS_HISTORY_LIMIT {
+                    s.tab_focus_history.remove(0);
+                }
+                s.tab_focus_history_index = s.tab_focus_history.len().checked_sub(1);
+            }
         }
         let keep_unread = s.unread_until_focus_leaves.as_ref() == Some(&focused);
         if !keep_unread {

@@ -203,7 +203,7 @@ Right-click opens GhostDeck's terminal menu. When an app captures mouse input, c
 | `Ctrl+Shift+N` | New workspace (folder picker) |
 | `Ctrl+Shift+W` | Close workspace |
 | `Ctrl+Shift+Left/Right` | Cycle terminal tabs |
-| `Ctrl+Tab` | Return to the last focused tab, across workspaces |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Move back or forward through focused tabs, across workspaces |
 | `Ctrl+Shift+D` | Split terminal down |
 | `Ctrl+Shift+T` | New terminal tab |
 | `Ctrl+D` | Split terminal right |

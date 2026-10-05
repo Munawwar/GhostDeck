@@ -114,6 +114,8 @@ These are the current supported config keys and defaults:
 | `prev_workspace` | `<Ctrl>Page_Up` |
 | `cycle_tab_prev` | `<Ctrl><Shift>Left` |
 | `cycle_tab_next` | `<Ctrl><Shift>Right` |
+| `focus_previous_tab` | `<Ctrl>Tab` |
+| `focus_next_tab` | `<Ctrl><Shift>Tab` |
 | `split_down` | `<Ctrl><Shift>d` |
 | `new_terminal_in_focused_pane` | `<Ctrl><Shift>t` |
 | `split_right` | `<Ctrl>d` |
