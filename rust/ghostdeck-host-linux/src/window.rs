@@ -79,6 +79,26 @@ struct TabFocusTarget {
 
 const TAB_FOCUS_HISTORY_LIMIT: usize = 128;
 
+fn record_tab_focus(history: &mut Vec<TabFocusTarget>, target: TabFocusTarget) -> Option<usize> {
+    history.retain(|entry| entry != &target);
+    history.push(target);
+    if history.len() > TAB_FOCUS_HISTORY_LIMIT {
+        history.remove(0);
+    }
+    history.len().checked_sub(1)
+}
+
+fn finish_tab_switch(state: &State) {
+    let mut s = state.borrow_mut();
+    s.tab_switch_modifiers = None;
+    if let Some(target) = s
+        .tab_focus_history_index
+        .and_then(|index| s.tab_focus_history.get(index).cloned())
+    {
+        s.tab_focus_history_index = record_tab_focus(&mut s.tab_focus_history, target);
+    }
+}
+
 impl WindowCloseState {
     fn request(&mut self) -> WindowCloseAction {
         if self.confirmed {
@@ -117,6 +137,7 @@ pub(crate) struct AppState {
     focused_tab: Option<TabFocusTarget>,
     tab_focus_history: Vec<TabFocusTarget>,
     tab_focus_history_index: Option<usize>,
+    tab_switch_modifiers: Option<gtk::gdk::ModifierType>,
     focus_jump_target: Option<TabFocusTarget>,
     unread_until_focus_leaves: Option<TabFocusTarget>,
     shortcuts: Rc<ResolvedShortcutConfig>,
@@ -1517,6 +1538,7 @@ pub fn build_window(app: &adw::Application, app_started_at: i64) {
         focused_tab: None,
         tab_focus_history: Vec::new(),
         tab_focus_history_index: None,
+        tab_switch_modifiers: None,
         focus_jump_target: None,
         unread_until_focus_leaves: None,
         shortcuts,
@@ -1921,6 +1943,32 @@ fn install_key_capture(window: &adw::ApplicationWindow, state: &State) {
     let key_controller = gtk::EventControllerKey::new();
     key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
 
+    let release_state = state.clone();
+    key_controller.connect_key_released(move |_, keyval, _, _| {
+        use gtk::gdk::{Key, ModifierType};
+        let released = match keyval {
+            Key::Control_L | Key::Control_R => ModifierType::CONTROL_MASK,
+            Key::Alt_L | Key::Alt_R => ModifierType::ALT_MASK,
+            Key::Super_L | Key::Super_R | Key::Meta_L | Key::Meta_R => {
+                ModifierType::SUPER_MASK | ModifierType::META_MASK
+            }
+            _ => ModifierType::empty(),
+        };
+        let finish = release_state
+            .borrow()
+            .tab_switch_modifiers
+            .is_some_and(|held| held.is_empty() || held.intersects(released));
+        if finish {
+            finish_tab_switch(&release_state);
+        }
+    });
+    let inactive_state = state.clone();
+    window.connect_is_active_notify(move |window| {
+        if !window.is_active() && inactive_state.borrow().tab_switch_modifiers.is_some() {
+            finish_tab_switch(&inactive_state);
+        }
+    });
+
     let state = state.clone();
     key_controller.connect_key_pressed(move |controller, keyval, keycode, modifier| {
         let focused_listening_editor = controller
@@ -1945,7 +1993,24 @@ fn install_key_capture(window: &adw::ApplicationWindow, state: &State) {
                 .unwrap_or_default();
             !shortcut_blocked_by_editable(matched.command, matched.editable_capture_policy, context)
         })
-        .map(|matched| dispatch_shortcut_command(&state, matched.command))
+        .map(|matched| {
+            if matches!(
+                matched.command,
+                ShortcutCommand::FocusPreviousTab | ShortcutCommand::FocusNextTab
+            ) {
+                use gtk::gdk::ModifierType;
+                state.borrow_mut().tab_switch_modifiers.get_or_insert(
+                    modifier
+                        & (ModifierType::CONTROL_MASK
+                            | ModifierType::ALT_MASK
+                            | ModifierType::SUPER_MASK
+                            | ModifierType::META_MASK),
+                );
+            } else if state.borrow().tab_switch_modifiers.is_some() {
+                finish_tab_switch(&state);
+            }
+            dispatch_shortcut_command(&state, matched.command)
+        })
         .unwrap_or(false);
 
         shortcut_dispatch_propagation(matched)
@@ -5347,7 +5412,11 @@ fn navigate_tab_focus_history(state: &State, direction: isize) {
         else {
             let mut s = state.borrow_mut();
             s.tab_focus_history.remove(target_index);
-            s.tab_focus_history_index = Some(cursor - usize::from(target_index < cursor));
+            s.tab_focus_history_index = if s.tab_focus_history.is_empty() {
+                None
+            } else {
+                Some(cursor - usize::from(target_index < cursor))
+            };
             continue;
         };
 
@@ -5366,6 +5435,9 @@ fn navigate_tab_focus_history(state: &State, direction: isize) {
             request_session_save(state);
         }
         pane::activate_tab_in_pane(&pane_widget, &target.tab_id);
+        if state.borrow().tab_switch_modifiers.is_none() {
+            finish_tab_switch(state);
+        }
         let state = state.clone();
         glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
             let mut s = state.borrow_mut();
@@ -5580,15 +5652,9 @@ fn clear_focused_notification(state: &State) {
             }
             s.focused_tab = Some(focused.clone());
             if !history_jump {
-                let new_len = s.tab_focus_history_index.map_or(0, |cursor| cursor + 1);
-                s.tab_focus_history.truncate(new_len);
-                if s.tab_focus_history.last() != Some(&focused) {
-                    s.tab_focus_history.push(focused.clone());
-                }
-                if s.tab_focus_history.len() > TAB_FOCUS_HISTORY_LIMIT {
-                    s.tab_focus_history.remove(0);
-                }
-                s.tab_focus_history_index = s.tab_focus_history.len().checked_sub(1);
+                s.tab_switch_modifiers = None;
+                s.tab_focus_history_index =
+                    record_tab_focus(&mut s.tab_focus_history, focused.clone());
             }
         }
         let keep_unread = s.unread_until_focus_leaves.as_ref() == Some(&focused);
@@ -5712,6 +5778,27 @@ mod tests {
     use crate::shortcut_config::{
         default_shortcuts, resolve_shortcuts_from_str, EditableCapturePolicy, ShortcutCommand,
     };
+
+    #[test]
+    fn tab_focus_recency_preserves_other_tabs_and_toggles_recent_pair() {
+        let [a, b, c] = ["a", "b", "c"].map(|id| super::TabFocusTarget {
+            workspace_id: format!("workspace-{id}"),
+            pane_id: 1,
+            tab_id: id.to_string(),
+        });
+        // Oldest to newest: A is current, B is previous, C is oldest.
+        let mut history = vec![c.clone(), b.clone(), a.clone()];
+        assert_eq!(super::record_tab_focus(&mut history, b.clone()), Some(2));
+        assert_eq!(history, [c.clone(), a.clone(), b.clone()]);
+        super::record_tab_focus(&mut history, a.clone());
+        assert_eq!(history, [c.clone(), b.clone(), a.clone()]);
+        // Choosing the oldest entry retains every other entry in its original order.
+        super::record_tab_focus(&mut history, c.clone());
+        assert_eq!(history, [b.clone(), a.clone(), c.clone()]);
+        super::record_tab_focus(&mut history, c.clone());
+        assert_eq!(history, [b, a, c]);
+    }
+
     #[derive(Default)]
     struct TestSessionSaveState {
         persistence_suspended: bool,
