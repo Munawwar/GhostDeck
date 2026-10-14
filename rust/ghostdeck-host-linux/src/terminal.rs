@@ -2083,7 +2083,12 @@ fn show_terminal_context_menu(
 
             btn.connect_clicked(move |_| {
                 pop.popdown();
-                match label.as_str() {
+                // Run the action once the popover has closed: splits and swaps
+                // reparent the GLArea this popover is attached to, which breaks
+                // GTK's state tracking if done from inside the popover's handler.
+                let label = label.clone();
+                let cb = cb.clone();
+                glib::idle_add_local_once(move || match label.as_str() {
                     "Send Right-Click" => {
                         if let Some(surface) = surface {
                             unsafe {
@@ -2119,7 +2124,7 @@ fn show_terminal_context_menu(
                     "Swap" => (cb.borrow().on_swap)(),
                     "Clear" => surface_action(surface, "clear_screen"),
                     _ => {}
-                }
+                });
             });
         }
         child = widget.next_sibling();
