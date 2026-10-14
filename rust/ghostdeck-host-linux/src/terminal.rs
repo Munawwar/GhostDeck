@@ -1280,7 +1280,6 @@ pub fn create_terminal(
     overlay.add_overlay(&search_bar);
 
     let im_context = gtk::IMMulticontext::new();
-    im_context.set_client_widget(Some(&gl_area));
     im_context.set_use_preedit(true);
     let ime_state = Rc::new(RefCell::new(TerminalImeState::default()));
 
@@ -1940,9 +1939,19 @@ pub fn create_terminal(
     // GTK unrealizes widgets during reparenting (splits), and we need
     // the terminal/pty to survive. The GL resources will be recreated
     // in connect_realize when the widget is re-realized.
+    // The IM context only tracks the GLArea while it is realized: IBus runs
+    // idle callbacks that dereference the client widget's native surface, and
+    // segfaults if the widget was unrooted mid-split.
+    {
+        let im_context = im_context.clone();
+        gl_area.connect_realize(move |gl_area| im_context.set_client_widget(Some(gl_area)));
+    }
     {
         let surface_cell = surface_cell.clone();
+        let im_context = im_context.clone();
         gl_area.connect_unrealize(move |gl_area| {
+            im_context.focus_out();
+            im_context.set_client_widget(gtk::Widget::NONE);
             if let Some(surface) = *surface_cell.borrow() {
                 gl_area.make_current();
                 unsafe { ghostty_surface_display_unrealized(surface) };
