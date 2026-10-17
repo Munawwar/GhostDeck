@@ -136,7 +136,10 @@ ghostdeck add-surface --cmd claude
 
 # Add a visible process to the agent's current terminal tab. GhostDeck owns the
 # layout: the agent starts on the left and up to three added surfaces stack on
-# the right. No direction or target flags are accepted.
+# each column to the right. Columns and their rows share space equally;
+# closing or exiting a surface compacts the remaining surfaces in visual order.
+# Creation and background exits preserve keyboard focus.
+# No direction or target flags are accepted.
 created="$(ghostdeck --json add-surface --cwd apps/web)"
 surface="$(printf '%s\n' "$created" | jq -r '.surface_id')"
 ghostdeck run --surface "$surface" --cmd 'npm run dev'

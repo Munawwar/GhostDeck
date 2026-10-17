@@ -466,11 +466,6 @@ fn terminal_search_action(query: &str) -> String {
     format!("search:{query}")
 }
 
-fn request_terminal_focus(gl_area: &gtk::GLArea, had_focus: &Cell<bool>) {
-    had_focus.set(true);
-    gl_area.grab_focus();
-}
-
 fn refresh_surface_display(surface: ghostty_surface_t, gl_area: &gtk::GLArea) {
     let alloc = gl_area.allocation();
     if alloc.width() > 0 && alloc.height() > 0 {
@@ -1228,7 +1223,6 @@ pub fn create_terminal(
     let extra_env = options.extra_env;
     let callbacks = Rc::new(RefCell::new(callbacks));
     let surface_cell: Rc<RefCell<Option<ghostty_surface_t>>> = Rc::new(RefCell::new(None));
-    let had_focus = Rc::new(Cell::new(false));
     let scrollbar_syncing = Rc::new(Cell::new(false));
     let open_url_external = Rc::new(Cell::new(false));
     let clipboard_context_cell: Rc<Cell<*mut ClipboardContext>> =
@@ -1391,7 +1385,6 @@ pub fn create_terminal(
         let scrollbar_adjustment_for_map = scrollbar_adjustment.clone();
         let surface_cell = surface_cell.clone();
         let callbacks = callbacks.clone();
-        let had_focus = had_focus.clone();
         let clipboard_context_cell = clipboard_context_cell.clone();
         let scrollbar_syncing = scrollbar_syncing.clone();
         let open_url_external_for_map = open_url_external.clone();
@@ -1568,11 +1561,8 @@ pub fn create_terminal(
             *surface_cell.borrow_mut() = Some(surface);
 
             unsafe {
-                ghostty_surface_set_focus(surface, true);
+                ghostty_surface_set_focus(surface, gl_area.has_focus());
             }
-
-            // Grab GTK focus so key events reach this widget.
-            request_terminal_focus(gl_area, &had_focus);
         });
     }
 
@@ -1594,8 +1584,6 @@ pub fn create_terminal(
     // callback draw with the correct viewport.
     {
         let surface_cell = surface_cell.clone();
-        let gl_for_resize = gl_area.clone();
-        let had_focus = had_focus.clone();
         gl_area.connect_resize(move |gl_area, width, height| {
             if let Some(surface) = *surface_cell.borrow() {
                 let w = width as u32;
@@ -1603,13 +1591,6 @@ pub fn create_terminal(
                 if w > 0 && h > 0 {
                     refresh_surface_display(surface, gl_area);
                 }
-            }
-
-            if had_focus.get() {
-                let gl_for_focus = gl_for_resize.clone();
-                glib::idle_add_local_once(move || {
-                    gl_for_focus.grab_focus();
-                });
             }
         });
     }
@@ -1738,12 +1719,11 @@ pub fn create_terminal(
         click.set_button(0); // all buttons
         let sc = surface_cell.clone();
         let gl_for_focus = gl_area.clone();
-        let had_focus = had_focus.clone();
         let pressed_button_for_press = pressed_button.clone();
         click.connect_pressed(move |gesture, _n, x, y| {
             let btn = gesture.current_button();
             // Grab keyboard focus on any click
-            request_terminal_focus(&gl_for_focus, &had_focus);
+            gl_for_focus.grab_focus();
             // The context menu can explicitly forward this click to the app.
             if btn == 3 {
                 return;
@@ -1825,14 +1805,13 @@ pub fn create_terminal(
         let surface_cell = surface_cell.clone();
         let surface_cell_for_enter = surface_cell.clone();
         let gl_for_focus = gl_area.clone();
-        let had_focus = had_focus.clone();
         let motion = gtk::EventControllerMotion::new();
         motion.connect_enter(move |ctrl, x, y| {
             if HOVER_FOCUS_SUPPRESS_DEPTH.with(|depth| depth.get() == 0) && (hover_focus)() {
                 // Match common Hyprland/Omarchy-style focus-follows-mouse behavior:
                 // as soon as the pointer enters a terminal, focus it so typing works
                 // immediately without an extra click.
-                request_terminal_focus(&gl_for_focus, &had_focus);
+                gl_for_focus.grab_focus();
             }
 
             if let Some(surface) = *surface_cell_for_enter.borrow() {
@@ -1881,15 +1860,12 @@ pub fn create_terminal(
     // Focus
     {
         let surface_cell = surface_cell.clone();
-        let had_focus_enter = had_focus.clone();
-        let had_focus_leave = had_focus.clone();
         let im_context_enter = im_context.clone();
         let im_context_leave = im_context.clone();
         let callbacks_for_focus = callbacks.clone();
         let focus_ctrl = gtk::EventControllerFocus::new();
         let sc = surface_cell.clone();
         focus_ctrl.connect_enter(move |_| {
-            had_focus_enter.set(true);
             im_context_enter.focus_in();
             if let Some(surface) = *sc.borrow() {
                 unsafe { ghostty_surface_set_focus(surface, true) };
@@ -1897,7 +1873,6 @@ pub fn create_terminal(
             (callbacks_for_focus.borrow().on_focus)();
         });
         focus_ctrl.connect_leave(move |_| {
-            had_focus_leave.set(false);
             im_context_leave.focus_out();
             if let Some(surface) = *surface_cell.borrow() {
                 unsafe { ghostty_surface_set_focus(surface, false) };

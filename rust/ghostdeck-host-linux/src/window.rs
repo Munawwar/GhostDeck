@@ -273,7 +273,6 @@ fn send_add_response_after_command(
 ) {
     let mut attempts = 0;
     let mut reply = Some(reply);
-    let command = format!("{command}\n");
 
     glib::timeout_add_local(
         std::time::Duration::from_millis(SURFACE_ADD_COMMAND_READY_INTERVAL_MS),
@@ -283,7 +282,10 @@ fn send_add_response_after_command(
             if let Some((matched_surface_id, handle)) =
                 pane::exact_terminal_handle_for_surface(&pane_widget, &surface_id)
             {
-                if matched_surface_id == surface_id && handle.send_text(&command) {
+                if matched_surface_id == surface_id
+                    && handle.send_text(&command)
+                    && handle.send_key("Return")
+                {
                     if let Some(reply) = reply.take() {
                         let _ = reply.send(Ok(response.clone()));
                     }
@@ -3926,13 +3928,16 @@ fn workspace_folder_path_from_input(
 }
 
 fn create_workspace_with_folder(state: &State, name: &str, folder_path: &str) {
+    let mut pane = PaneState::fallback(Some(folder_path));
+    // This is a new terminal, not a legacy tab restored at app startup.
+    pane.tabs[0].started_at = Some(glib::real_time() / 1_000_000);
     let workspace = WorkspaceState {
         id: None,
         name: name.to_string(),
         favorite: false,
         cwd: Some(folder_path.to_string()),
         folder_path: Some(folder_path.to_string()),
-        layout: LayoutNodeState::Pane(PaneState::fallback(Some(folder_path))),
+        layout: LayoutNodeState::Pane(pane),
     };
     add_workspace_from_state(state, &workspace);
     request_session_save(state);
@@ -4400,7 +4405,12 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 return;
             };
 
-            handle.send_text(&text);
+            if !handle.send_text(&text) {
+                let _ = reply.send(Err(BridgeError::conflict(
+                    "target surface is not ready for input",
+                )));
+                return;
+            }
             if let Some(map) = payload.as_object_mut() {
                 map.insert("ok".to_string(), serde_json::Value::Bool(true));
             }

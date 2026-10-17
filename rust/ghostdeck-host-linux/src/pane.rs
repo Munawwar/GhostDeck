@@ -307,18 +307,35 @@ impl TerminalSplitNode {
         }
     }
 
-    fn vertical_column_count(&self) -> Option<usize> {
-        match self {
-            Self::Leaf(_) => Some(1),
-            Self::Split {
-                orientation,
-                start,
-                end,
-                ..
-            } if *orientation == gtk::Orientation::Vertical => {
-                Some(start.vertical_column_count()? + end.vertical_column_count()?)
+    /// Pack the visual leaf order into one anchor column and groups of three.
+    /// Rebuilding from leaves also handles restored or manually nested trees.
+    fn pack_columns(&mut self, added: Option<TerminalLeafState>) {
+        let mut leaves = Vec::new();
+        self.for_each_leaf(|leaf| leaves.push(leaf.clone()));
+        leaves.extend(added);
+        let mut columns = vec![Self::Leaf(leaves.remove(0))];
+        for chunk in leaves.chunks(3) {
+            let mut column = Self::Leaf(chunk[0].clone());
+            for (index, leaf) in chunk.iter().enumerate().skip(1) {
+                column = Self::Split {
+                    orientation: gtk::Orientation::Vertical,
+                    ratio: Rc::new(RefCell::new(index as f64 / (index + 1) as f64)),
+                    start: Box::new(column),
+                    end: Box::new(Self::Leaf(leaf.clone())),
+                };
             }
-            Self::Split { .. } => None,
+            columns.push(column);
+        }
+        let mut columns = columns.into_iter();
+        *self = columns.next().expect("terminal tree has an anchor leaf");
+        for (index, column) in columns.enumerate() {
+            let count = index + 1;
+            *self = Self::Split {
+                orientation: gtk::Orientation::Horizontal,
+                ratio: Rc::new(RefCell::new(count as f64 / (count + 1) as f64)),
+                start: Box::new(self.clone()),
+                end: Box::new(column),
+            };
         }
     }
 
@@ -689,12 +706,23 @@ impl TerminalTabState {
         if self.inner.tree.borrow().leaf_count() <= 1 {
             return false;
         }
-        let removed = self.inner.tree.borrow_mut().remove_leaf(leaf_id);
+        let mut tree = self.inner.tree.borrow_mut();
+        let mut has_added_surfaces = false;
+        tree.for_each_leaf(|leaf| has_added_surfaces |= leaf.creator_surface_id.is_some());
+        let removed = tree.remove_leaf(leaf_id);
         if removed {
-            let next_leaf_id = self.inner.tree.borrow().first_leaf().leaf_id.clone();
-            *self.inner.active_leaf_id.borrow_mut() = next_leaf_id;
+            if has_added_surfaces {
+                tree.pack_columns(None);
+            }
+            if tree
+                .find_leaf(&self.inner.active_leaf_id.borrow())
+                .is_none()
+            {
+                *self.inner.active_leaf_id.borrow_mut() = tree.first_leaf().leaf_id.clone();
+            }
+            drop(tree);
             self.sync_split_dimming();
-            self.trigger_rebuild(true);
+            self.trigger_rebuild(false);
         }
         removed
     }
@@ -707,7 +735,11 @@ impl TerminalTabState {
         while let Some(child) = self.inner.resize_layer.first_child() {
             self.inner.resize_layer.remove(&child);
         }
-        self.inner.focus_after_rebuild.set(focus_after_rebuild);
+        self.inner.focus_after_rebuild.set(
+            focus_after_rebuild
+                || self.inner.focus_after_rebuild.get()
+                || self.inner.root.focus_child().is_some(),
+        );
         if let Some(source) = self.inner.rebuild_source.borrow_mut().take() {
             source.remove();
         }
@@ -740,11 +772,8 @@ impl TerminalTabState {
             .set_child(Some(&build_terminal_split_widget_tree(&tree, self)));
         drop(tree);
         self.refresh_display();
-        if self.inner.focus_after_rebuild.replace(false) {
-            let handle = self.active_handle();
-            glib::idle_add_local_once(move || {
-                handle.focus_surface();
-            });
+        if self.inner.focus_after_rebuild.replace(false) && self.inner.root.is_mapped() {
+            self.active_handle().focus_surface();
         }
     }
 }
@@ -1501,57 +1530,28 @@ fn composite_surface_id(pane_id: u32, tab_id: &str) -> String {
     format!("{pane_id}:{tab_id}")
 }
 
-fn surface_hint_matches(
-    surface_id: &str,
-    tab_surface_id: &str,
-    tab_id: &str,
-    surface_hint: &str,
-) -> bool {
-    let requested = normalize_surface_hint(surface_hint);
-    !requested.is_empty()
-        && (requested == tab_id || requested == tab_surface_id || requested == surface_id)
-}
-
 pub fn terminal_handle_for_surface(
     pane_widget: &gtk::Widget,
     surface_hint: Option<&str>,
 ) -> Option<(String, terminal::TerminalHandle)> {
-    let internals = find_pane_internals(pane_widget)?;
-    let pane_id = internals.pane_id;
-    let tab_state = internals.tab_state.borrow();
-    let requested = surface_hint
-        .map(normalize_surface_hint)
-        .filter(|value| !value.is_empty());
-    let active_tab = tab_state.active_tab.as_deref();
-    let mut fallback = None;
-
-    for entry in &tab_state.tabs {
-        let TabKind::Terminal { state } = &entry.kind else {
-            continue;
-        };
-        let tab_surface_id = composite_surface_id(pane_id, &entry.id);
-        let active_leaf_id = state.active_leaf_id();
-        let mut matched = None;
-        state.inner.tree.borrow().for_each_leaf(|leaf| {
-            let surface_id = terminal_surface_id(pane_id, &entry.id, &leaf.leaf_id);
-            if requested.is_some_and(|value| {
-                value == surface_id || value == tab_surface_id || value == entry.id
-            }) {
-                matched = Some((surface_id, leaf.handle.clone()));
-                return;
-            }
-            if active_tab == Some(entry.id.as_str()) && leaf.leaf_id == active_leaf_id {
-                matched = Some((surface_id, leaf.handle.clone()));
-            } else if fallback.is_none() {
-                fallback = Some((surface_id, leaf.handle.clone()));
-            }
-        });
-        if let Some(matched) = matched {
-            return Some(matched);
-        }
+    if let Some(requested) = surface_hint {
+        return exact_terminal_handle_for_surface(pane_widget, requested);
     }
-
-    fallback
+    let internals = find_pane_internals(pane_widget)?;
+    let tab_state = internals.tab_state.borrow();
+    let entry = tab_state
+        .tabs
+        .iter()
+        .find(|entry| Some(entry.id.as_str()) == tab_state.active_tab.as_deref())
+        .or_else(|| tab_state.tabs.first())?;
+    let TabKind::Terminal { state } = &entry.kind else {
+        return None;
+    };
+    let leaf = state.active_leaf();
+    Some((
+        terminal_surface_id(internals.pane_id, &entry.id, &leaf.leaf_id),
+        leaf.handle,
+    ))
 }
 
 pub fn exact_terminal_handle_for_surface(
@@ -1559,26 +1559,32 @@ pub fn exact_terminal_handle_for_surface(
     surface_hint: &str,
 ) -> Option<(String, terminal::TerminalHandle)> {
     let internals = find_pane_internals(pane_widget)?;
-    let pane_id = internals.pane_id;
     let tab_state = internals.tab_state.borrow();
-
+    let requested = normalize_surface_hint(surface_hint);
     for entry in &tab_state.tabs {
         let TabKind::Terminal { state } = &entry.kind else {
             continue;
         };
-        let tab_surface_id = composite_surface_id(pane_id, &entry.id);
-        let mut matched = None;
-        state.inner.tree.borrow().for_each_leaf(|leaf| {
-            let surface_id = terminal_surface_id(pane_id, &entry.id, &leaf.leaf_id);
-            if surface_hint_matches(&surface_id, &tab_surface_id, &entry.id, surface_hint) {
-                matched = Some((surface_id, leaf.handle.clone()));
-            }
-        });
-        if let Some(matched) = matched {
-            return Some(matched);
+        // Legacy tab addresses select that tab's active leaf. A full surface
+        // address must match exactly, regardless of keyboard focus.
+        if requested == entry.id || requested == composite_surface_id(internals.pane_id, &entry.id)
+        {
+            let leaf = state.active_leaf();
+            return Some((
+                terminal_surface_id(internals.pane_id, &entry.id, &leaf.leaf_id),
+                leaf.handle,
+            ));
+        }
+        if let Some(leaf) =
+            state
+                .inner
+                .tree
+                .borrow()
+                .find_surface(internals.pane_id, &entry.id, requested)
+        {
+            return Some((requested.to_string(), leaf.handle.clone()));
         }
     }
-
     None
 }
 
@@ -2115,56 +2121,12 @@ pub fn add_surface_to_terminal_tab(
     );
     new_leaf.creator_surface_id = Some(source_leaf.surface_id.clone());
     let new_surface_id = terminal_surface_id(internals.pane_id, tab_id, &new_leaf.leaf_id);
-    {
-        let mut tree = terminal_tab_state.inner.tree.borrow_mut();
-        let last_column_count = match &*tree {
-            TerminalSplitNode::Split {
-                orientation: gtk::Orientation::Horizontal,
-                end,
-                ..
-            } => end.vertical_column_count(),
-            _ => None,
-        };
-        if let Some(count @ 1..=2) = last_column_count {
-            let TerminalSplitNode::Split { end, .. } = &mut *tree else {
-                unreachable!();
-            };
-            let mut column_leaves = Vec::with_capacity(count + 1);
-            end.for_each_leaf(|leaf| column_leaves.push(leaf.clone()));
-            column_leaves.push(new_leaf.clone());
-            let mut column = TerminalSplitNode::Leaf(column_leaves.remove(0));
-            for (index, leaf) in column_leaves.into_iter().enumerate() {
-                let placed = index + 1;
-                column = TerminalSplitNode::Split {
-                    orientation: gtk::Orientation::Vertical,
-                    ratio: Rc::new(RefCell::new(placed as f64 / (placed + 1) as f64)),
-                    start: Box::new(column),
-                    end: Box::new(TerminalSplitNode::Leaf(leaf)),
-                };
-            }
-            **end = column;
-        } else {
-            let mut columns = 1;
-            let mut prefix = &*tree;
-            while let TerminalSplitNode::Split {
-                orientation: gtk::Orientation::Horizontal,
-                start,
-                ..
-            } = prefix
-            {
-                columns += 1;
-                prefix = start;
-            }
-            *tree = TerminalSplitNode::Split {
-                orientation: gtk::Orientation::Horizontal,
-                ratio: Rc::new(RefCell::new(columns as f64 / (columns + 1) as f64)),
-                start: Box::new(tree.clone()),
-                end: Box::new(TerminalSplitNode::Leaf(new_leaf.clone())),
-            };
-        }
-    }
+    terminal_tab_state
+        .inner
+        .tree
+        .borrow_mut()
+        .pack_columns(Some(new_leaf.clone()));
 
-    *terminal_tab_state.inner.active_leaf_id.borrow_mut() = source_leaf.leaf_id;
     terminal_tab_state.replace_callbacks(|leaf| {
         make_terminal_callbacks(&internals, &terminal_tab_state, tab_id, &title_label, leaf)
     });
@@ -2204,7 +2166,7 @@ pub fn run_command_in_terminal_tab(
         }
         target.handle.clone()
     };
-    if !handle.send_text(&format!("{command}\n")) {
+    if !handle.send_text(command) || !handle.send_key("Return") {
         return Err(TerminalTabSurfaceError::CommandNotWritable);
     }
     Ok(())
@@ -2965,12 +2927,8 @@ pub fn surface_summaries_for_root(root: &gtk::Widget) -> Vec<SurfaceSummary> {
         }
     }
 
-    surfaces.sort_by(|left, right| {
-        left.pane_id
-            .cmp(&right.pane_id)
-            .then_with(|| right.selected.cmp(&left.selected))
-            .then_with(|| left.surface_id.cmp(&right.surface_id))
-    });
+    // Preserve tab order and the split tree's visual leaf order. Sorting by
+    // focus or UUID makes surface indices jump as the user types or adds leaves.
     surfaces
 }
 
@@ -3007,11 +2965,7 @@ pub fn terminal_handle_for_root(
     root: &gtk::Widget,
     surface_hint: Option<&str>,
 ) -> Option<(String, terminal::TerminalHandle)> {
-    let requested = surface_hint
-        .map(normalize_surface_hint)
-        .filter(|value| !value.is_empty());
-
-    if let Some(requested) = requested {
+    if let Some(requested) = surface_hint {
         for internals in pane_internals_for_root(root) {
             let pane_widget: gtk::Widget = internals.pane_outer.clone().upcast();
             if let Some(found) = terminal_handle_for_surface(&pane_widget, Some(requested)) {
@@ -3828,8 +3782,8 @@ fn remove_tab(
 mod tests {
     use super::{
         next_active_after_tab_removal, normalize_reorder_insert_index, pane_action_tooltip,
-        resolve_terminal_working_directory, surface_hint_matches, terminal_focus_index,
-        TabDragPayload, TerminalFocusDirection,
+        resolve_terminal_working_directory, terminal_focus_index, TabDragPayload,
+        TerminalFocusDirection,
     };
     use crate::shortcut_config::{default_shortcuts, resolve_shortcuts_from_str, ShortcutId};
 
@@ -3889,40 +3843,6 @@ mod tests {
             terminal_focus_index(0, 1, TerminalFocusDirection::Right),
             None
         );
-    }
-
-    #[test]
-    fn surface_hint_matches_only_exact_surface_or_tab_id() {
-        assert!(surface_hint_matches(
-            "42:tab-a:leaf-0",
-            "42:tab-a",
-            "tab-a",
-            "surface:42:tab-a:leaf-0"
-        ));
-        assert!(surface_hint_matches(
-            "42:tab-a:leaf-0",
-            "42:tab-a",
-            "tab-a",
-            "42:tab-a"
-        ));
-        assert!(surface_hint_matches(
-            "42:tab-a:leaf-0",
-            "42:tab-a",
-            "tab-a",
-            "tab-a"
-        ));
-        assert!(!surface_hint_matches(
-            "42:tab-a:leaf-0",
-            "42:tab-a",
-            "tab-a",
-            "42:tab-b"
-        ));
-        assert!(!surface_hint_matches(
-            "42:tab-a:leaf-0",
-            "42:tab-a",
-            "tab-a",
-            ""
-        ));
     }
 
     #[test]

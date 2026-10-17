@@ -27,6 +27,7 @@ command -v xvfb-run >/dev/null || {
   echo "FAIL: xvfb-run not installed (sudo pacman -S xorg-server-xvfb)"
   exit 2
 }
+command -v xdotool >/dev/null || { echo "FAIL: xdotool missing"; exit 2; }
 command -v cargo >/dev/null || { echo "FAIL: cargo missing"; exit 2; }
 command -v sed >/dev/null || { echo "FAIL: sed missing"; exit 2; }
 
@@ -117,15 +118,17 @@ SMOKE_SESSION
 echo
 echo "== stage 1: boot ghostdeck host under xvfb-run =="
 APP_START_LOWER_BOUND="$(date +%s)"
-# Under Xvfb there is no GPU, so Mesa would fall back to llvmpipe, which
-# has historically crashed on Ghostty's shader variants. Force softpipe
-# (slower but stable), and pin GL version to avoid newer-feature probes.
+# Ghostty requires OpenGL 4.3, which Mesa's llvmpipe supports under Xvfb.
+# GTK uses Cairo so its renderer does not compete with embedded GL surfaces.
 export LIBGL_ALWAYS_SOFTWARE=1
-export GALLIUM_DRIVER=softpipe
+export GALLIUM_DRIVER=llvmpipe
+export GSK_RENDERER=cairo
 export LP_NUM_THREADS=1
-export MESA_GL_VERSION_OVERRIDE="${MESA_GL_VERSION_OVERRIDE:-3.3}"
-xvfb-run -a -s "-screen 0 1280x800x24 +extension GLX +render" \
-  "$GHOSTDECK_HOST" >"$LOG_DIR/host.stdout" 2>"$LOG_DIR/host.stderr" &
+export XAUTHORITY="$DEMO_DIR/Xauthority"
+touch "$XAUTHORITY"
+xvfb-run -a -f "$XAUTHORITY" -s "-screen 0 3840x2160x24 +extension GLX +render" \
+  sh -c 'printf "%s" "$DISPLAY" > "$1/display"; printf "%s" "$$" > "$1/host-pid"; exec "$2"' sh \
+  "$DEMO_DIR" "$GHOSTDECK_HOST" >"$LOG_DIR/host.stdout" 2>"$LOG_DIR/host.stderr" &
 HOST_PID=$!
 echo "host PID: $HOST_PID (socket=$SOCKET)"
 
@@ -133,7 +136,11 @@ cleanup() {
   local rc=$?
   echo
   echo "-- cleanup (rc=$rc) --"
+  if [ -f "$DEMO_DIR/host-pid" ]; then
+    kill "$(cat "$DEMO_DIR/host-pid")" 2>/dev/null || true
+  fi
   if kill -0 "$HOST_PID" 2>/dev/null; then
+    sleep 1
     kill "$HOST_PID" 2>/dev/null || true
     sleep 1
     kill -9 "$HOST_PID" 2>/dev/null || true
@@ -205,57 +212,7 @@ echo "stage 1b: OK"
 # --- 5. Stage 1c: caller-owned surface lifecycle --------------------------
 echo
 echo "== stage 1c: add seven surfaces, run in the last, and close them =="
-CALLER_WORKSPACE_ID="00000000-0000-4000-8000-000000000001"
-CALLER_TAB_ID="terminal-0"
-CALLER_SURFACE_ID="1:terminal-0:leaf-0"
-CALLER_ENV=("GHOSTDECK_WORKSPACE_ID=$CALLER_WORKSPACE_ID" "GHOSTDECK_TAB_ID=$CALLER_TAB_ID" "GHOSTDECK_SURFACE_ID=$CALLER_SURFACE_ID")
-ADDED_SURFACES=()
-for index in $(seq 1 7); do
-  ADD_JSON="$LOG_DIR/stage1c-add-$index.json"
-  env "${CALLER_ENV[@]}" "$GHOSTDECK_CLI" --json --id-format both add-surface > "$ADD_JSON"
-  surface_id="$(sed -n 's/.*"surface_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ADD_JSON" | head -1)"
-  [ -n "$surface_id" ] || { echo "FAIL: add-surface response missing surface_id"; exit 1; }
-  ADDED_SURFACES+=("$surface_id")
-done
-CHILD_SURFACE_ID="${ADDED_SURFACES[6]}"
-
-for _ in $(seq 1 50); do
-  "$GHOSTDECK_CLI" --json list-panels --workspace "$CALLER_WORKSPACE_ID" \
-    > "$LOG_DIR/stage1c-panels.json"
-  surface_count="$( (grep -o '"surface_id"' "$LOG_DIR/stage1c-panels.json" || true) | wc -l )"
-  [ "$surface_count" -eq 8 ] && grep -Fq "$CHILD_SURFACE_ID" \
-    "$LOG_DIR/stage1c-panels.json" && break
-  sleep 0.1
-done
-[ "$surface_count" -eq 8 ] \
-  || { echo "FAIL: expected caller plus 7 added surfaces, got $surface_count"; exit 1; }
-grep -Fq "$CHILD_SURFACE_ID" "$LOG_DIR/stage1c-panels.json" \
-  || { echo "FAIL: seventh added surface is not listed"; exit 1; }
-
-RUN_PROOF="$DEMO_DIR/run-surface-proof"
-env "${CALLER_ENV[@]}" "$GHOSTDECK_CLI" run --surface "$CHILD_SURFACE_ID" --cmd "printf run-ok > '$RUN_PROOF'"
-for _ in $(seq 1 50); do
-  [ -f "$RUN_PROOF" ] && break
-  sleep 0.1
-done
-[ -f "$RUN_PROOF" ] && [ "$(cat "$RUN_PROOF")" = "run-ok" ] \
-  || { echo "FAIL: run did not execute in the added surface"; exit 1; }
-
-if env "${CALLER_ENV[@]}" "$GHOSTDECK_CLI" close-surface --surface "$CALLER_SURFACE_ID" >/dev/null 2>&1; then
-  echo "FAIL: close-surface allowed closing the caller source"; exit 1
-fi
-
-for surface_id in "${ADDED_SURFACES[@]}"; do
-  env "${CALLER_ENV[@]}" "$GHOSTDECK_CLI" close-surface --surface "$surface_id"
-done
-env "${CALLER_ENV[@]}" "$GHOSTDECK_CLI" --json list-panels --workspace "$CALLER_WORKSPACE_ID" \
-  > "$LOG_DIR/stage1c-panels.json"
-for surface_id in "${ADDED_SURFACES[@]}"; do
-  if grep -Fq "$surface_id" "$LOG_DIR/stage1c-panels.json"; then
-    echo "FAIL: closed surface remains in the caller tab"; exit 1
-  fi
-done
-echo "stage 1c: OK (7 added surfaces, run in seventh, source protection, close)"
+python3 "$ROOT_DIR/scripts/surface-lifecycle-smoke.py" "$GHOSTDECK_CLI" "$DEMO_DIR"
 
 # --- 5. Stage 2: live agent-team ------------------------------------------
 echo
@@ -263,7 +220,9 @@ echo "== stage 2: agent-team against live host (--no-launch) =="
 # --no-launch keeps the workspace commands from actually spawning codex/
 # claude binaries (which may not be installed in CI); the bridge + AGENTS.md
 # + allow_name=true path are still fully exercised.
-env "${CALLER_ENV[@]}" "$GHOSTDECK_CLI" --id-format both agent-team \
+env GHOSTDECK_WORKSPACE_ID=00000000-0000-4000-8000-000000000001 \
+  GHOSTDECK_TAB_ID=terminal-0 GHOSTDECK_SURFACE_ID=1:terminal-0:leaf-0 \
+  "$GHOSTDECK_CLI" --id-format both agent-team \
   --agents codex,claude \
   --cwd "$DEMO_DIR" \
   --no-launch \
