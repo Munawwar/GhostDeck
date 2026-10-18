@@ -123,10 +123,12 @@ wait_for(lambda: proof.exists() and proof.read_text() == surfaces[-1])
 wait_for(lambda: layout_matches(surfaces, active))
 subprocess.run(["xdotool", "key", "Return"], env=env, check=True)
 wait_for(lambda: keyboard_proof.exists() and keyboard_proof.read_text() == active)
+# Closing the active surface focuses the previous one in layout order.
 for target in surfaces[:0:-1]:
+    index = surfaces.index(target)
     command("close-surface", "--surface", target)
     surfaces.remove(target)
     if target == active:
-        active = source
+        active = surfaces[index - 1]
     wait_for(lambda: layout_matches(surfaces, active))
 print("surface lifecycle: ordered equal columns, exact routing, invalid IDs, close and shell exit OK")

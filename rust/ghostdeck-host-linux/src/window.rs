@@ -22,8 +22,8 @@ use crate::shortcut_config::{
     self, EditableCapturePolicy, ResolvedShortcutConfig, ShortcutCommand, ShortcutId,
 };
 
-const SURFACE_ADD_COMMAND_READY_INTERVAL_MS: u64 = 50;
-const SURFACE_ADD_COMMAND_READY_ATTEMPTS: u32 = 40;
+const SURFACE_WRITE_RETRY_INTERVAL_MS: u64 = 50;
+const SURFACE_WRITE_RETRY_ATTEMPTS: u32 = 40;
 
 // ---------------------------------------------------------------------------
 // State
@@ -258,51 +258,39 @@ fn terminal_tab_surface_error(error: pane::TerminalTabSurfaceError) -> BridgeErr
         pane::TerminalTabSurfaceError::CannotCloseSource => {
             BridgeError::invalid_params("cannot close the caller's source surface")
         }
-        pane::TerminalTabSurfaceError::CommandNotWritable => {
-            BridgeError::conflict("target surface is not ready for input")
-        }
     }
 }
 
-fn send_add_response_after_command(
-    pane_widget: gtk::Widget,
-    surface_id: String,
-    command: String,
+/// Writes `text` (then Return when `submit`) and replies with `response`.
+/// A surface that was just added realizes within a few frames, so retry
+/// briefly before reporting that it is not ready.
+fn write_when_ready(
+    handle: crate::terminal::TerminalHandle,
+    text: String,
+    submit: bool,
     response: serde_json::Value,
     reply: std::sync::mpsc::Sender<Result<serde_json::Value, BridgeError>>,
 ) {
+    let write = move || handle.send_text(&text) && (!submit || handle.send_key("Return"));
+    if write() {
+        let _ = reply.send(Ok(response));
+        return;
+    }
     let mut attempts = 0;
-    let mut reply = Some(reply);
-
     glib::timeout_add_local(
-        std::time::Duration::from_millis(SURFACE_ADD_COMMAND_READY_INTERVAL_MS),
+        std::time::Duration::from_millis(SURFACE_WRITE_RETRY_INTERVAL_MS),
         move || {
             attempts += 1;
-
-            if let Some((matched_surface_id, handle)) =
-                pane::exact_terminal_handle_for_surface(&pane_widget, &surface_id)
-            {
-                if matched_surface_id == surface_id
-                    && handle.send_text(&command)
-                    && handle.send_key("Return")
-                {
-                    if let Some(reply) = reply.take() {
-                        let _ = reply.send(Ok(response.clone()));
-                    }
-                    return glib::ControlFlow::Break;
-                }
-            }
-
-            if attempts >= SURFACE_ADD_COMMAND_READY_ATTEMPTS {
-                if let Some(reply) = reply.take() {
-                    let _ = reply.send(Err(BridgeError::internal(format!(
-                        "command target surface {surface_id} never became writable"
-                    ))));
-                }
-                glib::ControlFlow::Break
+            if write() {
+                let _ = reply.send(Ok(response.clone()));
+            } else if attempts >= SURFACE_WRITE_RETRY_ATTEMPTS {
+                let _ = reply.send(Err(BridgeError::conflict(
+                    "target surface is not ready for input; it starts once its tab is shown",
+                )));
             } else {
-                glib::ControlFlow::Continue
+                return glib::ControlFlow::Continue;
             }
+            glib::ControlFlow::Break
         },
     );
 }
@@ -4099,10 +4087,19 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                     serde_json::Value::String(request.source_surface_id.clone()),
                 );
             }
-            if let Some(command) = request.command {
-                send_add_response_after_command(pane_widget, surface_id, command, response, reply);
-            } else {
-                let _ = reply.send(Ok(response));
+            match (
+                request.command,
+                pane::exact_terminal_handle_for_surface(&pane_widget, &surface_id),
+            ) {
+                (Some(command), Some((_, handle))) => {
+                    write_when_ready(handle, command, true, response, reply)
+                }
+                (Some(_), None) => {
+                    let _ = reply.send(Err(BridgeError::not_found("added surface not found")));
+                }
+                (None, _) => {
+                    let _ = reply.send(Ok(response));
+                }
             }
         }
         ControlCommand::RunSurfaceCommand { request, reply } => {
@@ -4114,17 +4111,19 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                         return;
                     }
                 };
-            if let Err(error) = pane::run_command_in_terminal_tab(
+            let handle = match pane::owned_terminal_surface_handle(
                 &pane_widget,
                 &request.tab_id,
                 &request.source_surface_id,
                 &request.surface_id,
-                &request.command,
             ) {
-                let _ = reply.send(Err(terminal_tab_surface_error(error)));
-                return;
-            }
-            let _ = reply.send(Ok(serde_json::json!({
+                Ok(handle) => handle,
+                Err(error) => {
+                    let _ = reply.send(Err(terminal_tab_surface_error(error)));
+                    return;
+                }
+            };
+            let response = serde_json::json!({
                 "workspace_id": workspace_id.as_str(),
                 "workspace_ref": workspace_ref(&workspace_id),
                 "workspace": {"name": workspace_name.as_str(), "title": workspace_name.as_str()},
@@ -4133,7 +4132,8 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 "surface_id": request.surface_id.as_str(),
                 "surface_ref": surface_ref(&request.surface_id),
                 "ok": true,
-            })));
+            });
+            write_when_ready(handle, request.command, true, response, reply);
         }
         ControlCommand::CloseSurface { request, reply } => {
             let (workspace_id, workspace_name, pane_widget) =
@@ -4405,16 +4405,10 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 return;
             };
 
-            if !handle.send_text(&text) {
-                let _ = reply.send(Err(BridgeError::conflict(
-                    "target surface is not ready for input",
-                )));
-                return;
-            }
             if let Some(map) = payload.as_object_mut() {
                 map.insert("ok".to_string(), serde_json::Value::Bool(true));
             }
-            let _ = reply.send(Ok(payload));
+            write_when_ready(handle, text, false, payload, reply);
         }
         ControlCommand::ReadSurfaceText {
             target,

@@ -420,7 +420,6 @@ pub enum TerminalTabSurfaceError {
     SurfaceNotFound,
     SurfaceNotOwned,
     CannotCloseSource,
-    CommandNotWritable,
 }
 
 impl TerminalTabState {
@@ -707,19 +706,28 @@ impl TerminalTabState {
             return false;
         }
         let mut tree = self.inner.tree.borrow_mut();
+        let mut leaf_ids = Vec::new();
         let mut has_added_surfaces = false;
-        tree.for_each_leaf(|leaf| has_added_surfaces |= leaf.creator_surface_id.is_some());
+        tree.for_each_leaf(|leaf| {
+            leaf_ids.push(leaf.leaf_id.clone());
+            has_added_surfaces |= leaf.creator_surface_id.is_some();
+        });
         let removed = tree.remove_leaf(leaf_id);
         if removed {
             if has_added_surfaces {
                 tree.pack_columns(None);
             }
-            if tree
-                .find_leaf(&self.inner.active_leaf_id.borrow())
-                .is_none()
-            {
-                *self.inner.active_leaf_id.borrow_mut() = tree.first_leaf().leaf_id.clone();
+            // Closing the active surface focuses the one before it in layout
+            // order, or the one after it when the first surface closes.
+            let mut active = self.inner.active_leaf_id.borrow_mut();
+            if tree.find_leaf(&active).is_none() {
+                let index = leaf_ids.iter().position(|id| id == leaf_id);
+                *active = index
+                    .and_then(|i| leaf_ids.get(i.wrapping_sub(1)).or(leaf_ids.get(i + 1)))
+                    .cloned()
+                    .unwrap_or_else(|| tree.first_leaf().leaf_id.clone());
             }
+            drop(active);
             drop(tree);
             self.sync_split_dimming();
             self.trigger_rebuild(false);
@@ -2145,31 +2153,25 @@ pub fn add_surface_to_terminal_tab(
     })
 }
 
-pub fn run_command_in_terminal_tab(
+/// Returns the handle of `surface_id` if the caller's source surface created it.
+pub fn owned_terminal_surface_handle(
     pane_widget: &gtk::Widget,
     tab_id: &str,
     source_surface_id: &str,
     surface_id: &str,
-    command: &str,
-) -> Result<(), TerminalTabSurfaceError> {
+) -> Result<terminal::TerminalHandle, TerminalTabSurfaceError> {
     let (internals, terminal_tab_state, _) = terminal_tab_context(pane_widget, tab_id)?;
-    let handle = {
-        let tree = terminal_tab_state.inner.tree.borrow();
-        let source = tree
-            .find_surface(internals.pane_id, tab_id, source_surface_id)
-            .ok_or(TerminalTabSurfaceError::SourceNotFound)?;
-        let target = tree
-            .find_surface(internals.pane_id, tab_id, surface_id)
-            .ok_or(TerminalTabSurfaceError::SurfaceNotFound)?;
-        if target.creator_surface_id.as_deref() != Some(source.surface_id.as_str()) {
-            return Err(TerminalTabSurfaceError::SurfaceNotOwned);
-        }
-        target.handle.clone()
-    };
-    if !handle.send_text(command) || !handle.send_key("Return") {
-        return Err(TerminalTabSurfaceError::CommandNotWritable);
+    let tree = terminal_tab_state.inner.tree.borrow();
+    let source = tree
+        .find_surface(internals.pane_id, tab_id, source_surface_id)
+        .ok_or(TerminalTabSurfaceError::SourceNotFound)?;
+    let target = tree
+        .find_surface(internals.pane_id, tab_id, surface_id)
+        .ok_or(TerminalTabSurfaceError::SurfaceNotFound)?;
+    if target.creator_surface_id.as_deref() != Some(source.surface_id.as_str()) {
+        return Err(TerminalTabSurfaceError::SurfaceNotOwned);
     }
-    Ok(())
+    Ok(target.handle.clone())
 }
 
 pub fn close_surface_in_terminal_tab(
