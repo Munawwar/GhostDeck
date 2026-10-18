@@ -54,7 +54,7 @@ rg -n "PaneCallbacks \{"                           rust/ghostdeck-host-linux/src
 | Full-vocabulary control (no GUI) | `ghostdeck-core::Dispatcher` + `ControlState` |
 | Pane / surface UI state | `rust/ghostdeck-host-linux/src/window.rs` (`PaneCallbacks`) |
 | Agent-hook installers + templates | `hooks/` + `ghostdeck hooks setup` |
-| Packaging (AppImage / AUR) | `scripts/package.sh`, `scripts/appimage-libs.sh`, `PKGBUILD.template` |
+| Packaging (AppImage / deb / rpm) | `scripts/package.sh`, `scripts/appimage-libs.sh` |
 
 ## Pitfalls
 
