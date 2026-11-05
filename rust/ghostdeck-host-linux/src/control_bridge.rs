@@ -36,6 +36,7 @@ const METHODS: &[&str] = &[
     "surface.send_text",
     "surface.send_key",
     "notification.create",
+    "agent.hooks_active",
 ];
 
 const PARSE_ERROR_CODE: i64 = -32700;
@@ -171,6 +172,12 @@ pub enum ControlCommand {
         body: String,
         reply: mpsc::Sender<BridgeResult>,
     },
+    /// An agent in this tab reports through hooks, so its built-in generic
+    /// notifications are redundant.
+    MarkAgentHooksActive {
+        tab_id: String,
+        reply: mpsc::Sender<BridgeResult>,
+    },
 }
 
 impl ControlCommand {
@@ -193,7 +200,8 @@ impl ControlCommand {
             | Self::CloseWorkspace { reply, .. }
             | Self::SendText { reply, .. }
             | Self::SendKey { reply, .. }
-            | Self::CreateNotification { reply, .. } => {
+            | Self::CreateNotification { reply, .. }
+            | Self::MarkAgentHooksActive { reply, .. } => {
                 let _ = reply.send(result);
             }
         }
@@ -768,6 +776,16 @@ fn handle_method(
                 },
                 rx,
             )
+        }
+        "agent.hooks_active" => {
+            let Some(tab_id) = optional_string(params, &["tab_id"]) else {
+                return error_response(
+                    id,
+                    BridgeError::invalid_params("agent.hooks_active requires tab_id"),
+                );
+            };
+            let (reply, rx) = mpsc::channel();
+            (ControlCommand::MarkAgentHooksActive { tab_id, reply }, rx)
         }
         _ => {
             return error_response(

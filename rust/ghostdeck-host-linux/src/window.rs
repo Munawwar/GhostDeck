@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -153,6 +153,7 @@ pub(crate) struct AppState {
     save_queued: bool,
     workspace_dragging: Option<String>,
     desktop_notification_routes: HashMap<u32, DesktopNotificationRoute>,
+    agent_hooked_tabs: HashSet<String>,
     window_close: WindowCloseState,
     _theme_portal_signal: Option<gio::SignalSubscription>,
     _theme_gnome_settings: Option<gio::Settings>,
@@ -669,6 +670,8 @@ const GNOME_INTERFACE_SCHEMA: &str = "org.gnome.desktop.interface";
 const GNOME_COLOR_SCHEME_KEY: &str = "color-scheme";
 const DESKTOP_NOTIFICATION_DBUS_TIMEOUT_MS: i32 = 1_000;
 const DESKTOP_NOTIFICATION_EXPIRE_TIMEOUT_MS: i32 = 10_000;
+/// Title Claude Code gives its built-in notifications, which carry fixed text.
+const CLAUDE_BUILTIN_NOTIFICATION_TITLE: &str = "Claude Code";
 const PORTAL_THEME_READ_TIMEOUT_MS: i32 = 500;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1544,6 +1547,7 @@ pub fn build_window(app: &adw::Application, app_started_at: i64) {
         save_queued: false,
         workspace_dragging: None,
         desktop_notification_routes: HashMap::new(),
+        agent_hooked_tabs: HashSet::new(),
         window_close: WindowCloseState::default(),
         _theme_portal_signal: None,
         _theme_gnome_settings: None,
@@ -1720,6 +1724,62 @@ pub fn build_window(app: &adw::Application, app_started_at: i64) {
     crate::control_bridge::start(dispatch_control_command);
 
     window.present();
+    offer_agent_setup(&state);
+}
+
+/// One-time offer to run the CLI's hook and skill installers. They edit agent
+/// configs in the user's home, so they only run after an explicit yes.
+fn offer_agent_setup(state: &State) {
+    if state.borrow().config.borrow().agent_setup_prompted {
+        return;
+    }
+    let window = state.borrow().window.clone();
+    // Dev builds keep the CLI beside the host; packages put it in ../../bin.
+    let Some(cli) = std::env::current_exe().ok().and_then(|exe| {
+        let dir = exe.parent()?.to_path_buf();
+        [dir.join("ghostdeck-cli"), dir.join("../../bin/ghostdeck")]
+            .into_iter()
+            .find(|path| path.is_file())
+    }) else {
+        return;
+    };
+
+    let dialog = gtk::AlertDialog::builder()
+        .modal(true)
+        .message("Set up agent integrations?")
+        .detail(
+            "Runs `ghostdeck hooks setup` and `ghostdeck skill setup`. This edits agent user \
+             settings to add session restore for Claude Code, Codex and Gemini CLI and better \
+             Claude Code notifications, and installs the GhostDeck skill for Codex. Restart \
+             running agents to apply it.",
+        )
+        .build();
+    dialog.set_buttons(&["Not Now", "Set Up"]);
+    dialog.set_default_button(1);
+    dialog.set_cancel_button(0);
+
+    let state = state.clone();
+    dialog.choose(Some(&window), None::<&gio::Cancellable>, move |response| {
+        let mut config = state.borrow().config.borrow().clone();
+        config.agent_setup_prompted = true;
+        let saved = app_config::save(&config);
+        if saved.is_ok() {
+            state.borrow().config.borrow_mut().agent_setup_prompted = true;
+        }
+        let mut errors: Vec<String> = saved.err().into_iter().collect();
+        if response == Ok(1) {
+            for args in [["hooks", "setup"], ["skill", "setup"]] {
+                match std::process::Command::new(&cli).args(args).output() {
+                    Ok(output) if output.status.success() => {}
+                    Ok(output) => errors.push(String::from_utf8_lossy(&output.stderr).into_owned()),
+                    Err(err) => errors.push(err.to_string()),
+                }
+            }
+        }
+        if !errors.is_empty() {
+            show_runtime_error(&state, "Agent setup failed", errors.join("\n").trim());
+        }
+    });
 }
 
 fn build_window_css((r, g, b): (u8, u8, u8), background_opacity: f64) -> String {
@@ -4551,6 +4611,7 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 (false, false) => format!("{subtitle} — {body}"),
             };
             let message = workspace_notification_message(&title, &combined_body);
+            let has_origin = pane_id.is_some() && tab_id.is_some();
             let tab_target = {
                 let s = state.borrow();
                 pane_id.zip(tab_id).and_then(|(pane_id, tab_id)| {
@@ -4568,13 +4629,17 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 let s = state.borrow();
                 pane::active_tab_target(&s.workspaces[index].root)
             });
+            let source_focused = has_origin
+                && find_leaf_focused_pane(state)
+                    .and_then(|(_, focused_pane)| pane::focused_tab_target(&focused_pane))
+                    .is_some_and(|focused| tab_target.as_ref() == Some(&focused));
             let target = DesktopNotificationTarget {
                 workspace_id: ws_id.clone(),
                 pane_id: tab_target.as_ref().map(|(pane_id, _)| *pane_id),
                 tab_id: tab_target.map(|(_, tab_id)| tab_id),
             };
             if let Some(request) =
-                mark_workspace_unread_with_message(state, &ws_id, &message, false, target)
+                mark_workspace_unread_with_message(state, &ws_id, &message, source_focused, target)
             {
                 show_desktop_notification(state, request);
             }
@@ -4588,6 +4653,10 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 "body": body,
             });
             let _ = reply.send(Ok(payload));
+        }
+        ControlCommand::MarkAgentHooksActive { tab_id, reply } => {
+            state.borrow_mut().agent_hooked_tabs.insert(tab_id);
+            let _ = reply.send(Ok(serde_json::json!({ "ok": true })));
         }
     }
 }
@@ -4701,13 +4770,20 @@ pub(crate) fn create_pane_for_workspace(
                 let state = state_for_desktop_notification.clone();
                 let ws_id = ws_id_desktop_notification.clone();
                 let tab_id = tab_id.to_string();
-                let target = DesktopNotificationTarget {
-                    workspace_id: ws_id.clone(),
-                    pane_id: Some(pane_id),
-                    tab_id: Some(tab_id),
-                };
-                let message = workspace_notification_message(title, body);
+                let is_claude_builtin = title == CLAUDE_BUILTIN_NOTIFICATION_TITLE;
+                let mut message = workspace_notification_message(title, body);
+                if is_claude_builtin {
+                    message.push_str(" (Run `ghostdeck hooks setup` for better notifications)");
+                }
                 glib::idle_add_local_once(move || {
+                    if is_claude_builtin && state.borrow().agent_hooked_tabs.contains(&tab_id) {
+                        return;
+                    }
+                    let target = DesktopNotificationTarget {
+                        workspace_id: ws_id.clone(),
+                        pane_id: Some(pane_id),
+                        tab_id: Some(tab_id),
+                    };
                     if let Some(request) = mark_workspace_unread_with_message(
                         &state,
                         &ws_id,

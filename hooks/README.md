@@ -1,7 +1,9 @@
 # GhostDeck Agent Hooks
 
 These templates wire supported coding-agent hook systems into GhostDeck session
-restore tracking. They are intentionally limited to Codex, Claude Code, and
+restore tracking and desktop notifications. In a tab where Claude Code's hooks
+are active, GhostDeck replaces its generic built-in notification with one showing
+Claude's last message, without changing Claude's own settings. They are intentionally limited to Codex, Claude Code, and
 Gemini CLI until the OpenCode hook path is ready.
 
 The preferred install path is the CLI installer:

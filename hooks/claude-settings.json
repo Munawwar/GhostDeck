@@ -44,7 +44,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ \"${GHOSTDECK_CLAUDE_HOOKS_DISABLED:-}\" != \"1\" ] && ghostdeck --json hooks claude stop || echo '{\"continue\":true,\"suppressOutput\":false}'",
+            "command": "[ \"${GHOSTDECK_CLAUDE_HOOKS_DISABLED:-}\" != \"1\" ] && ghostdeck --json hooks claude notification || echo '{\"continue\":true,\"suppressOutput\":false}'",
             "statusMessage": "GhostDeck Claude session restore",
             "timeout": 5
           }

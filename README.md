@@ -114,7 +114,8 @@ with no flags needed from inside the agent's own terminal.
 # Fire a libadwaita toast + sidebar unread badge from any agent
 ghostdeck notify --subtitle "needs review" --body "blocked on auth choice" "Input needed"
 
-# Install GhostDeck session-restore hooks for supported agents
+# Install GhostDeck session-restore and notification hooks for supported agents
+# (GhostDeck also offers this, and `skill setup`, once on first launch)
 ghostdeck hooks setup
 
 # Install GhostDeck's compact agent skill for Codex

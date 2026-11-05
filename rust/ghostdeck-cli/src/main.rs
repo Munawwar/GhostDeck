@@ -873,87 +873,94 @@ async fn run_agent_hook(
     // Explicit --event or positional event beats the JSON field.
     let event = parse_hook_event(args, &payload);
 
-    // Build a human-friendly title + body depending on event + agent.
-    let agent_label = agent.label();
     persist_agent_hook_session(agent, args, &payload, &event)?;
-    let (title, body) = match event.as_str() {
-        "Notification" => (
-            format!("{agent_label} needs you"),
-            hook_str(&payload, &["message", "notification"])
-                .unwrap_or("waiting for input")
-                .to_owned(),
-        ),
-        "Stop" | "SubagentStop" => (
-            format!("{agent_label} finished"),
-            hook_str(&payload, &["message", "reason"])
-                .unwrap_or("task complete")
-                .to_owned(),
-        ),
-        "SessionStart" => (
-            format!("{agent_label} session started"),
-            hook_str(&payload, &["cwd", "source"])
-                .unwrap_or("")
-                .to_owned(),
-        ),
-        "SessionEnd" => (
-            format!("{agent_label} session ended"),
-            hook_str(&payload, &["reason"]).unwrap_or("").to_owned(),
-        ),
-        "PreToolUse" | "PostToolUse" => (
-            format!(
-                "{agent_label}: {}",
-                hook_str(&payload, &["tool_name"]).unwrap_or("tool")
-            ),
-            hook_str(&payload, &["tool_input", "summary"])
-                .unwrap_or("")
-                .to_owned(),
-        ),
-        "UserPromptSubmit" => (
-            format!("{agent_label}: new prompt"),
-            hook_str(&payload, &["prompt"])
-                .unwrap_or("")
-                .chars()
-                .take(120)
-                .collect(),
-        ),
-        other => (
-            format!("{agent_label}: {other}"),
-            hook_str(&payload, &["message", "summary"])
-                .unwrap_or("")
-                .to_owned(),
-        ),
-    };
-
-    let subtitle = hook_str(&payload, &["session_id"])
-        .map(|s| {
-            // Show only a short prefix of the session id to keep sidebar tidy.
-            s.chars().take(8).collect::<String>()
-        })
-        .unwrap_or_default();
-
-    let workspace = parse_opt(args, "--workspace")
-        .or_else(|| ghostdeck_env_value("GHOSTDECK_WORKSPACE_ID"))
-        .filter(|s| !s.is_empty());
 
     let mut params = Map::new();
-    params.insert("title".to_string(), Value::String(title));
-    if !subtitle.is_empty() {
-        params.insert("subtitle".to_string(), Value::String(subtitle));
-    }
-    if !body.is_empty() {
-        params.insert("body".to_string(), Value::String(body));
-    }
     add_notification_origin(&mut params);
+    // Tells the host this tab's Claude reports through hooks, so it can drop
+    // Claude's built-in generic notification without touching Claude's config.
+    if agent == agent_hooks::AgentKind::Claude
+        && canonical_hook_event_name(&event) == Some("SessionStart")
+    {
+        let _ = client
+            .call("agent.hooks_active", Value::Object(params.clone()))
+            .await;
+    }
 
-    let _ = call_in_workspace_scope(
-        client,
-        workspace,
-        "notification.create",
-        Value::Object(params),
-    )
-    .await;
+    if let Some((title, body)) = agent_hook_notification(agent, &event, &payload) {
+        params.insert("title".to_string(), Value::String(title));
+        if !body.is_empty() {
+            params.insert("body".to_string(), Value::String(body));
+        }
+        let workspace = parse_opt(args, "--workspace")
+            .or_else(|| ghostdeck_env_value("GHOSTDECK_WORKSPACE_ID"))
+            .filter(|s| !s.is_empty());
+        let _ = call_in_workspace_scope(
+            client,
+            workspace,
+            "notification.create",
+            Value::Object(params),
+        )
+        .await;
+    }
 
     Ok(agent_hook_output(&event, &payload))
+}
+
+/// Title + body to show for a hook event, or `None` when it should stay silent.
+fn agent_hook_notification(
+    agent: agent_hooks::AgentKind,
+    event: &str,
+    payload: &Value,
+) -> Option<(String, String)> {
+    let label = agent.label();
+    // Codex already sends a descriptive notification of its own.
+    if agent == agent_hooks::AgentKind::Codex {
+        return None;
+    }
+    match event {
+        // These only track sessions.
+        "SessionStart" | "session-start" | "UserPromptSubmit" | "prompt-submit" | "SessionEnd"
+        | "session-end" | "Cleanup" | "cleanup" | "restore-exit" => None,
+        // The Stop notification already covered this turn.
+        "Notification" | "notification"
+            if hook_str(payload, &["notification_type"]) == Some("idle_prompt") =>
+        {
+            None
+        }
+        "Notification" | "notification" => Some((
+            format!("{label} needs you"),
+            hook_str(payload, &["message", "notification"])
+                .unwrap_or("waiting for input")
+                .to_owned(),
+        )),
+        "Stop" | "stop" | "SubagentStop" => Some((
+            format!("{label} finished"),
+            hook_str(payload, &["last_assistant_message", "message", "reason"])
+                .unwrap_or("task complete")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(200)
+                .collect(),
+        )),
+        "PreToolUse" | "PostToolUse" => Some((
+            format!(
+                "{label}: {}",
+                hook_str(payload, &["tool_name"]).unwrap_or("tool")
+            ),
+            hook_str(payload, &["tool_input", "summary"])
+                .unwrap_or("")
+                .to_owned(),
+        )),
+        other => Some((
+            format!("{label}: {other}"),
+            hook_str(payload, &["message", "summary"])
+                .unwrap_or("")
+                .to_owned(),
+        )),
+    }
 }
 
 fn agent_hook_output(event: &str, payload: &Value) -> Value {
@@ -985,7 +992,7 @@ fn canonical_hook_event_name(event: &str) -> Option<&'static str> {
     match event {
         "SessionStart" | "session-start" => Some("SessionStart"),
         "UserPromptSubmit" | "prompt-submit" => Some("UserPromptSubmit"),
-        "Stop" | "stop" | "Notification" => Some("Stop"),
+        "Stop" | "stop" | "Notification" | "notification" => Some("Stop"),
         "SessionEnd" | "session-end" => None,
         "Cleanup" | "cleanup" | "restore-exit" => None,
         _ => None,
@@ -1438,7 +1445,7 @@ fn install_hook_target(agent: agent_hooks::AgentKind) -> Result<()> {
                 ("SessionStart", "session-start"),
                 ("UserPromptSubmit", "prompt-submit"),
                 ("Stop", "stop"),
-                ("Notification", "stop"),
+                ("Notification", "notification"),
                 ("SessionEnd", "session-end"),
             ],
         ),
@@ -1569,8 +1576,9 @@ fn install_json_hooks(
 
 fn hook_timeout(agent: agent_hooks::AgentKind) -> u64 {
     match agent {
-        agent_hooks::AgentKind::Claude => 5,
-        agent_hooks::AgentKind::Codex | agent_hooks::AgentKind::Gemini => 5000,
+        // Claude and Codex take seconds; Gemini takes milliseconds.
+        agent_hooks::AgentKind::Claude | agent_hooks::AgentKind::Codex => 5,
+        agent_hooks::AgentKind::Gemini => 5000,
         agent_hooks::AgentKind::OpenCode => 0,
     }
 }
@@ -3185,6 +3193,36 @@ mod cli_arg_tests {
     }
 
     #[test]
+    fn hook_notifications_only_fire_for_turn_events_with_useful_text() {
+        use agent_hooks::AgentKind::{Claude, Codex};
+        let stop = json!({ "last_assistant_message": "Fixed  the\nbug" });
+        assert_eq!(
+            agent_hook_notification(Claude, "stop", &stop),
+            Some(("Claude finished".to_string(), "Fixed the bug".to_string()))
+        );
+        let long = json!({ "last_assistant_message": "x".repeat(500) });
+        let (_, body) = agent_hook_notification(Claude, "stop", &long).expect("notification");
+        assert_eq!(body.len(), 200);
+        assert_eq!(
+            agent_hook_notification(
+                Claude,
+                "notification",
+                &json!({ "message": "Claude needs your permission to use Bash" })
+            ),
+            Some((
+                "Claude needs you".to_string(),
+                "Claude needs your permission to use Bash".to_string()
+            ))
+        );
+        let idle = json!({ "notification_type": "idle_prompt", "message": "waiting" });
+        assert_eq!(agent_hook_notification(Claude, "notification", &idle), None);
+        for event in ["session-start", "prompt-submit", "session-end", "cleanup"] {
+            assert_eq!(agent_hook_notification(Claude, event, &json!({})), None);
+        }
+        assert_eq!(agent_hook_notification(Codex, "stop", &stop), None);
+    }
+
+    #[test]
     fn opencode_plugin_embeds_installer_cli_command() {
         let source =
             opencode_plugin_source_with_command("/tmp/ghostdeck-cli").expect("plugin source");
@@ -3279,7 +3317,7 @@ mod cli_arg_tests {
             serde_json::from_slice(&fs::read(&path).expect("read hooks")).expect("json");
         let entry = &root["hooks"]["SessionStart"][0];
         assert!(entry.get("matcher").is_none());
-        assert_eq!(entry["hooks"][0]["timeout"], 5000);
+        assert_eq!(entry["hooks"][0]["timeout"], 5);
         assert!(entry["hooks"][0]["command"]
             .as_str()
             .expect("command")

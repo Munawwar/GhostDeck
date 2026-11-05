@@ -46,6 +46,8 @@ pub struct AppConfig {
     pub notifications: NotificationConfig,
     #[serde(skip)]
     pub font_size: Option<f32>,
+    #[serde(skip)]
+    pub agent_setup_prompted: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -269,6 +271,10 @@ fn parse_app_config_value(root: &Value) -> AppConfig {
             sound: notification_sound,
         },
         font_size,
+        agent_setup_prompted: root
+            .get("agent_setup_prompted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     }
 }
 
@@ -301,6 +307,11 @@ fn save_to_path(path: &Path, config: &AppConfig) -> Result<(), String> {
             "enabled": config.notifications.enabled,
             "sound": config.notifications.sound.as_str(),
         }),
+    );
+
+    root.insert(
+        "agent_setup_prompted".to_string(),
+        json!(config.agent_setup_prompted),
     );
 
     if let Some(size) = config.font_size {
