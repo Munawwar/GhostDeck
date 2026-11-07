@@ -137,15 +137,6 @@ pub enum RestorableAgentKind {
 }
 
 impl RestorableAgentKind {
-    pub fn resume_command(
-        self,
-        session_id: &str,
-        launch_command: Option<&AgentLaunchCommandState>,
-        cwd: Option<&str>,
-    ) -> Option<String> {
-        build_resume_command(self, session_id, launch_command, cwd)
-    }
-
     fn fallback_executable(self) -> &'static str {
         match self {
             Self::Claude => "claude",
@@ -191,15 +182,18 @@ pub struct RestorableAgentState {
 }
 
 impl RestorableAgentState {
-    pub fn resume_command(&self) -> Option<String> {
+    /// The command to type into a fresh shell, and the directory to start it in.
+    pub fn resume_command(&self) -> Option<(String, Option<String>)> {
         if !self.restore_on_startup {
             return None;
         }
-        self.kind.resume_command(
-            &self.session_id,
-            self.launch_command.as_ref(),
-            self.cwd.as_deref(),
-        )
+        let launch = self.launch_command.as_ref();
+        let cwd = self.cwd.as_deref().and_then(normalized_str).or_else(|| {
+            launch
+                .and_then(|launch| launch.cwd.as_deref())
+                .and_then(normalized_str)
+        });
+        build_resume_command(self.kind, &self.session_id, launch).map(|command| (command, cwd))
     }
 }
 
@@ -677,6 +671,8 @@ impl AppSessionState {
 
 #[derive(serde::Deserialize)]
 struct HookSessionRecord {
+    #[serde(default)]
+    exited_at: Option<f64>,
     session_id: String,
     workspace_id: String,
     surface_id: String,
@@ -703,6 +699,59 @@ pub struct RestorableAgentIndex {
     by_tab_id: HashMap<String, IndexedAgent>,
 }
 
+fn hook_session_files(
+    dir: &Path,
+) -> impl Iterator<Item = (RestorableAgentKind, HookSessionFile)> + '_ {
+    [
+        RestorableAgentKind::Claude,
+        RestorableAgentKind::Codex,
+        RestorableAgentKind::OpenCode,
+        RestorableAgentKind::Gemini,
+    ]
+    .into_iter()
+    .filter_map(|kind| {
+        let path = dir.join(format!("{}-hook-sessions.json", kind.store_name()));
+        let raw = fs::read_to_string(path).ok()?;
+        Some((kind, serde_json::from_str(&raw).ok()?))
+    })
+}
+
+/// Called when a command finishes in a terminal: if the user had quit the
+/// agent there before that command started, they moved on, so stop restoring
+/// it. The CLI owns the hook store, so ask it to drop the record.
+pub fn forget_exited_agent(workspace_id: &str, surface_id: &str, command_started_at: f64) {
+    for (kind, file) in hook_session_files(&agent_hook_state_dir()) {
+        for record in file.sessions.values() {
+            if record.workspace_id != workspace_id
+                || record.surface_id != surface_id
+                || !record.exited_at.is_some_and(|at| at < command_started_at)
+            {
+                continue;
+            }
+            let payload = serde_json::json!({
+                "session_id": record.session_id,
+                "hook_event_name": "Cleanup",
+            });
+            let child = std::process::Command::new(ghostdeck_cli_executable())
+                .args(["--json", "hooks", kind.store_name(), "cleanup"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            match child {
+                Ok(mut child) => {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        let _ =
+                            std::io::Write::write_all(&mut stdin, payload.to_string().as_bytes());
+                    }
+                    std::thread::spawn(move || child.wait());
+                }
+                Err(error) => eprintln!("ghostdeck: failed to forget exited agent: {error}"),
+            }
+        }
+    }
+}
+
 impl RestorableAgentIndex {
     pub fn load() -> Self {
         Self::load_from_dir(&agent_hook_state_dir())
@@ -710,19 +759,7 @@ impl RestorableAgentIndex {
 
     pub fn load_from_dir(dir: &Path) -> Self {
         let mut index = Self::default();
-        for (kind, file_name) in [
-            (RestorableAgentKind::Claude, "claude-hook-sessions.json"),
-            (RestorableAgentKind::Codex, "codex-hook-sessions.json"),
-            (RestorableAgentKind::OpenCode, "opencode-hook-sessions.json"),
-            (RestorableAgentKind::Gemini, "gemini-hook-sessions.json"),
-        ] {
-            let path = dir.join(file_name);
-            let Ok(raw) = fs::read_to_string(&path) else {
-                continue;
-            };
-            let Ok(file) = serde_json::from_str::<HookSessionFile>(&raw) else {
-                continue;
-            };
+        for (kind, file) in hook_session_files(dir) {
             for record in file.sessions.values() {
                 let Some(session_id) = normalized_str(&record.session_id) else {
                     continue;
@@ -847,6 +884,8 @@ pub fn attach_restorable_agents_to_layout(
                 } = &mut tab.content
                 {
                     if let Some(tree) = tree.as_deref_mut() {
+                        // The hook store is the single source of truth: a
+                        // session the user moved on from must not linger here.
                         tree.for_each_leaf_mut(&mut |leaf| {
                             if leaf
                                 .agent
@@ -855,14 +894,12 @@ pub fn attach_restorable_agents_to_layout(
                             {
                                 return;
                             }
-                            if let Some(restored_agent) = index.agent_for_surface(
+                            leaf.agent = index.agent_for_surface(
                                 workspace_id,
                                 pane.pane_id,
                                 &tab.id,
                                 leaf.leaf_id.as_deref(),
-                            ) {
-                                leaf.agent = Some(restored_agent);
-                            }
+                            );
                         });
                         if let Some(active_leaf) = tree.active_leaf(active_leaf_id.as_deref()) {
                             *agent = active_leaf.agent.clone();
@@ -874,11 +911,7 @@ pub fn attach_restorable_agents_to_layout(
                         {
                             continue;
                         }
-                        if let Some(restored_agent) =
-                            index.agent_for_surface(workspace_id, pane.pane_id, &tab.id, None)
-                        {
-                            *agent = Some(restored_agent);
-                        }
+                        *agent = index.agent_for_surface(workspace_id, pane.pane_id, &tab.id, None);
                     }
                 }
             }
@@ -946,7 +979,6 @@ fn build_resume_command(
     kind: RestorableAgentKind,
     session_id: &str,
     launch: Option<&AgentLaunchCommandState>,
-    cwd: Option<&str>,
 ) -> Option<String> {
     let session_id = normalized_str(session_id)?;
     let fallback = kind.fallback_executable().to_string();
@@ -983,39 +1015,13 @@ fn build_resume_command(
         }
     }
 
-    let command = parts
-        .iter()
-        .map(|part| shell_single_quote(part))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let cwd = cwd.and_then(normalized_str).or_else(|| {
-        launch
-            .and_then(|launch| launch.cwd.as_deref())
-            .and_then(normalized_str)
-    });
-    let run_command = match cwd {
-        Some(cwd) => format!("cd {} && {command}", shell_single_quote(&cwd)),
-        None => command,
-    };
-    Some(wrap_restored_agent_command(kind, &session_id, &run_command))
-}
-
-fn wrap_restored_agent_command(
-    kind: RestorableAgentKind,
-    session_id: &str,
-    run_command: &str,
-) -> String {
-    let payload = format!(
-        "{{\"session_id\":{},\"hook_event_name\":\"Cleanup\"}}",
-        serde_json::to_string(session_id).unwrap_or_else(|_| "\"\"".to_string())
-    );
-    let cleanup = format!(
-        "printf %s {} | {} --json hooks {} cleanup >/dev/null 2>&1 || true",
-        shell_single_quote(&payload),
-        shell_single_quote(&ghostdeck_cli_executable()),
-        kind.store_name()
-    );
-    format!("{run_command}; ghostdeck_agent_status=$?; {cleanup}; exec \"${{SHELL:-/bin/sh}}\" -l")
+    Some(
+        parts
+            .iter()
+            .map(|part| shell_word(part))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 
 fn ghostdeck_cli_executable() -> String {
@@ -1157,7 +1163,16 @@ fn normalized_str(value: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-fn shell_single_quote(value: &str) -> String {
+/// Quote only when needed, so the typed command also parses in shells with
+/// different quoting rules (fish, nushell).
+fn shell_word(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-./:=@%+,".contains(c))
+    {
+        return value.to_string();
+    }
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
@@ -1534,9 +1549,13 @@ mod tests {
                 let agent = agent.as_ref().expect("agent metadata");
                 assert_eq!(agent.kind, RestorableAgentKind::Codex);
                 assert_eq!(agent.session_id, "session-a");
-                let command = agent.resume_command().expect("resume command");
-                assert!(command.contains("cd '/tmp/project' && 'codex' 'resume' 'session-a'"));
-                assert!(command.contains("hooks codex cleanup"));
+                assert_eq!(
+                    agent.resume_command(),
+                    Some((
+                        "codex resume session-a".to_string(),
+                        Some("/tmp/project".to_string())
+                    ))
+                );
             }
             other => panic!("expected terminal tab, got {other:?}"),
         }
@@ -1727,7 +1746,7 @@ mod tests {
     }
 
     #[test]
-    fn hook_merge_preserves_persisted_agent_when_index_misses() {
+    fn hook_merge_drops_persisted_agent_when_index_misses() {
         let index = RestorableAgentIndex::default();
         let mut layout = LayoutNodeState::Pane(PaneState {
             pane_id: Some(42),
@@ -1769,10 +1788,8 @@ mod tests {
         };
         match &pane.tabs[0].content {
             TabContentState::Terminal { agent, .. } => {
-                assert_eq!(
-                    agent.as_ref().map(|agent| agent.session_id.as_str()),
-                    Some("persisted-session")
-                );
+                // The hook store forgot the session (the user moved on).
+                assert_eq!(agent, &None);
             }
             other => panic!("expected terminal tab, got {other:?}"),
         }
@@ -2127,14 +2144,18 @@ mod tests {
     }
 
     #[test]
-    fn restorable_agent_resume_command_runs_from_cwd() {
+    fn restorable_agent_resume_command_quotes_only_when_needed() {
         let agent = RestorableAgentState {
             kind: RestorableAgentKind::Codex,
             session_id: "sess-123".to_string(),
             cwd: Some("/tmp/project".to_string()),
             launch_command: Some(AgentLaunchCommandState {
                 executable: "codex".to_string(),
-                arguments: vec!["codex".to_string()],
+                arguments: vec![
+                    "codex".to_string(),
+                    "--profile".to_string(),
+                    "it's here".to_string(),
+                ],
                 cwd: Some("/tmp/project".to_string()),
                 environment: Default::default(),
                 captured_at: Some(12.0),
@@ -2142,10 +2163,13 @@ mod tests {
             restore_on_startup: true,
         };
 
-        let command = agent.resume_command().expect("resume command");
-        assert!(command.contains("cd '/tmp/project' && 'codex' 'resume' 'sess-123'"));
-        assert!(command.contains("hooks codex cleanup"));
-        assert!(command.contains("exec \"${SHELL:-/bin/sh}\" -l"));
+        assert_eq!(
+            agent.resume_command(),
+            Some((
+                "codex resume --profile 'it'\\''s here' sess-123".to_string(),
+                Some("/tmp/project".to_string())
+            ))
+        );
     }
 
     #[test]

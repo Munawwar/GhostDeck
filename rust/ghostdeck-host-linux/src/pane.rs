@@ -1925,20 +1925,33 @@ fn create_terminal_leaf(
             hover_focus
         })
     };
-    let startup_command = agent.as_ref().and_then(|agent| agent.resume_command());
-    if let Some(command) = startup_command.as_deref() {
-        eprintln!(
-            "ghostdeck: restoring agent terminal surface={} command={}",
-            terminal_surface_id(internals.pane_id, tab_id, leaf_id),
-            command
-        );
+    let resume = agent.as_ref().and_then(|agent| agent.resume_command());
+    if let Some((command, _)) = &resume {
+        eprintln!("ghostdeck: restoring agent terminal surface={surface_id} command={command}");
     }
+    let (initial_command, resume_cwd) = resume.unzip();
+    let on_command_finished: Rc<terminal::CommandFinishedCallback> = {
+        let callbacks = internals.callbacks.clone();
+        let pane_widget = pane_widget.clone();
+        let surface_id = surface_id.clone();
+        Rc::new(move |duration| {
+            let Some(workspace_id) = (callbacks.workspace_for_pane)(&pane_widget) else {
+                return;
+            };
+            let started_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|now| now.as_secs_f64() - duration)
+                .unwrap_or_default();
+            layout_state::forget_exited_agent(&workspace_id, &surface_id, started_at);
+        })
+    };
     let term = terminal::create_terminal(
-        working_directory,
+        resume_cwd.flatten().as_deref().or(working_directory),
         terminal::TerminalOptions {
             hover_focus,
             saved_font_size: (internals.callbacks.current_config)().borrow().font_size,
-            startup_command,
+            initial_command,
+            on_command_finished: Some(on_command_finished),
             extra_env,
         },
         placeholder_terminal_callbacks(),

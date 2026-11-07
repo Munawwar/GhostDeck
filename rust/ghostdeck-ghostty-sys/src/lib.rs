@@ -88,6 +88,7 @@ pub const GHOSTTY_ACTION_CLOSE_WINDOW: c_int = 49;
 pub const GHOSTTY_ACTION_RING_BELL: c_int = 50;
 pub const GHOSTTY_ACTION_OPEN_URL: c_int = 54;
 pub const GHOSTTY_ACTION_SHOW_CHILD_EXITED: c_int = 55;
+pub const GHOSTTY_ACTION_COMMAND_FINISHED: c_int = 58;
 
 // Key codes (W3C UIEvents, subset)
 pub const GHOSTTY_KEY_UNIDENTIFIED: c_int = 0;
@@ -334,6 +335,7 @@ pub union ghostty_action_u {
     pub pwd: ghostty_action_pwd_s,
     pub open_url: ghostty_action_open_url_s,
     pub child_exited: ghostty_surface_message_childexited_s,
+    pub command_finished: ghostty_action_command_finished_s,
     _padding: [u8; 24],
 }
 
@@ -356,6 +358,14 @@ pub struct ghostty_action_desktop_notification_s {
 #[derive(Clone, Copy)]
 pub struct ghostty_action_set_title_s {
     pub title: *const c_char,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ghostty_action_command_finished_s {
+    pub exit_code: i16,
+    /// Nanoseconds the command ran for.
+    pub duration: u64,
 }
 
 #[repr(C)]
@@ -460,6 +470,7 @@ extern "C" {
     pub fn ghostty_surface_set_size(surface: ghostty_surface_t, width: u32, height: u32);
     pub fn ghostty_surface_size(surface: ghostty_surface_t) -> ghostty_surface_size_s;
     pub fn ghostty_surface_process_exited(surface: ghostty_surface_t) -> bool;
+    pub fn ghostty_surface_needs_confirm_quit(surface: ghostty_surface_t) -> bool;
     pub fn ghostty_surface_key(surface: ghostty_surface_t, event: ghostty_input_key_s) -> bool;
     pub fn ghostty_surface_text(surface: ghostty_surface_t, text: *const c_char, len: usize);
     pub fn ghostty_surface_preedit(surface: ghostty_surface_t, text: *const c_char, len: usize);

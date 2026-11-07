@@ -78,6 +78,10 @@ pub(crate) struct AgentHookSessionRecord {
     #[serde(default)]
     pub(crate) launch_command: Option<AgentLaunchCommandRecord>,
     pub(crate) updated_at: f64,
+    /// Set when the user quit the agent; the host forgets the session once
+    /// another command runs in that terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) exited_at: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -487,6 +491,7 @@ mod tests {
                 captured_at: 10.0,
             }),
             updated_at: 11.0,
+            exited_at: None,
         };
 
         store.upsert(record.clone()).expect("upsert");

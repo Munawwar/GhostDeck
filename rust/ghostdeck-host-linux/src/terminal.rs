@@ -49,6 +49,7 @@ type DesktopNotificationCallback = dyn Fn(&str, &str, bool);
 type BellCallback = dyn Fn(bool);
 type OpenUrlCallback = dyn Fn(&str, bool);
 type VoidCallback = dyn Fn();
+pub type CommandFinishedCallback = dyn Fn(f64);
 
 pub(crate) struct HoverFocusGuard;
 
@@ -76,6 +77,7 @@ struct SurfaceEntry {
     on_bell: Option<Box<BellCallback>>,
     on_open_url: Option<Box<OpenUrlCallback>>,
     on_close: Option<Box<VoidCallback>>,
+    on_command_finished: Option<Rc<CommandFinishedCallback>>,
     open_url_external: Rc<Cell<bool>>,
     clipboard_context: *mut ClipboardContext,
 }
@@ -870,6 +872,21 @@ unsafe extern "C" fn ghostty_action_cb(
             }
             true
         }
+        GHOSTTY_ACTION_COMMAND_FINISHED => {
+            if target.tag == GHOSTTY_TARGET_SURFACE {
+                let surface_key = unsafe { target.target.surface } as usize;
+                let duration = unsafe { action.action.command_finished.duration } as f64 / 1e9;
+                let cb = SURFACE_MAP.with(|map| {
+                    map.borrow()
+                        .get(&surface_key)
+                        .and_then(|entry| entry.on_command_finished.clone())
+                });
+                if let Some(cb) = cb {
+                    cb(duration);
+                }
+            }
+            true
+        }
         GHOSTTY_ACTION_SHOW_CHILD_EXITED => {
             if target.tag == GHOSTTY_TARGET_SURFACE {
                 let surface_key = unsafe { target.target.surface } as usize;
@@ -1149,7 +1166,11 @@ pub struct TerminalCallbacks {
 pub struct TerminalOptions {
     pub hover_focus: Rc<dyn Fn() -> bool>,
     pub saved_font_size: Option<f32>,
-    pub startup_command: Option<String>,
+    /// Typed into the shell once it shows its first prompt (needs Ghostty's
+    /// shell integration), so restored agents run like any other command.
+    pub initial_command: Option<String>,
+    /// Called with the duration (seconds) of each command the shell finishes.
+    pub on_command_finished: Option<Rc<CommandFinishedCallback>>,
     /// Extra environment variables to expose to the spawned shell
     /// (e.g. `GHOSTDECK_WORKSPACE_ID`, `GHOSTDECK_SURFACE_ID`, `GHOSTDECK_PANE_ID`, `GHOSTDECK_SOCKET`).
     ///
@@ -1165,7 +1186,8 @@ impl Default for TerminalOptions {
         Self {
             hover_focus: Rc::new(|| false),
             saved_font_size: None,
-            startup_command: None,
+            initial_command: None,
+            on_command_finished: None,
             extra_env: Vec::new(),
         }
     }
@@ -1218,7 +1240,8 @@ pub fn create_terminal(
     gl_area.set_can_focus(true);
     let wd = working_directory.map(|s| s.to_string());
     let saved_font_size = options.saved_font_size;
-    let startup_command = options.startup_command;
+    let initial_command = options.initial_command;
+    let on_command_finished = options.on_command_finished;
     let hover_focus = options.hover_focus;
     let extra_env = options.extra_env;
     let callbacks = Rc::new(RefCell::new(callbacks));
@@ -1286,6 +1309,32 @@ pub fn create_terminal(
         search_entry: search_entry.clone(),
         callbacks: callbacks.clone(),
     };
+
+    if let Some(command) = initial_command {
+        // Wait until shell integration reports the prompt, so startup scripts
+        // that read input (update prompts etc.) can't swallow the command.
+        // Without shell integration the prompt never shows; give up quietly.
+        let handle = handle.clone();
+        let mut polls_left = 300;
+        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+            polls_left -= 1;
+            let ready = handle
+                .surface_cell
+                .borrow()
+                .is_some_and(|surface| unsafe { !ghostty_surface_needs_confirm_quit(surface) });
+            if ready {
+                handle.send_text(&command);
+                handle.send_key("enter");
+            } else if polls_left == 0 {
+                eprintln!("ghostdeck: shell prompt never appeared; not restoring `{command}`");
+            }
+            if ready || polls_left == 0 {
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
+        });
+    }
 
     {
         let surface_cell = surface_cell.clone();
@@ -1389,6 +1438,7 @@ pub fn create_terminal(
         let scrollbar_syncing = scrollbar_syncing.clone();
         let open_url_external_for_map = open_url_external.clone();
         let extra_env = extra_env.clone();
+        let on_command_finished = on_command_finished.clone();
         gl_area.connect_realize(move |gl_area| {
             gl_area.make_current();
             if let Some(err) = gl_area.error() {
@@ -1452,17 +1502,6 @@ pub fn create_terminal(
             if !env_vars_raw.is_empty() {
                 config.env_vars = env_vars_raw.as_mut_ptr();
                 config.env_var_count = env_vars_raw.len();
-            }
-
-            let c_startup_command = startup_command
-                .as_ref()
-                .and_then(|command| CString::new(command.as_str()).ok());
-            if let Some(ref command) = c_startup_command {
-                config.command = command.as_ptr();
-                eprintln!(
-                    "ghostdeck: starting restored terminal command={}",
-                    command.to_string_lossy()
-                );
             }
 
             let surface = unsafe { ghostty_surface_new(app, &config) };
@@ -1552,6 +1591,7 @@ pub fn create_terminal(
                                 (callbacks.on_close)();
                             }
                         })),
+                        on_command_finished: on_command_finished.clone(),
                         open_url_external: open_url_external_for_map.clone(),
                         clipboard_context,
                     },

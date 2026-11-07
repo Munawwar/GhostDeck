@@ -6,6 +6,13 @@ are active, GhostDeck replaces its generic built-in notification with one showin
 Claude's last message, without changing Claude's own settings. They are intentionally limited to Codex, Claude Code, and
 Gemini CLI until the OpenCode hook path is ready.
 
+On the next launch, GhostDeck types the agent's resume command (e.g.
+`claude --resume <id>`) into the restored tab once its shell shows a prompt. If
+you quit the agent (`/exit`), it still comes back as long as you left that tab
+alone; running any other command there makes GhostDeck forget the session.
+Restore needs Ghostty's shell integration (on by default); without it, tabs
+reopen as plain shells.
+
 The preferred install path is the CLI installer:
 
 ```bash
