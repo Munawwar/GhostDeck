@@ -696,7 +696,10 @@ pub struct RestorableAgentIndex {
     by_surface: HashMap<(String, String), (RestorableAgentState, f64)>,
     by_any_workspace_surface: HashMap<String, IndexedAgent>,
     by_workspace_tab_leaf: HashMap<(String, String, Option<String>), IndexedAgent>,
-    by_tab_id: HashMap<String, IndexedAgent>,
+    /// Keyed by (tab, leaf) for layouts that lost their pane id. A record
+    /// only ever matches its own leaf: falling back to "any record in the
+    /// tab" resumed one session in every split of that tab.
+    by_tab_leaf: HashMap<(String, Option<String>), IndexedAgent>,
 }
 
 fn hook_session_files(
@@ -814,7 +817,7 @@ impl RestorableAgentIndex {
                             entry.insert(None);
                         }
                     }
-                    match index.by_tab_id.entry(tab_id) {
+                    match index.by_tab_leaf.entry((tab_id, leaf_id)) {
                         Entry::Vacant(entry) => {
                             entry.insert(Some(candidate.clone()));
                         }
@@ -860,9 +863,16 @@ impl RestorableAgentIndex {
                     .and_then(|candidate| candidate.as_ref())
             })
             .or_else(|| {
-                self.by_tab_id
-                    .get(tab_id)
-                    .and_then(|candidate| candidate.as_ref())
+                // Legacy records without a leaf belong to the tab's first leaf.
+                let legacy = leaf_id.is_none_or(|leaf| leaf == default_terminal_leaf_id());
+                [Some(leaf_id), legacy.then_some(None)]
+                    .into_iter()
+                    .flatten()
+                    .find_map(|leaf| {
+                        self.by_tab_leaf
+                            .get(&(tab_id.to_string(), leaf.map(str::to_owned)))
+                            .and_then(|candidate| candidate.as_ref())
+                    })
             })
             .map(|(agent, _)| agent.clone())
     }
@@ -2137,6 +2147,11 @@ mod tests {
             leaf.agent.as_ref().map(|agent| agent.session_id.as_str()),
             Some("session-a")
         );
+        // The other split has no record of its own and must not resume it too.
+        let TerminalTreeState::Leaf(other) = tree.start.as_ref() else {
+            panic!("expected first leaf");
+        };
+        assert_eq!(other.agent, None);
         assert_eq!(
             agent.as_ref().map(|agent| agent.session_id.as_str()),
             Some("session-a")
