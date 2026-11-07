@@ -1314,14 +1314,16 @@ pub fn create_terminal(
         // Wait until shell integration reports the prompt, so startup scripts
         // that read input (update prompts etc.) can't swallow the command.
         // Without shell integration the prompt never shows; give up quietly.
+        // The surface (and shell) only starts once the tab is first shown, so
+        // the budget counts from then, not from now.
         let handle = handle.clone();
         let mut polls_left = 300;
         glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+            let Some(surface) = *handle.surface_cell.borrow() else {
+                return glib::ControlFlow::Continue;
+            };
             polls_left -= 1;
-            let ready = handle
-                .surface_cell
-                .borrow()
-                .is_some_and(|surface| unsafe { !ghostty_surface_needs_confirm_quit(surface) });
+            let ready = unsafe { !ghostty_surface_needs_confirm_quit(surface) };
             if ready {
                 handle.send_text(&command);
                 handle.send_key("enter");
