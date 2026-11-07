@@ -2419,12 +2419,12 @@ async fn run_add_surface(client: &mut Client, args: &[String]) -> Result<Value> 
     }
     let mut cwd = None;
     let mut command = None;
-    let mut pairs = args.chunks_exact(2);
-    for pair in &mut pairs {
-        match pair[0].as_str() {
+    let (pairs, rest) = args.as_chunks::<2>();
+    for [flag, value] in pairs {
+        match flag.as_str() {
             "--cwd" if cwd.is_none() => {
-                let path = fs::canonicalize(&pair[1])
-                    .with_context(|| format!("invalid working directory: {}", pair[1]))?;
+                let path = fs::canonicalize(value)
+                    .with_context(|| format!("invalid working directory: {}", value))?;
                 if !path.is_dir() {
                     bail!("working directory is not a directory: {}", path.display());
                 }
@@ -2434,13 +2434,13 @@ async fn run_add_surface(client: &mut Client, args: &[String]) -> Result<Value> 
                         .to_string(),
                 );
             }
-            "--cmd" if command.is_none() && !pair[1].trim().is_empty() => {
-                command = Some(pair[1].clone());
+            "--cmd" if command.is_none() && !value.trim().is_empty() => {
+                command = Some(value.clone());
             }
             _ => bail!("Usage: ghostdeck add-surface [--cwd <directory>] [--cmd <shell-command>]"),
         }
     }
-    if !pairs.remainder().is_empty() {
+    if !rest.is_empty() {
         bail!("Usage: ghostdeck add-surface [--cwd <directory>] [--cmd <shell-command>]");
     }
     let (workspace_id, tab_id, source_surface_id) = caller_terminal_identity()?;
