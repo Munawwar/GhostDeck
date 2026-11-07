@@ -1,3 +1,17 @@
+diff --git a/build.zig b/build.zig
+index f9d861b19..e6690ade8 100644
+--- a/build.zig
++++ b/build.zig
+@@ -142,6 +142,9 @@ pub fn build(b: *std.Build) !void {
+             libghostty_shared.installHeader(); // Only need one header
+             libghostty_shared.install("libghostty.so");
+             libghostty_static.install("libghostty.a");
++            // Shell integration, themes and terminfo, as the packaged build
++            // ships them (the macOS embedded build installs them too).
++            resources.install();
+         }
+     }
+ 
 diff --git a/src/apprt/embedded.zig b/src/apprt/embedded.zig
 index 0d5a4f8da..48a865765 100644
 --- a/src/apprt/embedded.zig

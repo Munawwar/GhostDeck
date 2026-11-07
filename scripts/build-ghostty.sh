@@ -14,7 +14,10 @@ git -C "$SOURCE_DIR" apply "$ROOT_DIR/patches/ghostty-linux-embedded.patch"
 
 if [ -f "$SOURCE_DIR/zig-out/lib/libghostty.so" ]; then
     mkdir -p "$ROOT_DIR/ghostty/zig-out/lib"
-    cp "$SOURCE_DIR/zig-out/lib/libghostty.so" "$ROOT_DIR/ghostty/zig-out/lib/libghostty.so"
+    # Replace via rename: copying over the file in place would corrupt a
+    # running GhostDeck that has the old library mapped.
+    cp "$SOURCE_DIR/zig-out/lib/libghostty.so" "$ROOT_DIR/ghostty/zig-out/lib/libghostty.so.tmp"
+    mv -f "$ROOT_DIR/ghostty/zig-out/lib/libghostty.so.tmp" "$ROOT_DIR/ghostty/zig-out/lib/libghostty.so"
 fi
 if [ -d "$SOURCE_DIR/zig-out/share" ]; then
     mkdir -p "$ROOT_DIR/ghostty/zig-out/share"

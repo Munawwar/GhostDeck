@@ -68,7 +68,8 @@ sudo apt install libgtk-4-1 libadwaita-1-0
 # Install dev dependencies (Ubuntu/Debian)
 sudo apt install blueprint-compiler build-essential libadwaita-1-dev libepoxy-dev libgtk-4-dev libwebkitgtk-6.0-dev pkg-config
 
-# Initialize Ghostty and build the embedded library with GhostDeck's Linux patch
+# Initialize Ghostty and build the embedded library (plus its shell integration,
+# themes and terminfo) with GhostDeck's Linux patch
 git submodule update --init --recursive
 ./scripts/build-ghostty.sh -Dapp-runtime=none -Doptimize=ReleaseFast -Dcpu=baseline
 
