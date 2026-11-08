@@ -1259,22 +1259,17 @@ fn agent_ancestor_pid(_agent: agent_hooks::AgentKind) -> Option<u32> {
 
 #[cfg(target_os = "linux")]
 fn proc_identity_contains(pid: u32, needle: &str) -> bool {
-    let needle = needle.to_ascii_lowercase();
-    proc_cmdline(pid)
-        .or_else(|| fs::read_to_string(format!("/proc/{pid}/comm")).ok())
-        .map(|value| value.to_ascii_lowercase().contains(&needle))
-        .unwrap_or(false)
-}
-
-#[cfg(target_os = "linux")]
-fn proc_cmdline(pid: u32) -> Option<String> {
-    let raw = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-    let parts = raw
-        .split(|byte| *byte == 0)
-        .filter(|part| !part.is_empty())
-        .filter_map(|part| std::str::from_utf8(part).ok())
-        .collect::<Vec<_>>();
-    (!parts.is_empty()).then(|| parts.join(" "))
+    // Match the program (argv[0], or argv[1] for `node agent.js`), not the
+    // whole command line: the hook's own `sh -c '… hooks claude …'` wrapper
+    // mentions the agent too, and it exits right after the hook.
+    let Ok(raw) = fs::read(format!("/proc/{pid}/cmdline")) else {
+        return false;
+    };
+    raw.split(|byte| *byte == 0)
+        .take(2)
+        .filter_map(|arg| std::str::from_utf8(arg).ok())
+        .filter_map(|arg| Path::new(arg).file_name()?.to_str())
+        .any(|name| name.to_ascii_lowercase().contains(needle))
 }
 
 #[cfg(target_os = "linux")]
