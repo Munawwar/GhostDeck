@@ -1641,7 +1641,7 @@ struct TabEntry {
     title_label: gtk::Label,
     content: gtk::Widget,
     custom_name: Option<String>,
-    /// The shown title; the tab follows its focused split's title.
+    /// The shown title; the tab follows its first split's title.
     title: Option<String>,
     leaf_titles: HashMap<String, String>,
     /// Keeps a restored tab's saved title until the user's first input.
@@ -2302,12 +2302,19 @@ fn make_terminal_callbacks(
     let tid_for_notification = tab_id.to_string();
     let pane_id = internals.pane_id;
     let terminal_tab_state_for_focus = terminal_tab_state.clone();
-    // Show a split's last title on the tab, unless renamed or pinned by restore.
+    // Show the first split's last title on the tab (other splits never take
+    // over), unless renamed or pinned by restore.
     let show_title = {
         let state = internals.tab_state.clone();
         let tab_id = tab_id.to_string();
         let label = title_label.clone();
-        Rc::new(move |leaf_id: &str| {
+        let terminal_tab_state = terminal_tab_state.clone();
+        Rc::new(move || {
+            let Ok(tree) = terminal_tab_state.inner.tree.try_borrow() else {
+                return;
+            };
+            let leaf_id = tree.first_leaf().leaf_id.clone();
+            drop(tree);
             let title = {
                 let mut ts = state.borrow_mut();
                 let Some(entry) = ts.find_tab_mut(&tab_id) else {
@@ -2316,7 +2323,7 @@ fn make_terminal_callbacks(
                 if entry.custom_name.is_some() || entry.title_pinned {
                     return;
                 }
-                let Some(title) = entry.leaf_titles.get(leaf_id).cloned() else {
+                let Some(title) = entry.leaf_titles.get(&leaf_id).cloned() else {
                     return;
                 };
                 entry.title = Some(title.clone());
@@ -2343,7 +2350,6 @@ fn make_terminal_callbacks(
         }),
         on_title_changed: Box::new({
             let leaf_id = leaf_id.clone();
-            let terminal_tab_state = terminal_tab_state.clone();
             let show_title = show_title.clone();
             move |title: &str| {
                 if title.is_empty() {
@@ -2352,9 +2358,7 @@ fn make_terminal_callbacks(
                 if let Some(entry) = state_for_title.borrow_mut().find_tab_mut(&tid_for_title) {
                     entry.leaf_titles.insert(leaf_id.clone(), title.to_string());
                 }
-                if terminal_tab_state.active_leaf_id() == leaf_id {
-                    show_title(&leaf_id);
-                }
+                show_title();
             }
         }),
         on_pwd_changed: Box::new(move |pwd: &str| {
@@ -2365,10 +2369,8 @@ fn make_terminal_callbacks(
         on_focus: Box::new({
             let callbacks = internals.callbacks.clone();
             let leaf_id = leaf_id.clone();
-            let show_title = show_title.clone();
             move || {
                 if terminal_tab_state_for_focus.set_active_leaf(&leaf_id) {
-                    show_title(&leaf_id);
                     (callbacks.on_state_changed)();
                 }
             }
@@ -2394,11 +2396,13 @@ fn make_terminal_callbacks(
             let tab_id = tid_for_close.clone();
             let terminal_tab_state = terminal_tab_state_for_close.clone();
             let leaf_id = leaf_id.clone();
+            let show_title = show_title.clone();
             glib::idle_add_local_once(move || {
                 if !terminal_tab_state.has_leaf(&leaf_id) {
                     return;
                 }
                 if terminal_tab_state.close_leaf(&leaf_id) {
+                    show_title();
                     (callbacks.on_state_changed)();
                     return;
                 }
