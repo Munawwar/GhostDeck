@@ -1328,7 +1328,9 @@ pub fn create_terminal(
                 // Typing the restore isn't user input (activity, title pin).
                 let on_input =
                     std::mem::replace(&mut handle.callbacks.borrow_mut().on_input, Box::new(|| {}));
-                handle.send_text(&command);
+                // The leading space keeps it out of shell history (bash
+                // ignorespace/ignoreboth, zsh hist_ignore_space, fish).
+                handle.send_text(&format!(" {command}"));
                 handle.send_key("enter");
                 handle.callbacks.borrow_mut().on_input = on_input;
             } else if polls_left == 0 {
