@@ -5,7 +5,7 @@
 //! All on one line. Tabs left-justified, icons right-justified.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -1641,7 +1641,9 @@ struct TabEntry {
     title_label: gtk::Label,
     content: gtk::Widget,
     custom_name: Option<String>,
+    /// The shown title; the tab follows its focused split's title.
     title: Option<String>,
+    leaf_titles: HashMap<String, String>,
     /// Keeps a restored tab's saved title until the user's first input.
     title_pinned: bool,
     started_at: i64,
@@ -2288,7 +2290,6 @@ fn make_terminal_callbacks(
         Some(Rc::downgrade(&internals.callbacks));
     let tid_for_title = tab_id.to_string();
     let leaf_id = leaf.leaf_id.clone();
-    let title_label_for_title = title_label.clone();
     let state_for_title = internals.tab_state.clone();
     let callbacks_for_bell = internals.callbacks.clone();
     let callbacks_for_pwd = internals.callbacks.clone();
@@ -2301,6 +2302,29 @@ fn make_terminal_callbacks(
     let tid_for_notification = tab_id.to_string();
     let pane_id = internals.pane_id;
     let terminal_tab_state_for_focus = terminal_tab_state.clone();
+    // Show a split's last title on the tab, unless renamed or pinned by restore.
+    let show_title = {
+        let state = internals.tab_state.clone();
+        let tab_id = tab_id.to_string();
+        let label = title_label.clone();
+        Rc::new(move |leaf_id: &str| {
+            let title = {
+                let mut ts = state.borrow_mut();
+                let Some(entry) = ts.find_tab_mut(&tab_id) else {
+                    return;
+                };
+                if entry.custom_name.is_some() || entry.title_pinned {
+                    return;
+                }
+                let Some(title) = entry.leaf_titles.get(leaf_id).cloned() else {
+                    return;
+                };
+                entry.title = Some(title.clone());
+                title
+            };
+            label.set_label(&tab_display_title(&title));
+        })
+    };
     let terminal_tab_state_for_close = terminal_tab_state.clone();
     let terminal_tab_state_for_within_right = terminal_tab_state.clone();
     let terminal_tab_state_for_within_down = terminal_tab_state.clone();
@@ -2317,18 +2341,21 @@ fn make_terminal_callbacks(
                 }
             }
         }),
-        on_title_changed: Box::new(move |title: &str| {
-            {
-                let mut ts = state_for_title.borrow_mut();
-                let Some(entry) = ts.find_tab_mut(&tid_for_title) else {
-                    return;
-                };
-                if entry.custom_name.is_some() || entry.title_pinned || title.is_empty() {
+        on_title_changed: Box::new({
+            let leaf_id = leaf_id.clone();
+            let terminal_tab_state = terminal_tab_state.clone();
+            let show_title = show_title.clone();
+            move |title: &str| {
+                if title.is_empty() {
                     return;
                 }
-                entry.title = Some(title.to_string());
+                if let Some(entry) = state_for_title.borrow_mut().find_tab_mut(&tid_for_title) {
+                    entry.leaf_titles.insert(leaf_id.clone(), title.to_string());
+                }
+                if terminal_tab_state.active_leaf_id() == leaf_id {
+                    show_title(&leaf_id);
+                }
             }
-            title_label_for_title.set_label(&tab_display_title(title));
         }),
         on_pwd_changed: Box::new(move |pwd: &str| {
             *term_cwd_for_pwd.borrow_mut() = Some(pwd.to_string());
@@ -2338,8 +2365,10 @@ fn make_terminal_callbacks(
         on_focus: Box::new({
             let callbacks = internals.callbacks.clone();
             let leaf_id = leaf_id.clone();
+            let show_title = show_title.clone();
             move || {
                 if terminal_tab_state_for_focus.set_active_leaf(&leaf_id) {
+                    show_title(&leaf_id);
                     (callbacks.on_state_changed)();
                 }
             }
@@ -2503,6 +2532,7 @@ fn add_terminal_tab_inner(
             title: options
                 .as_ref()
                 .and_then(|value| value.title.map(str::to_string)),
+            leaf_titles: HashMap::new(),
             title_pinned: pinned_title.is_some(),
             started_at: options.as_ref().map_or_else(now_seconds, |value| {
                 value
@@ -2584,6 +2614,7 @@ fn add_keybind_editor_tab_inner(internals: &Rc<PaneInternals>, input: KeybindsTa
                 .and_then(|value| value.last_activity_at),
             unread,
             title: None,
+            leaf_titles: HashMap::new(),
             title_pinned: false,
             close_warning_surfaces: 0,
             kind: TabKind::Keybinds,
@@ -3131,14 +3162,25 @@ fn build_tab_button_from_label(
         let tab_id = tab_id.to_string();
         let tab_state = internals.tab_state.clone();
         tab_btn.connect_query_tooltip(move |_, _, _, _, tooltip| {
-            let Some((label, timestamp, close_warning_surfaces)) = tab_state
+            let Some((label, timestamp, close_warning_surfaces, full_title)) = tab_state
                 .borrow()
                 .tabs
                 .iter()
                 .find(|tab| tab.id == tab_id)
-                .map(|tab| match tab.last_activity_at {
-                    Some(at) => ("Last activity", at, tab.close_warning_surfaces),
-                    None => ("Started", tab.started_at, tab.close_warning_surfaces),
+                .map(|tab| {
+                    let (label, at) = match tab.last_activity_at {
+                        Some(at) => ("Last activity", at),
+                        None => ("Started", tab.started_at),
+                    };
+                    let full_title = tab
+                        .title
+                        .clone()
+                        .filter(|_| {
+                            tab.custom_name.is_none() && tab.title_label.label().ends_with('…')
+                        })
+                        .map(|title| format!("{title}\n"))
+                        .unwrap_or_default();
+                    (label, at, tab.close_warning_surfaces, full_title)
                 })
             else {
                 return false;
@@ -3159,7 +3201,7 @@ fn build_tab_button_from_label(
                 1 => "Process running in 1 surface\n".to_string(),
                 count => format!("Processes running in {count} surfaces\n"),
             };
-            tooltip.set_text(Some(&format!("{status}{label}: {age}")));
+            tooltip.set_text(Some(&format!("{full_title}{status}{label}: {age}")));
             true
         });
     }
