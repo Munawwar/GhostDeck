@@ -1130,6 +1130,14 @@ fn persist_agent_hook_session(
                 .and_then(|record| record.launch_command.clone())
         });
 
+    // Permission prompts and auto-compaction happen mid-turn: keep the state.
+    let was_idle = existing.as_ref().is_some_and(|record| record.idle);
+    let idle = match event {
+        "UserPromptSubmit" | "prompt-submit" => false,
+        "Stop" | "stop" => true,
+        _ if starting => hook_str(payload, &["source"]) != Some("compact") || was_idle,
+        _ => hook_str(payload, &["notification_type"]) == Some("idle_prompt") || was_idle,
+    };
     let record = agent_hooks::AgentHookSessionRecord {
         session_id,
         workspace_id,
@@ -1139,6 +1147,7 @@ fn persist_agent_hook_session(
         launch_command,
         updated_at: agent_hooks::now_seconds(),
         exited_at: None,
+        idle,
     };
     let result = store.upsert(record);
     if result.is_ok() {
@@ -3221,6 +3230,43 @@ mod cli_arg_tests {
         assert_eq!(fire("prompt-submit", "/proj/src").as_deref(), Some("/proj"));
         // A resume from elsewhere starts a new process there.
         assert_eq!(fire("session-start", "/other").as_deref(), Some("/other"));
+    }
+
+    #[test]
+    fn hook_session_tracks_whether_agent_is_idle() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = agent_hooks::AgentHookSessionStore::new_for_dir("claude", dir.path());
+        let args = ["--workspace", "ws", "--surface", "1:tab:leaf-0"].map(String::from);
+        let fire = |event: &str, extra: Value| {
+            let mut payload = json!({ "session_id": "s", "cwd": "/proj" });
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            persist_agent_hook_session(
+                agent_hooks::AgentKind::Claude,
+                &store,
+                &args,
+                &payload,
+                event,
+            )
+            .unwrap();
+            store.lookup("s").unwrap().unwrap().idle
+        };
+        assert!(fire("session-start", json!({ "source": "startup" })));
+        assert!(!fire("prompt-submit", json!({})));
+        // Mid-turn events keep the session busy.
+        assert!(!fire(
+            "notification",
+            json!({ "notification_type": "permission_prompt" })
+        ));
+        assert!(!fire("session-start", json!({ "source": "compact" })));
+        assert!(fire("stop", json!({})));
+        assert!(!fire("prompt-submit", json!({})));
+        assert!(fire(
+            "notification",
+            json!({ "notification_type": "idle_prompt" })
+        ));
     }
 
     #[test]

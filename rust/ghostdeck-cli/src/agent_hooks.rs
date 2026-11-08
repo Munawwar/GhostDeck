@@ -82,6 +82,9 @@ pub(crate) struct AgentHookSessionRecord {
     /// another command runs in that terminal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) exited_at: Option<f64>,
+    /// Waiting for a prompt, so closing its terminal interrupts nothing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) idle: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -492,6 +495,7 @@ mod tests {
             }),
             updated_at: 11.0,
             exited_at: None,
+            idle: false,
         };
 
         store.upsert(record.clone()).expect("upsert");

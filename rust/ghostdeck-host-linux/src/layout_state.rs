@@ -677,6 +677,10 @@ impl AppSessionState {
 struct HookSessionRecord {
     #[serde(default)]
     exited_at: Option<f64>,
+    #[serde(default)]
+    idle: bool,
+    #[serde(default)]
+    pid: Option<u32>,
     session_id: String,
     workspace_id: String,
     surface_id: String,
@@ -721,6 +725,23 @@ fn hook_session_files(
         let raw = fs::read_to_string(path).ok()?;
         Some((kind, serde_json::from_str(&raw).ok()?))
     })
+}
+
+/// Surfaces whose agent is alive and waiting for a prompt: closing them
+/// interrupts nothing, so they don't need a close warning.
+pub fn idle_agent_surface_ids() -> HashSet<String> {
+    let dir = agent_hook_state_dir();
+    hook_session_files(&dir)
+        .flat_map(|(_, file)| file.sessions.into_values())
+        .filter(|record| {
+            record.idle
+                && record.exited_at.is_none()
+                && record
+                    .pid
+                    .is_some_and(|pid| Path::new(&format!("/proc/{pid}")).exists())
+        })
+        .map(|record| record.surface_id)
+        .collect()
 }
 
 /// Called when a command finishes in a terminal: if the user had quit the

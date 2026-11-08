@@ -2818,7 +2818,11 @@ pub fn highlight_running_process_tabs() -> usize {
             }
         }
     }
-    let busy_surfaces = crate::process_usage::busy_surface_ids(&surface_ids);
+    let idle_agents = layout_state::idle_agent_surface_ids();
+    let busy_surfaces: HashSet<_> = crate::process_usage::busy_surface_ids(&surface_ids)
+        .into_iter()
+        .filter(|surface_id| !idle_agents.contains(surface_id))
+        .collect();
     let mut highlighted = 0;
     for pane in panes {
         for tab in &mut pane.tab_state.borrow_mut().tabs {
