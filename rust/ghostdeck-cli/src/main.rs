@@ -873,7 +873,8 @@ async fn run_agent_hook(
     // Explicit --event or positional event beats the JSON field.
     let event = parse_hook_event(args, &payload);
 
-    persist_agent_hook_session(agent, args, &payload, &event)?;
+    let store = agent_hooks::AgentHookSessionStore::new(agent);
+    persist_agent_hook_session(agent, &store, args, &payload, &event)?;
 
     let mut params = Map::new();
     add_notification_origin(&mut params);
@@ -1034,6 +1035,7 @@ fn hook_additional_context(payload: &Value) -> Option<String> {
 
 fn persist_agent_hook_session(
     agent: agent_hooks::AgentKind,
+    store: &agent_hooks::AgentHookSessionStore,
     args: &[String],
     payload: &Value,
     event: &str,
@@ -1052,7 +1054,6 @@ fn persist_agent_hook_session(
         return Ok(());
     };
 
-    let store = agent_hooks::AgentHookSessionStore::new(agent);
     let (outcome, result) = match agent_hook_persistence_action(event, payload) {
         AgentHookPersistenceAction::Upsert => ("", Ok(())),
         AgentHookPersistenceAction::Preserve => ("preserved", Ok(())),
@@ -1107,18 +1108,27 @@ fn persist_agent_hook_session(
     };
 
     let existing = store.lookup(&session_id)?;
-    let cwd = hook_str(payload, &["cwd", "working_directory", "directory"])
-        .map(str::to_string)
+    // Only SessionStart sets the directory: later payloads report wherever the
+    // agent's shell tool has cd'ed to, which is not where it should resume.
+    let starting = canonical_hook_event_name(event) == Some("SessionStart");
+    let kept = existing.as_ref().filter(|_| !starting);
+    let payload_cwd = hook_str(payload, &["cwd", "working_directory", "directory"]);
+    let cwd = kept
+        .and_then(|record| record.cwd.clone())
+        .or_else(|| payload_cwd.map(str::to_string))
         .or_else(|| existing.as_ref().and_then(|record| record.cwd.clone()));
     let pid = hook_str(payload, &["pid"])
         .and_then(|value| value.parse::<u32>().ok())
         .or_else(|| agent_ancestor_pid(agent))
         .or_else(|| existing.as_ref().and_then(|record| record.pid));
-    let launch_command = agent_hooks::launch_record_from_env(agent, cwd.as_deref()).or_else(|| {
-        existing
-            .as_ref()
-            .and_then(|record| record.launch_command.clone())
-    });
+    let launch_command = kept
+        .and_then(|record| record.launch_command.clone())
+        .or_else(|| agent_hooks::launch_record_from_env(agent, cwd.as_deref()))
+        .or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|record| record.launch_command.clone())
+        });
 
     let record = agent_hooks::AgentHookSessionRecord {
         session_id,
@@ -3193,6 +3203,29 @@ mod cli_arg_tests {
                 AgentHookPersistenceAction::MarkExited
             );
         }
+    }
+
+    #[test]
+    fn hook_session_keeps_start_directory_when_agent_cds() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = agent_hooks::AgentHookSessionStore::new_for_dir("claude", dir.path());
+        let args = ["--workspace", "ws", "--surface", "1:tab:leaf-0"].map(String::from);
+        let fire = |event: &str, cwd: &str| {
+            let payload = json!({ "session_id": "s", "cwd": cwd });
+            persist_agent_hook_session(
+                agent_hooks::AgentKind::Claude,
+                &store,
+                &args,
+                &payload,
+                event,
+            )
+            .unwrap();
+            store.lookup("s").unwrap().unwrap().cwd
+        };
+        assert_eq!(fire("session-start", "/proj").as_deref(), Some("/proj"));
+        assert_eq!(fire("prompt-submit", "/proj/src").as_deref(), Some("/proj"));
+        // A resume from elsewhere starts a new process there.
+        assert_eq!(fire("session-start", "/other").as_deref(), Some("/other"));
     }
 
     #[test]
