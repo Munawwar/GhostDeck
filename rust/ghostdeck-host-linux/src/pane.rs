@@ -1641,11 +1641,22 @@ struct TabEntry {
     title_label: gtk::Label,
     content: gtk::Widget,
     custom_name: Option<String>,
+    title: Option<String>,
+    /// Keeps a restored tab's saved title until the user's first input.
+    title_pinned: bool,
     started_at: i64,
     last_activity_at: Option<i64>,
     unread: bool,
     close_warning_surfaces: usize,
     kind: TabKind,
+}
+
+fn tab_display_title(title: &str) -> String {
+    let mut chars = title.char_indices();
+    match chars.nth(21) {
+        Some((end, _)) if chars.next().is_some() => format!("{}…", &title[..end]),
+        _ => title.to_string(),
+    }
 }
 
 fn now_seconds() -> i64 {
@@ -1744,6 +1755,7 @@ fn split_icon_button(orientation: gtk::Orientation, tooltip: &str) -> gtk::Butto
 struct TerminalTabOptions<'a> {
     id: Option<&'a str>,
     custom_name: Option<&'a str>,
+    title: Option<&'a str>,
     started_at: Option<i64>,
     last_activity_at: Option<i64>,
     unread: bool,
@@ -1790,6 +1802,7 @@ fn restore_tabs_from_state(
                 Some(TerminalTabOptions {
                     id: Some(saved_tab.id.as_str()),
                     custom_name: saved_tab.custom_name.as_deref(),
+                    title: saved_tab.title.as_deref(),
                     started_at: saved_tab.started_at,
                     last_activity_at: saved_tab.last_activity_at,
                     unread: saved_tab.unread,
@@ -2300,24 +2313,22 @@ fn make_terminal_callbacks(
             move || {
                 if let Some(tab) = state.borrow_mut().find_tab_mut(&tab_id) {
                     tab.last_activity_at = Some(now_seconds());
+                    tab.title_pinned = false;
                 }
             }
         }),
         on_title_changed: Box::new(move |title: &str| {
-            let has_custom = state_for_title
-                .borrow()
-                .tabs
-                .iter()
-                .any(|entry| entry.id == tid_for_title && entry.custom_name.is_some());
-            if has_custom || title.is_empty() {
-                return;
+            {
+                let mut ts = state_for_title.borrow_mut();
+                let Some(entry) = ts.find_tab_mut(&tid_for_title) else {
+                    return;
+                };
+                if entry.custom_name.is_some() || entry.title_pinned || title.is_empty() {
+                    return;
+                }
+                entry.title = Some(title.to_string());
             }
-            let mut chars = title.char_indices();
-            let display = match chars.nth(21) {
-                Some((end, _)) if chars.next().is_some() => format!("{}…", &title[..end]),
-                _ => title.to_string(),
-            };
-            title_label_for_title.set_label(&display);
+            title_label_for_title.set_label(&tab_display_title(title));
         }),
         on_pwd_changed: Box::new(move |pwd: &str| {
             *term_cwd_for_pwd.borrow_mut() = Some(pwd.to_string());
@@ -2468,6 +2479,16 @@ fn add_terminal_tab_inner(
     });
     let widget = state.root();
     internals.content_stack.add_named(&widget, Some(&tab_id));
+    let mut restoring = false;
+    state
+        .inner
+        .tree
+        .borrow()
+        .for_each_leaf(|leaf| restoring |= leaf.agent.borrow().is_some());
+    let pinned_title = options
+        .as_ref()
+        .filter(|value| restoring && value.custom_name.is_none())
+        .and_then(|value| value.title);
 
     {
         let mut ts = internals.tab_state.borrow_mut();
@@ -2479,6 +2500,10 @@ fn add_terminal_tab_inner(
             custom_name: options
                 .as_ref()
                 .and_then(|value| value.custom_name.map(|name| name.to_string())),
+            title: options
+                .as_ref()
+                .and_then(|value| value.title.map(str::to_string)),
+            title_pinned: pinned_title.is_some(),
             started_at: options.as_ref().map_or_else(now_seconds, |value| {
                 value
                     .started_at
@@ -2505,6 +2530,9 @@ fn add_terminal_tab_inner(
 
     if let Some(custom_name) = options.as_ref().and_then(|value| value.custom_name) {
         title_label.set_label(custom_name);
+    }
+    if let Some(title) = pinned_title {
+        title_label.set_label(&tab_display_title(title));
     }
     activate_tab(
         &internals.tab_strip,
@@ -2555,6 +2583,8 @@ fn add_keybind_editor_tab_inner(internals: &Rc<PaneInternals>, input: KeybindsTa
                 .as_ref()
                 .and_then(|value| value.last_activity_at),
             unread,
+            title: None,
+            title_pinned: false,
             close_warning_surfaces: 0,
             kind: TabKind::Keybinds,
         });
@@ -2642,6 +2672,7 @@ pub fn snapshot_pane_state(pane_widget: &gtk::Widget) -> Option<PaneState> {
             SavedTabState {
                 id: entry.id.clone(),
                 custom_name: entry.custom_name.clone(),
+                title: entry.title.clone(),
                 started_at: Some(entry.started_at),
                 last_activity_at: entry.last_activity_at,
                 unread: entry.unread,

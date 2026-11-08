@@ -1325,8 +1325,12 @@ pub fn create_terminal(
             polls_left -= 1;
             let ready = unsafe { !ghostty_surface_needs_confirm_quit(surface) };
             if ready {
+                // Typing the restore isn't user input (activity, title pin).
+                let on_input =
+                    std::mem::replace(&mut handle.callbacks.borrow_mut().on_input, Box::new(|| {}));
                 handle.send_text(&command);
                 handle.send_key("enter");
+                handle.callbacks.borrow_mut().on_input = on_input;
             } else if polls_left == 0 {
                 eprintln!("ghostdeck: shell prompt never appeared; not restoring `{command}`");
             }

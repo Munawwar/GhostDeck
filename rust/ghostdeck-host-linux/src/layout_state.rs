@@ -113,6 +113,9 @@ pub struct TabState {
     pub id: String,
     #[serde(default)]
     pub custom_name: Option<String>,
+    /// Last terminal title, shown again when the tab's agent is restored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<i64>,
     #[serde(
@@ -306,6 +309,7 @@ impl TabState {
         Self {
             id: id.into(),
             custom_name: None,
+            title: None,
             started_at: None,
             last_activity_at: None,
             unread: false,
@@ -1319,6 +1323,7 @@ mod tests {
                             TabState {
                                 id: "browser".to_string(),
                                 custom_name: None,
+                                title: None,
                                 started_at: None,
                                 last_activity_at: None,
                                 unread: false,
@@ -1764,6 +1769,7 @@ mod tests {
             tabs: vec![TabState {
                 id: "tab-a".to_string(),
                 custom_name: None,
+                title: None,
                 started_at: None,
                 last_activity_at: None,
                 unread: false,
@@ -1860,6 +1866,7 @@ mod tests {
         let tab = TabState {
             id: "tab-a".to_string(),
             custom_name: None,
+            title: None,
             started_at: None,
             last_activity_at: None,
             unread: false,
@@ -1935,6 +1942,7 @@ mod tests {
             tabs: vec![TabState {
                 id: "tab-a".to_string(),
                 custom_name: None,
+                title: None,
                 started_at: None,
                 last_activity_at: None,
                 unread: false,
@@ -2006,6 +2014,7 @@ mod tests {
             tabs: vec![TabState {
                 id: "tab-a".to_string(),
                 custom_name: None,
+                title: None,
                 started_at: None,
                 last_activity_at: None,
                 unread: false,
@@ -2099,6 +2108,7 @@ mod tests {
             tabs: vec![TabState {
                 id: "tab-a".to_string(),
                 custom_name: None,
+                title: None,
                 started_at: None,
                 last_activity_at: None,
                 unread: false,
@@ -2208,6 +2218,7 @@ mod tests {
             tabs: vec![TabState {
                 id: "keybinds-1".to_string(),
                 custom_name: None,
+                title: None,
                 started_at: None,
                 last_activity_at: None,
                 unread: false,
@@ -2261,6 +2272,7 @@ mod tests {
                     tabs: vec![TabState {
                         id: "keybinds-1".to_string(),
                         custom_name: None,
+                        title: None,
                         started_at: None,
                         last_activity_at: None,
                         unread: true,
