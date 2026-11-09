@@ -1108,9 +1108,11 @@ fn persist_agent_hook_session(
     };
 
     let existing = store.lookup(&session_id)?;
-    // Only SessionStart sets the directory: later payloads report wherever the
-    // agent's shell tool has cd'ed to, which is not where it should resume.
-    let starting = canonical_hook_event_name(event) == Some("SessionStart");
+    // Only a real start sets the directory: later payloads, compaction's
+    // SessionStart included, report wherever the agent's shell tool has cd'ed
+    // to, which is not where it should resume.
+    let starting = canonical_hook_event_name(event) == Some("SessionStart")
+        && hook_str(payload, &["source"]) != Some("compact");
     let kept = existing.as_ref().filter(|_| !starting);
     let payload_cwd = hook_str(payload, &["cwd", "working_directory", "directory"]);
     let cwd = kept
@@ -1135,7 +1137,7 @@ fn persist_agent_hook_session(
     let idle = match event {
         "UserPromptSubmit" | "prompt-submit" => false,
         "Stop" | "stop" => true,
-        _ if starting => hook_str(payload, &["source"]) != Some("compact") || was_idle,
+        _ if starting => true,
         _ => hook_str(payload, &["notification_type"]) == Some("idle_prompt") || was_idle,
     };
     let record = agent_hooks::AgentHookSessionRecord {
@@ -3214,8 +3216,8 @@ mod cli_arg_tests {
         let dir = tempfile::tempdir().unwrap();
         let store = agent_hooks::AgentHookSessionStore::new_for_dir("claude", dir.path());
         let args = ["--workspace", "ws", "--surface", "1:tab:leaf-0"].map(String::from);
-        let fire = |event: &str, cwd: &str| {
-            let payload = json!({ "session_id": "s", "cwd": cwd });
+        let fire = |event: &str, cwd: &str, source: &str| {
+            let payload = json!({ "session_id": "s", "cwd": cwd, "source": source });
             persist_agent_hook_session(
                 agent_hooks::AgentKind::Claude,
                 &store,
@@ -3226,10 +3228,18 @@ mod cli_arg_tests {
             .unwrap();
             store.lookup("s").unwrap().unwrap().cwd
         };
-        assert_eq!(fire("session-start", "/proj").as_deref(), Some("/proj"));
-        assert_eq!(fire("prompt-submit", "/proj/src").as_deref(), Some("/proj"));
+        let start = |cwd| fire("session-start", cwd, "startup");
+        assert_eq!(start("/proj").as_deref(), Some("/proj"));
+        assert_eq!(
+            fire("prompt-submit", "/proj/src", "").as_deref(),
+            Some("/proj")
+        );
+        assert_eq!(
+            fire("session-start", "/proj/src", "compact").as_deref(),
+            Some("/proj")
+        );
         // A resume from elsewhere starts a new process there.
-        assert_eq!(fire("session-start", "/other").as_deref(), Some("/other"));
+        assert_eq!(start("/other").as_deref(), Some("/other"));
     }
 
     #[test]
