@@ -3189,12 +3189,14 @@ fn build_tab_button_from_label(
                         Some(at) => ("Last activity", at),
                         None => ("Started", tab.started_at),
                     };
+                    // GTK's own ellipsis doesn't show up in the label text.
+                    let cut_off = tab.title_label.layout().is_ellipsized()
+                        || tab.title_label.label().ends_with('…');
                     let full_title = tab
-                        .title
-                        .clone()
-                        .filter(|_| {
-                            tab.custom_name.is_none() && tab.title_label.label().ends_with('…')
-                        })
+                        .custom_name
+                        .as_ref()
+                        .or(tab.title.as_ref())
+                        .filter(|_| cut_off)
                         .map(|title| format!("{title}\n"))
                         .unwrap_or_default();
                     (label, at, tab.close_warning_surfaces, full_title)
