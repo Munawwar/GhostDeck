@@ -196,7 +196,15 @@ impl RestorableAgentState {
                 .and_then(|launch| launch.cwd.as_deref())
                 .and_then(normalized_str)
         });
-        build_resume_command(self.kind, &self.session_id, launch).map(|command| (command, cwd))
+        // Startup scripts can cd elsewhere, so the shell's initial directory
+        // isn't enough. `&&` also refuses to resume if the directory is gone.
+        build_resume_command(self.kind, &self.session_id, launch).map(|command| {
+            let command = cwd
+                .as_deref()
+                .map(|cwd| format!("cd {} && {command}", shell_word(cwd)))
+                .unwrap_or(command);
+            (command, cwd)
+        })
     }
 }
 
@@ -1588,7 +1596,7 @@ mod tests {
                 assert_eq!(
                     agent.resume_command(),
                     Some((
-                        "codex resume session-a".to_string(),
+                        "cd /tmp/project && codex resume session-a".to_string(),
                         Some("/tmp/project".to_string())
                     ))
                 );
@@ -2212,7 +2220,7 @@ mod tests {
         assert_eq!(
             agent.resume_command(),
             Some((
-                "codex resume --profile 'it'\\''s here' sess-123".to_string(),
+                "cd /tmp/project && codex resume --profile 'it'\\''s here' sess-123".to_string(),
                 Some("/tmp/project".to_string())
             ))
         );
