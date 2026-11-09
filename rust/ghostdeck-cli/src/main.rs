@@ -922,7 +922,7 @@ fn agent_hook_notification(
     match event {
         // These only track sessions.
         "SessionStart" | "session-start" | "UserPromptSubmit" | "prompt-submit" | "SessionEnd"
-        | "session-end" | "Cleanup" | "cleanup" | "restore-exit" => None,
+        | "session-end" | "Cleanup" | "cleanup" | "restore-exit" | "restore-resume" => None,
         // The Stop notification already covered this turn.
         "Notification" | "notification"
             if hook_str(payload, &["notification_type"]) == Some("idle_prompt") =>
@@ -1005,20 +1005,28 @@ enum AgentHookPersistenceAction {
     Upsert,
     Preserve,
     MarkExited,
+    MarkResumed,
     Remove,
 }
 
-fn agent_hook_persistence_action(event: &str, payload: &Value) -> AgentHookPersistenceAction {
+fn agent_hook_persistence_action(
+    agent: agent_hooks::AgentKind,
+    event: &str,
+    payload: &Value,
+) -> AgentHookPersistenceAction {
     match event {
         "Cleanup" | "cleanup" | "restore-exit" => AgentHookPersistenceAction::Remove,
+        "restore-resume" => AgentHookPersistenceAction::MarkResumed,
         // The user quit on purpose: still restore it if the terminal is left
         // untouched, but the host forgets it once another command runs there.
-        // Anything else (e.g. the window closing) is restored as is.
+        // Anything else (e.g. the window closing) is restored as is. Codex
+        // only sends this event when quit on purpose, always as "other".
         "SessionEnd" | "session-end"
-            if matches!(
-                hook_str(payload, &["reason"]),
-                Some("prompt_input_exit" | "logout")
-            ) =>
+            if agent == agent_hooks::AgentKind::Codex
+                || matches!(
+                    hook_str(payload, &["reason"]),
+                    Some("prompt_input_exit" | "logout")
+                ) =>
         {
             AgentHookPersistenceAction::MarkExited
         }
@@ -1055,23 +1063,31 @@ fn persist_agent_hook_session(
     };
 
     let _lock = store.lock()?;
-    let (outcome, result) = match agent_hook_persistence_action(event, payload) {
+    let (outcome, result) = match agent_hook_persistence_action(agent, event, payload) {
         AgentHookPersistenceAction::Upsert => ("", Ok(())),
         AgentHookPersistenceAction::Preserve => ("preserved", Ok(())),
         AgentHookPersistenceAction::Remove => ("removed", store.remove(&session_id)),
-        AgentHookPersistenceAction::MarkExited => (
-            "marked_exited",
-            store.lookup(&session_id).and_then(|record| match record {
-                Some(record) => store.upsert(
-                    agent_hooks::AgentHookSessionRecord {
-                        exited_at: Some(agent_hooks::now_seconds()),
-                        ..record
-                    },
-                    false,
-                ),
-                None => Ok(()),
-            }),
-        ),
+        action @ (AgentHookPersistenceAction::MarkExited
+        | AgentHookPersistenceAction::MarkResumed) => {
+            let exited = action == AgentHookPersistenceAction::MarkExited;
+            (
+                if exited {
+                    "marked_exited"
+                } else {
+                    "marked_resumed"
+                },
+                store.lookup(&session_id).and_then(|record| match record {
+                    Some(record) => store.upsert(
+                        agent_hooks::AgentHookSessionRecord {
+                            exited_at: exited.then(agent_hooks::now_seconds),
+                            ..record
+                        },
+                        false,
+                    ),
+                    None => Ok(()),
+                }),
+            )
+        }
     };
     if !outcome.is_empty() {
         if result.is_ok() {
@@ -1468,6 +1484,7 @@ fn install_hook_target(agent: agent_hooks::AgentKind) -> Result<()> {
                 ("SessionStart", "session-start"),
                 ("UserPromptSubmit", "prompt-submit"),
                 ("Stop", "stop"),
+                ("SessionEnd", "session-end"),
             ],
         ),
         agent_hooks::AgentKind::Claude => install_json_hooks(
@@ -3195,12 +3212,16 @@ mod cli_arg_tests {
             json!({ "reason": "clear" }),
         ] {
             assert_eq!(
-                agent_hook_persistence_action("session-end", &reason),
+                agent_hook_persistence_action(
+                    agent_hooks::AgentKind::Claude,
+                    "session-end",
+                    &reason
+                ),
                 AgentHookPersistenceAction::Preserve
             );
         }
         assert_eq!(
-            agent_hook_persistence_action("SessionEnd", &json!({})),
+            agent_hook_persistence_action(agent_hooks::AgentKind::Claude, "SessionEnd", &json!({})),
             AgentHookPersistenceAction::Preserve
         );
     }
@@ -3209,10 +3230,22 @@ mod cli_arg_tests {
     fn deliberate_session_exit_marks_restorable_hook_session_exited() {
         for reason in ["prompt_input_exit", "logout"] {
             assert_eq!(
-                agent_hook_persistence_action("session-end", &json!({ "reason": reason })),
+                agent_hook_persistence_action(
+                    agent_hooks::AgentKind::Claude,
+                    "session-end",
+                    &json!({ "reason": reason })
+                ),
                 AgentHookPersistenceAction::MarkExited
             );
         }
+        assert_eq!(
+            agent_hook_persistence_action(
+                agent_hooks::AgentKind::Codex,
+                "SessionEnd",
+                &json!({ "reason": "other" })
+            ),
+            AgentHookPersistenceAction::MarkExited
+        );
     }
 
     #[test]
@@ -3342,11 +3375,15 @@ mod cli_arg_tests {
     #[test]
     fn internal_cleanup_removes_restorable_hook_session() {
         assert_eq!(
-            agent_hook_persistence_action("cleanup", &json!({})),
+            agent_hook_persistence_action(agent_hooks::AgentKind::Claude, "cleanup", &json!({})),
             AgentHookPersistenceAction::Remove
         );
         assert_eq!(
-            agent_hook_persistence_action("restore-exit", &json!({})),
+            agent_hook_persistence_action(
+                agent_hooks::AgentKind::Claude,
+                "restore-exit",
+                &json!({})
+            ),
             AgentHookPersistenceAction::Remove
         );
     }

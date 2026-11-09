@@ -1964,8 +1964,9 @@ fn create_terminal_leaf(
         })
     };
     let resume = agent.as_ref().and_then(|agent| agent.resume_command());
-    if let Some((command, _)) = &resume {
+    if let Some(((command, _), agent)) = resume.as_ref().zip(agent.as_ref()) {
         eprintln!("ghostdeck: restoring agent terminal surface={surface_id} command={command}");
+        layout_state::mark_agent_resumed(&agent.session_id);
     }
     let (initial_command, resume_cwd) = resume.unzip();
     let on_command_finished: Rc<terminal::CommandFinishedCallback> = {

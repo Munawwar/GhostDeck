@@ -35,6 +35,18 @@
           }
         ]
       }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"${GHOSTDECK_CODEX_HOOKS_DISABLED:-}\" != \"1\" ] && ghostdeck --json hooks codex session-end || echo '{\"continue\":true,\"suppressOutput\":false}'",
+            "statusMessage": "GhostDeck Codex session restore",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }
