@@ -1062,10 +1062,13 @@ fn persist_agent_hook_session(
         AgentHookPersistenceAction::MarkExited => (
             "marked_exited",
             store.lookup(&session_id).and_then(|record| match record {
-                Some(record) => store.upsert(agent_hooks::AgentHookSessionRecord {
-                    exited_at: Some(agent_hooks::now_seconds()),
-                    ..record
-                }),
+                Some(record) => store.upsert(
+                    agent_hooks::AgentHookSessionRecord {
+                        exited_at: Some(agent_hooks::now_seconds()),
+                        ..record
+                    },
+                    false,
+                ),
                 None => Ok(()),
             }),
         ),
@@ -1152,7 +1155,7 @@ fn persist_agent_hook_session(
         exited_at: None,
         idle,
     };
-    let result = store.upsert(record);
+    let result = store.upsert(record, starting);
     if result.is_ok() {
         write_agent_hook_debug(
             agent,
@@ -3241,6 +3244,35 @@ mod cli_arg_tests {
         );
         // A resume from elsewhere starts a new process there.
         assert_eq!(start("/other").as_deref(), Some("/other"));
+    }
+
+    #[test]
+    fn starting_a_session_replaces_earlier_ones_on_its_surface() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = agent_hooks::AgentHookSessionStore::new_for_dir("claude", dir.path());
+        let args = ["--workspace", "ws", "--surface", "1:tab:leaf-0"].map(String::from);
+        let start = |session: &str, pid: u32| {
+            let payload = json!({ "session_id": session, "cwd": "/p", "pid": pid.to_string() });
+            persist_agent_hook_session(
+                agent_hooks::AgentKind::Claude,
+                &store,
+                &args,
+                &payload,
+                "session-start",
+            )
+            .unwrap();
+        };
+        let exists = |session| store.lookup(session).unwrap().is_some();
+        let live = std::process::id();
+        start("a", live);
+        start("b", live); // /clear in the same process
+        assert!(!exists("a") && exists("b"));
+        start("nested", 1); // another live process
+        assert!(exists("b") && exists("nested"));
+        start("c", u32::MAX); // the others are alive in different processes
+        assert!(exists("b") && exists("nested") && exists("c"));
+        start("d", live); // c's agent is gone
+        assert!(!exists("c") && exists("d"));
     }
 
     #[test]

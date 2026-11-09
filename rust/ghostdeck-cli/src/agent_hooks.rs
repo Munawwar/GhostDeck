@@ -147,12 +147,29 @@ impl AgentHookSessionStore {
         Ok(file.sessions.get(session_id.as_deref().unwrap()).cloned())
     }
 
-    pub(crate) fn upsert(&self, record: AgentHookSessionRecord) -> Result<()> {
+    /// `new_process_session` drops the surface's earlier sessions: a /clear or
+    /// /resume in the same process, or an agent that has since died. A different
+    /// live process is a nested agent (`claude -p` from a tool), so it's kept.
+    pub(crate) fn upsert(
+        &self,
+        record: AgentHookSessionRecord,
+        new_process_session: bool,
+    ) -> Result<()> {
         let Some(session_id) = normalized(&record.session_id) else {
             return Ok(());
         };
         let mut file = self.load()?;
         file.version = 1;
+        if new_process_session {
+            file.sessions.retain(|_, other| {
+                other.workspace_id != record.workspace_id
+                    || other.surface_id != record.surface_id
+                    || (other.pid != record.pid
+                        && other.pid.is_some_and(|pid| {
+                            std::path::Path::new(&format!("/proc/{pid}")).exists()
+                        }))
+            });
+        }
         file.sessions.insert(session_id, record);
         self.save(&file)
     }
@@ -513,7 +530,7 @@ mod tests {
             idle: false,
         };
 
-        store.upsert(record.clone()).expect("upsert");
+        store.upsert(record.clone(), false).expect("upsert");
 
         assert_eq!(
             store.lookup("codex-session-1").expect("lookup"),
