@@ -212,6 +212,8 @@ struct TerminalTabState {
     inner: Rc<TerminalTabInner>,
 }
 
+type ShowTitleCallback = dyn Fn(&str);
+
 struct TerminalTabInner {
     tree: RefCell<TerminalSplitNode>,
     active_leaf_id: RefCell<String>,
@@ -225,6 +227,7 @@ struct TerminalTabInner {
     resize_revealers: RefCell<Vec<gtk::Revealer>>,
     resize_layer: gtk::Fixed,
     on_state_changed: RefCell<Option<std::rc::Weak<PaneCallbacks>>>,
+    show_title: RefCell<Option<Rc<ShowTitleCallback>>>,
 }
 
 #[derive(Clone)]
@@ -450,6 +453,7 @@ impl TerminalTabState {
                 resize_revealers: RefCell::new(Vec::new()),
                 resize_layer,
                 on_state_changed: RefCell::new(None),
+                show_title: RefCell::new(None),
             }),
         };
         state
@@ -591,6 +595,19 @@ impl TerminalTabState {
         }
     }
 
+    /// The tab's title belongs to its first split, whichever that is now.
+    fn refresh_title(&self) {
+        let Ok(tree) = self.inner.tree.try_borrow() else {
+            return;
+        };
+        let leaf_id = tree.first_leaf().leaf_id.clone();
+        drop(tree);
+        let show_title = self.inner.show_title.borrow().clone();
+        if let Some(show_title) = show_title {
+            show_title(&leaf_id);
+        }
+    }
+
     fn finish_swap(&self, target: &str) {
         let Some(source) = self.inner.swap_source.borrow_mut().take() else {
             return;
@@ -626,6 +643,7 @@ impl TerminalTabState {
         *self.inner.active_leaf_id.borrow_mut() = source;
         self.sync_split_dimming();
         self.trigger_rebuild(true);
+        self.refresh_title();
         if let Some(callbacks) = self
             .inner
             .on_state_changed
@@ -712,6 +730,7 @@ impl TerminalTabState {
             leaf_ids.push(leaf.leaf_id.clone());
             has_added_surfaces |= leaf.creator_surface_id.is_some();
         });
+        let handle = tree.find_leaf(leaf_id).map(|leaf| leaf.handle.clone());
         let removed = tree.remove_leaf(leaf_id);
         if removed {
             if has_added_surfaces {
@@ -731,6 +750,10 @@ impl TerminalTabState {
             drop(tree);
             self.sync_split_dimming();
             self.trigger_rebuild(false);
+            if let Some(handle) = handle {
+                handle.close();
+            }
+            self.refresh_title();
         }
         removed
     }
@@ -2209,7 +2232,7 @@ pub fn close_surface_in_terminal_tab(
     surface_id: &str,
 ) -> Result<(), TerminalTabSurfaceError> {
     let (internals, terminal_tab_state, _) = terminal_tab_context(pane_widget, tab_id)?;
-    let (leaf_id, handle) = {
+    let leaf_id = {
         let tree = terminal_tab_state.inner.tree.borrow();
         let source = tree
             .find_surface(internals.pane_id, tab_id, source_surface_id)
@@ -2223,12 +2246,11 @@ pub fn close_surface_in_terminal_tab(
         if target.creator_surface_id.as_deref() != Some(source.surface_id.as_str()) {
             return Err(TerminalTabSurfaceError::SurfaceNotOwned);
         }
-        (target.leaf_id.clone(), target.handle.clone())
+        target.leaf_id.clone()
     };
     if !terminal_tab_state.close_leaf(&leaf_id) {
         return Err(TerminalTabSurfaceError::SurfaceNotFound);
     }
-    handle.close();
     (internals.callbacks.on_state_changed)();
     Ok(())
 }
@@ -2302,19 +2324,12 @@ fn make_terminal_callbacks(
     let tid_for_notification = tab_id.to_string();
     let pane_id = internals.pane_id;
     let terminal_tab_state_for_focus = terminal_tab_state.clone();
-    // Show the first split's last title on the tab (other splits never take
-    // over), unless renamed or pinned by restore.
-    let show_title = {
+    // Shows a split's last title on the tab, unless renamed or pinned by restore.
+    *terminal_tab_state.inner.show_title.borrow_mut() = Some({
         let state = internals.tab_state.clone();
         let tab_id = tab_id.to_string();
         let label = title_label.clone();
-        let terminal_tab_state = terminal_tab_state.clone();
-        Rc::new(move || {
-            let Ok(tree) = terminal_tab_state.inner.tree.try_borrow() else {
-                return;
-            };
-            let leaf_id = tree.first_leaf().leaf_id.clone();
-            drop(tree);
+        Rc::new(move |leaf_id: &str| {
             let title = {
                 let mut ts = state.borrow_mut();
                 let Some(entry) = ts.find_tab_mut(&tab_id) else {
@@ -2323,7 +2338,7 @@ fn make_terminal_callbacks(
                 if entry.custom_name.is_some() || entry.title_pinned {
                     return;
                 }
-                let Some(title) = entry.leaf_titles.get(&leaf_id).cloned() else {
+                let Some(title) = entry.leaf_titles.get(leaf_id).cloned() else {
                     return;
                 };
                 entry.title = Some(title.clone());
@@ -2331,7 +2346,7 @@ fn make_terminal_callbacks(
             };
             label.set_label(&tab_display_title(&title));
         })
-    };
+    });
     let terminal_tab_state_for_close = terminal_tab_state.clone();
     let terminal_tab_state_for_within_right = terminal_tab_state.clone();
     let terminal_tab_state_for_within_down = terminal_tab_state.clone();
@@ -2350,7 +2365,7 @@ fn make_terminal_callbacks(
         }),
         on_title_changed: Box::new({
             let leaf_id = leaf_id.clone();
-            let show_title = show_title.clone();
+            let terminal_tab_state = terminal_tab_state.clone();
             move |title: &str| {
                 if title.is_empty() {
                     return;
@@ -2358,7 +2373,7 @@ fn make_terminal_callbacks(
                 if let Some(entry) = state_for_title.borrow_mut().find_tab_mut(&tid_for_title) {
                     entry.leaf_titles.insert(leaf_id.clone(), title.to_string());
                 }
-                show_title();
+                terminal_tab_state.refresh_title();
             }
         }),
         on_pwd_changed: Box::new(move |pwd: &str| {
@@ -2396,13 +2411,11 @@ fn make_terminal_callbacks(
             let tab_id = tid_for_close.clone();
             let terminal_tab_state = terminal_tab_state_for_close.clone();
             let leaf_id = leaf_id.clone();
-            let show_title = show_title.clone();
             glib::idle_add_local_once(move || {
                 if !terminal_tab_state.has_leaf(&leaf_id) {
                     return;
                 }
                 if terminal_tab_state.close_leaf(&leaf_id) {
-                    show_title();
                     (callbacks.on_state_changed)();
                     return;
                 }
