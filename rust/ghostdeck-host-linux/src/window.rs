@@ -1703,6 +1703,7 @@ pub fn build_window(app: &adw::Application, app_started_at: i64) {
             let action = { state.borrow_mut().window_close.request() };
             match action {
                 WindowCloseAction::Proceed => {
+                    pane::forget_exited_agents_with_running_commands();
                     save_session_now(&state);
                     CONTROL_STATE.with(|slot| {
                         slot.borrow_mut().take();

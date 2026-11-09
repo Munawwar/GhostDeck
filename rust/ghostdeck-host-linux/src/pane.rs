@@ -2848,7 +2848,7 @@ pub fn dismiss_workspace_attention(root: &gtk::Widget) {
     }
 }
 
-pub fn highlight_running_process_tabs() -> usize {
+fn panes_and_busy_surfaces() -> (Vec<Rc<PaneInternals>>, HashSet<String>) {
     let panes: Vec<_> = PANE_REGISTRY.with(|registry| {
         registry
             .borrow()
@@ -2866,8 +2866,18 @@ pub fn highlight_running_process_tabs() -> usize {
             }
         }
     }
+    let busy_surfaces = crate::process_usage::busy_surface_ids(&surface_ids);
+    (panes, busy_surfaces)
+}
+
+pub fn forget_exited_agents_with_running_commands() {
+    layout_state::forget_exited_agents_on(&panes_and_busy_surfaces().1);
+}
+
+pub fn highlight_running_process_tabs() -> usize {
+    let (panes, busy_surfaces) = panes_and_busy_surfaces();
     let idle_agents = layout_state::idle_agent_surface_ids();
-    let busy_surfaces: HashSet<_> = crate::process_usage::busy_surface_ids(&surface_ids)
+    let busy_surfaces: HashSet<_> = busy_surfaces
         .into_iter()
         .filter(|surface_id| !idle_agents.contains(surface_id))
         .collect();

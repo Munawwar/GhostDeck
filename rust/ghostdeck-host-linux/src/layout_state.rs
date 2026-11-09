@@ -756,14 +756,22 @@ pub fn idle_agent_surface_ids() -> HashSet<String> {
 /// agent there before that command started, they moved on, so stop restoring
 /// it. The CLI owns the hook store, so ask it to drop the record.
 pub fn forget_exited_agent(workspace_id: &str, surface_id: &str, command_started_at: f64) {
+    forget_agents(|record| {
+        record.workspace_id == workspace_id
+            && record.surface_id == surface_id
+            && record.exited_at.is_some_and(|at| at < command_started_at)
+    });
+}
+
+/// Called on window close: a command still running where the user quit an
+/// agent means they moved on, even though it hasn't finished yet.
+pub fn forget_exited_agents_on(surface_ids: &HashSet<String>) {
+    forget_agents(|record| record.exited_at.is_some() && surface_ids.contains(&record.surface_id));
+}
+
+fn forget_agents(matches: impl Fn(&HookSessionRecord) -> bool) {
     for (kind, file) in hook_session_files(&agent_hook_state_dir()) {
-        for record in file.sessions.values() {
-            if record.workspace_id != workspace_id
-                || record.surface_id != surface_id
-                || !record.exited_at.is_some_and(|at| at < command_started_at)
-            {
-                continue;
-            }
+        for record in file.sessions.values().filter(|record| matches(record)) {
             let payload = serde_json::json!({
                 "session_id": record.session_id,
                 "hook_event_name": "Cleanup",
