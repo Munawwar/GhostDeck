@@ -1310,39 +1310,10 @@ pub fn create_terminal(
         callbacks: callbacks.clone(),
     };
 
-    if let Some(command) = initial_command {
-        // Wait until shell integration reports the prompt, so startup scripts
-        // that read input (update prompts etc.) can't swallow the command.
-        // Without shell integration the prompt never shows; give up quietly.
-        // The surface (and shell) only starts once the tab is first shown, so
-        // the budget counts from then, not from now.
-        let handle = handle.clone();
-        let mut polls_left = 300;
-        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-            let Some(surface) = *handle.surface_cell.borrow() else {
-                return glib::ControlFlow::Continue;
-            };
-            polls_left -= 1;
-            let ready = unsafe { !ghostty_surface_needs_confirm_quit(surface) };
-            if ready {
-                // Typing the restore isn't user input (activity, title pin).
-                let on_input =
-                    std::mem::replace(&mut handle.callbacks.borrow_mut().on_input, Box::new(|| {}));
-                // The leading space keeps it out of shell history (bash
-                // ignorespace/ignoreboth, zsh hist_ignore_space, fish).
-                handle.send_text(&format!(" {command}"));
-                handle.send_key("enter");
-                handle.callbacks.borrow_mut().on_input = on_input;
-            } else if polls_left == 0 {
-                eprintln!("ghostdeck: shell prompt never appeared; not restoring `{command}`");
-            }
-            if ready || polls_left == 0 {
-                glib::ControlFlow::Break
-            } else {
-                glib::ControlFlow::Continue
-            }
-        });
-    }
+    // Started once the surface exists: a hidden tab has no shell until shown.
+    let pending_restore = Rc::new(RefCell::new(
+        initial_command.map(|command| (command, handle.clone())),
+    ));
 
     {
         let surface_cell = surface_cell.clone();
@@ -1447,6 +1418,7 @@ pub fn create_terminal(
         let open_url_external_for_map = open_url_external.clone();
         let extra_env = extra_env.clone();
         let on_command_finished = on_command_finished.clone();
+        let pending_restore = pending_restore.clone();
         gl_area.connect_realize(move |gl_area| {
             gl_area.make_current();
             if let Some(err) = gl_area.error() {
@@ -1607,6 +1579,31 @@ pub fn create_terminal(
             });
 
             *surface_cell.borrow_mut() = Some(surface);
+            if let Some((command, handle)) = pending_restore.borrow_mut().take() {
+                // Wait until shell integration reports the prompt, so startup
+                // scripts that read input (update prompts etc.) can't swallow
+                // the command. Without shell integration it never shows, and
+                // this ends with the terminal.
+                glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                    let Some(surface) = *handle.surface_cell.borrow() else {
+                        return glib::ControlFlow::Break;
+                    };
+                    if unsafe { ghostty_surface_needs_confirm_quit(surface) } {
+                        return glib::ControlFlow::Continue;
+                    }
+                    // Typing the restore isn't user input (activity, title pin).
+                    let on_input = std::mem::replace(
+                        &mut handle.callbacks.borrow_mut().on_input,
+                        Box::new(|| {}),
+                    );
+                    // The leading space keeps it out of shell history (bash
+                    // ignorespace/ignoreboth, zsh hist_ignore_space, fish).
+                    handle.send_text(&format!(" {command}"));
+                    handle.send_key("enter");
+                    handle.callbacks.borrow_mut().on_input = on_input;
+                    glib::ControlFlow::Break
+                });
+            }
 
             unsafe {
                 ghostty_surface_set_focus(surface, gl_area.has_focus());
@@ -1989,6 +1986,7 @@ pub fn create_terminal(
         let im_context = im_context.clone();
         let gl_area = gl_area.clone();
         overlay.connect_destroy(move |_| {
+            pending_restore.borrow_mut().take();
             im_context.set_client_widget(gtk::Widget::NONE);
             if let Some(surface) = surface_cell.borrow_mut().take() {
                 free_terminal_surface(surface, &clipboard_context_cell, &gl_area);
