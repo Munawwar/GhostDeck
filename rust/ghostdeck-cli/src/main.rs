@@ -1054,6 +1054,7 @@ fn persist_agent_hook_session(
         return Ok(());
     };
 
+    let _lock = store.lock()?;
     let (outcome, result) = match agent_hook_persistence_action(event, payload) {
         AgentHookPersistenceAction::Upsert => ("", Ok(())),
         AgentHookPersistenceAction::Preserve => ("preserved", Ok(())),
@@ -3240,6 +3241,33 @@ mod cli_arg_tests {
         );
         // A resume from elsewhere starts a new process there.
         assert_eq!(start("/other").as_deref(), Some("/other"));
+    }
+
+    #[test]
+    fn parallel_hooks_keep_every_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = agent_hooks::AgentHookSessionStore::new_for_dir("claude", dir.path());
+        std::thread::scope(|scope| {
+            for session in 0..16 {
+                let store = &store;
+                scope.spawn(move || {
+                    let args = ["--workspace", "ws", "--surface"].map(String::from);
+                    let args = [&args[..], &[format!("1:tab:leaf-{session}")]].concat();
+                    let payload = json!({ "session_id": format!("s{session}"), "cwd": "/p" });
+                    persist_agent_hook_session(
+                        agent_hooks::AgentKind::Claude,
+                        store,
+                        &args,
+                        &payload,
+                        "stop",
+                    )
+                    .unwrap();
+                });
+            }
+        });
+        for session in 0..16 {
+            assert!(store.lookup(&format!("s{session}")).unwrap().is_some());
+        }
     }
 
     #[test]

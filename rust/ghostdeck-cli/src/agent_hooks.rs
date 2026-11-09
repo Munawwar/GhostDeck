@@ -123,6 +123,21 @@ impl AgentHookSessionStore {
         }
     }
 
+    /// Held until dropped: hooks from parallel sessions would otherwise lose
+    /// each other's read-modify-write.
+    pub(crate) fn lock(&self) -> Result<fs::File> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        let path = self.path.with_extension("lock");
+        let lock = fs::File::create(&path)
+            .with_context(|| format!("failed to open {}", path.display()))?;
+        lock.lock()
+            .with_context(|| format!("failed to lock {}", path.display()))?;
+        Ok(lock)
+    }
+
     pub(crate) fn lookup(&self, session_id: &str) -> Result<Option<AgentHookSessionRecord>> {
         let session_id = normalized(session_id);
         if session_id.is_none() {
