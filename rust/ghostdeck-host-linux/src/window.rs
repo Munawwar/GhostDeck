@@ -149,6 +149,8 @@ pub(crate) struct AppState {
     sidebar_shell: gtk::Box,
     sidebar_handle: gtk::Box,
     new_ws_btn: gtk::Button,
+    sidebar_title: gtk::Box,
+    sidebar_mode_btn: gtk::Button,
     sidebar_animation: Option<adw::TimedAnimation>,
     sidebar_animation_epoch: u64,
     sidebar_expanded_width: i32,
@@ -1035,16 +1037,31 @@ fn sync_sidebar_rows(state: &AppState) {
             sibling = widget.next_sibling();
         }
     }
-    if let Some(title) = state.new_ws_btn.prev_sibling() {
-        title.set_visible(!state.sidebar_compact);
+    let compact = state.sidebar_compact;
+    if let Some(title) = state.sidebar_title.first_child() {
+        title.set_visible(!compact);
     }
-    if let Some(title_box) = state.new_ws_btn.parent() {
-        title_box.set_halign(if state.sidebar_compact {
-            gtk::Align::Center
-        } else {
-            gtk::Align::Fill
-        });
-    }
+    // Compact is too narrow for the buttons side by side.
+    state.sidebar_title.set_orientation(if compact {
+        gtk::Orientation::Vertical
+    } else {
+        gtk::Orientation::Horizontal
+    });
+    state.sidebar_title.set_halign(if compact {
+        gtk::Align::Center
+    } else {
+        gtk::Align::Fill
+    });
+    let (icon, label) = if compact {
+        ("ghostdeck-sidebar-expand-symbolic", "Expand sidebar")
+    } else {
+        ("ghostdeck-sidebar-collapse-symbolic", "Collapse sidebar")
+    };
+    state.sidebar_mode_btn.set_icon_name(icon);
+    state.sidebar_mode_btn.set_tooltip_text(Some(label));
+    state
+        .sidebar_mode_btn
+        .update_property(&[gtk::accessible::Property::Label(label)]);
     if state.sidebar_compact {
         state
             .sidebar_shell
@@ -1604,6 +1621,9 @@ pub fn build_window(app: &adw::Application, app_started_at: i64) {
     new_ws_btn.add_css_class("ghostdeck-sidebar-btn");
     set_new_workspace_button_mode(&new_ws_btn, false);
     sidebar_title.append(&new_ws_btn);
+    let sidebar_mode_btn = gtk::Button::builder().valign(gtk::Align::Center).build();
+    sidebar_mode_btn.add_css_class("ghostdeck-sidebar-btn");
+    sidebar_title.append(&sidebar_mode_btn);
 
     // Drop target on the button: workspace drags delete, tab drags create a new workspace.
     let btn_drop = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::MOVE);
@@ -1667,6 +1687,8 @@ pub fn build_window(app: &adw::Application, app_started_at: i64) {
         sidebar_shell: sidebar_shell.clone(),
         sidebar_handle: sidebar_handle.clone(),
         new_ws_btn: new_ws_btn.clone(),
+        sidebar_title: sidebar_title.clone(),
+        sidebar_mode_btn: sidebar_mode_btn.clone(),
         sidebar_animation: None,
         sidebar_animation_epoch: 0,
         sidebar_expanded_width: SIDEBAR_WIDTH,
@@ -1792,6 +1814,20 @@ pub fn build_window(app: &adw::Application, app_started_at: i64) {
         let state = state.clone();
         new_ws_btn.connect_clicked(move |_| {
             add_workspace(&state, None);
+        });
+    }
+    {
+        let state = state.clone();
+        sidebar_mode_btn.connect_clicked(move |_| {
+            let compact = state.borrow().sidebar_compact;
+            sidebar_mode(
+                &state,
+                Some(if compact {
+                    SidebarMode::Full
+                } else {
+                    SidebarMode::Compact
+                }),
+            );
         });
     }
 
