@@ -34,6 +34,8 @@ pub struct SidebarState {
     pub visible: bool,
     #[serde(default = "default_sidebar_width")]
     pub width: i32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compact: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -273,6 +275,7 @@ impl Default for SidebarState {
         Self {
             visible: default_sidebar_visible(),
             width: default_sidebar_width(),
+            compact: false,
         }
     }
 }

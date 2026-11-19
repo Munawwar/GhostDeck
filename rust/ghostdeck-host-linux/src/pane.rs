@@ -202,6 +202,7 @@ pub struct PaneCallbacks {
     pub on_tab_unread: Box<PaneTabUnreadCallback>,
     pub current_config: Box<PaneConfigCallback>,
     pub on_config_changed: Rc<PaneConfigChangedCallback>,
+    pub sidebar_mode: Rc<settings_editor::SidebarModeControl>,
     /// Resolve the workspace id for a given pane widget. May be `None` while
     /// the pane is still being constructed; callers treat that as "unknown".
     pub workspace_for_pane: Box<PaneWorkspaceLookupCallback>,
@@ -1444,6 +1445,7 @@ pub fn create_pane(
                     shortcuts: (internals.callbacks.current_shortcuts)(),
                     on_capture: internals.callbacks.on_capture_shortcut.clone(),
                     on_config_changed: internals.callbacks.on_config_changed.clone(),
+                    sidebar_mode: internals.callbacks.sidebar_mode.clone(),
                 },
             );
         });

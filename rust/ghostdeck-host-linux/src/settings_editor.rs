@@ -17,6 +17,15 @@ pub const SETTINGS_CSS: &str = r#"
 "#;
 
 type OnConfigChanged = dyn Fn(&AppConfig, &AppConfig);
+/// Sets the sidebar mode when given one, and returns the current mode.
+pub type SidebarModeControl = dyn Fn(Option<SidebarMode>) -> SidebarMode;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidebarMode {
+    Full,
+    Compact,
+    Hidden,
+}
 
 pub struct SettingsEditorInput {
     pub config: Rc<RefCell<AppConfig>>,
@@ -25,6 +34,7 @@ pub struct SettingsEditorInput {
         dyn Fn(ShortcutId, Option<NormalizedShortcut>) -> Result<ResolvedShortcutConfig, String>,
     >,
     pub on_config_changed: Rc<OnConfigChanged>,
+    pub sidebar_mode: Rc<SidebarModeControl>,
 }
 
 pub fn present_settings_dialog(parent: &impl IsA<gtk::Widget>, input: SettingsEditorInput) {
@@ -171,6 +181,34 @@ fn build_general_page(input: &SettingsEditorInput) -> gtk::Widget {
     hover_row.add_suffix(&hover_switch);
     hover_row.set_activatable_widget(Some(&hover_switch));
     group.add(&hover_row);
+
+    let sidebar_row = adw::ActionRow::builder()
+        .title("Sidebar")
+        .subtitle("Show workspace names, only their initials, or nothing. The Toggle Sidebar shortcut also shows or hides it")
+        .build();
+    sidebar_row.set_title_lines(1);
+    sidebar_row.set_subtitle_lines(2);
+    let sidebar_modes = [SidebarMode::Full, SidebarMode::Compact, SidebarMode::Hidden];
+    let sidebar_dropdown = gtk::DropDown::from_strings(&["Full", "Compact", "Hidden"]);
+    let current_mode = (input.sidebar_mode)(None);
+    sidebar_dropdown.set_selected(
+        sidebar_modes
+            .iter()
+            .position(|mode| *mode == current_mode)
+            .unwrap_or(0) as u32,
+    );
+    sidebar_dropdown.set_valign(gtk::Align::Center);
+    sidebar_row.add_suffix(&sidebar_dropdown);
+    sidebar_row.set_activatable_widget(Some(&sidebar_dropdown));
+    group.add(&sidebar_row);
+    {
+        let sidebar_mode = input.sidebar_mode.clone();
+        sidebar_dropdown.connect_selected_notify(move |dropdown| {
+            if let Some(mode) = sidebar_modes.get(dropdown.selected() as usize) {
+                sidebar_mode(Some(*mode));
+            }
+        });
+    }
 
     page.add(&group);
 

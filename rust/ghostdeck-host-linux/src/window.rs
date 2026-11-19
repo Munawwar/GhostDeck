@@ -18,6 +18,7 @@ use crate::layout_state::{
     self, AppSessionState, LayoutNodeState, LoadedSession, PaneState, WorkspaceState,
 };
 use crate::pane::{self, PaneCallbacks};
+use crate::settings_editor::SidebarMode;
 use crate::shortcut_config::{
     self, EditableCapturePolicy, ResolvedShortcutConfig, ShortcutCommand, ShortcutId,
 };
@@ -38,6 +39,8 @@ struct Workspace {
     sidebar_row: gtk::ListBoxRow,
     /// Name label in sidebar row.
     name_label: gtk::Label,
+    /// Initials shown instead of the row's details in the compact sidebar.
+    avatar: gtk::Label,
     /// Favorite star button in sidebar row.
     favorite_button: gtk::Button,
     /// Button and badge for tabs needing attention.
@@ -149,6 +152,7 @@ pub(crate) struct AppState {
     sidebar_animation: Option<adw::TimedAnimation>,
     sidebar_animation_epoch: u64,
     sidebar_expanded_width: i32,
+    sidebar_compact: bool,
     persistence_suspended: bool,
     save_queued: bool,
     workspace_dragging: Option<String>,
@@ -859,10 +863,12 @@ fn apply_sidebar_state_immediately(state: &State, sidebar_state: &layout_state::
     let (sidebar_shell, sidebar_handle, width) = {
         let mut s = state.borrow_mut();
         s.sidebar_expanded_width = sidebar_state.width.max(SIDEBAR_WIDTH);
+        s.sidebar_compact = sidebar_state.compact;
+        sync_sidebar_rows(&s);
         (
             s.sidebar_shell.clone(),
             s.sidebar_handle.clone(),
-            s.sidebar_expanded_width,
+            sidebar_target_width(&s),
         )
     };
 
@@ -873,6 +879,7 @@ fn apply_sidebar_state_immediately(state: &State, sidebar_state: &layout_state::
         &sidebar_handle,
         if sidebar_state.visible { width } else { 0 },
         sidebar_state.visible,
+        !sidebar_state.compact,
     );
 }
 
@@ -888,7 +895,7 @@ fn snapshot_session_state(
     let s = state.borrow();
     let restorable_agents = layout_state::RestorableAgentIndex::load();
     let sidebar_visible = sidebar_is_visible(&s);
-    let sidebar_width = if sidebar_visible {
+    let sidebar_width = if sidebar_visible && !s.sidebar_compact {
         sidebar_width(&s.sidebar_shell)
     } else {
         s.sidebar_expanded_width
@@ -938,6 +945,7 @@ fn snapshot_session_state(
         sidebar: layout_state::SidebarState {
             visible: sidebar_visible,
             width: sidebar_width,
+            compact: s.sidebar_compact,
         },
         window,
         workspaces,
@@ -946,6 +954,106 @@ fn snapshot_session_state(
 
 fn sidebar_is_visible(state: &AppState) -> bool {
     state.sidebar_shell.is_visible() && sidebar_width(&state.sidebar_shell) > 10
+}
+
+fn sidebar_target_width(state: &AppState) -> i32 {
+    if state.sidebar_compact {
+        SIDEBAR_COMPACT_WIDTH
+    } else {
+        state.sidebar_expanded_width.max(SIDEBAR_WIDTH)
+    }
+}
+
+/// Sets the sidebar mode when given one, and returns the current mode.
+fn sidebar_mode(state: &State, mode: Option<SidebarMode>) -> SidebarMode {
+    let current = {
+        let s = state.borrow();
+        match (sidebar_is_visible(&s), s.sidebar_compact) {
+            (false, _) => SidebarMode::Hidden,
+            (true, true) => SidebarMode::Compact,
+            (true, false) => SidebarMode::Full,
+        }
+    };
+    let Some(mode) = mode.filter(|mode| *mode != current) else {
+        return current;
+    };
+    if mode != SidebarMode::Hidden {
+        let mut s = state.borrow_mut();
+        if current == SidebarMode::Full {
+            s.sidebar_expanded_width = sidebar_width(&s.sidebar_shell);
+        }
+        s.sidebar_compact = mode == SidebarMode::Compact;
+        sync_sidebar_rows(&s);
+    }
+    if mode == SidebarMode::Hidden || current == SidebarMode::Hidden {
+        toggle_sidebar(state);
+    } else {
+        let s = state.borrow();
+        set_sidebar_state_widgets(
+            &s.sidebar_shell,
+            &s.sidebar_handle,
+            sidebar_target_width(&s),
+            true,
+            !s.sidebar_compact,
+        );
+        drop(s);
+        request_session_save(state);
+    }
+    mode
+}
+
+/// Updates every row for the compact sidebar: initials (numbered when several
+/// workspaces share one) instead of the name, path and buttons.
+fn sync_sidebar_rows(state: &AppState) {
+    let initials: Vec<String> = state
+        .workspaces
+        .iter()
+        .map(|workspace| {
+            workspace
+                .name
+                .trim()
+                .chars()
+                .next()
+                .map_or_else(|| "?".to_string(), |c| c.to_uppercase().collect())
+        })
+        .collect();
+    let mut seen: HashMap<&str, usize> = HashMap::new();
+    for (workspace, initial) in state.workspaces.iter().zip(&initials) {
+        let label = if initials.iter().filter(|other| *other == initial).count() > 1 {
+            let n = seen.entry(initial).or_default();
+            *n += 1;
+            format!("{initial}{n}")
+        } else {
+            initial.clone()
+        };
+        workspace.avatar.set_label(&label);
+        workspace.avatar.set_tooltip_text(Some(&workspace.name));
+        workspace.avatar.set_visible(state.sidebar_compact);
+        let mut sibling = workspace.avatar.next_sibling();
+        while let Some(widget) = sibling {
+            widget.set_visible(!state.sidebar_compact);
+            sibling = widget.next_sibling();
+        }
+    }
+    if let Some(title) = state.new_ws_btn.prev_sibling() {
+        title.set_visible(!state.sidebar_compact);
+    }
+    if let Some(title_box) = state.new_ws_btn.parent() {
+        title_box.set_halign(if state.sidebar_compact {
+            gtk::Align::Center
+        } else {
+            gtk::Align::Fill
+        });
+    }
+    if state.sidebar_compact {
+        state
+            .sidebar_shell
+            .add_css_class("ghostdeck-sidebar-compact");
+    } else {
+        state
+            .sidebar_shell
+            .remove_css_class("ghostdeck-sidebar-compact");
+    }
 }
 
 fn split_ratio_state(paned: &gtk::Paned) -> Option<Rc<RefCell<f64>>> {
@@ -1134,6 +1242,25 @@ const BASE_CSS: &str = r#"
     padding: 12px;
     border-radius: 0;
     margin: 0;
+}
+.ghostdeck-sidebar-compact .ghostdeck-sidebar-row-box {
+    padding: 8px 0;
+}
+.ghostdeck-ws-avatar {
+    min-width: 38px;
+    min-height: 38px;
+    border-radius: 999px;
+    background-color: alpha(@window_fg_color, 0.1);
+    color: alpha(@window_fg_color, 0.8);
+    font-size: 14px;
+    font-weight: 700;
+}
+row:selected .ghostdeck-ws-avatar {
+    background-color: @accent_bg_color;
+    color: @accent_fg_color;
+}
+.ghostdeck-sidebar-row-attention .ghostdeck-ws-avatar {
+    box-shadow: inset 0 0 0 2px #ff8a30;
 }
 .ghostdeck-ws-name {
     color: alpha(@window_fg_color, 0.72);
@@ -1543,6 +1670,7 @@ pub fn build_window(app: &adw::Application, app_started_at: i64) {
         sidebar_animation: None,
         sidebar_animation_epoch: 0,
         sidebar_expanded_width: SIDEBAR_WIDTH,
+        sidebar_compact: false,
         persistence_suspended: false,
         save_queued: false,
         workspace_dragging: None,
@@ -1840,11 +1968,12 @@ fn install_sidebar_resize(
         let sidebar = sidebar.clone();
         let sidebar_shell = sidebar_shell.clone();
         let resizing_sidebar = resizing_sidebar.clone();
+        let state = state.clone();
         drag.connect_drag_begin(move |gesture, x, _| {
             let current_width = sidebar_width(&sidebar_shell);
             let handle_start = current_width as f64;
             let handle_end = handle_start + SIDEBAR_RESIZE_HANDLE_WIDTH_PX as f64;
-            if x < handle_start || x > handle_end {
+            if x < handle_start || x > handle_end || state.borrow().sidebar_compact {
                 gesture.set_state(gtk::EventSequenceState::Denied);
                 return;
             }
@@ -1895,10 +2024,11 @@ fn set_sidebar_state_widgets(
     sidebar_handle: &gtk::Box,
     width: i32,
     visible: bool,
+    resizable: bool,
 ) {
     set_sidebar_width(sidebar_shell, width);
     sidebar_shell.set_visible(visible);
-    sidebar_handle.set_visible(visible);
+    sidebar_handle.set_visible(visible && resizable);
 }
 
 fn sidebar_width(sidebar_shell: &gtk::Box) -> i32 {
@@ -2905,6 +3035,7 @@ fn build_sidebar_row(
 ) -> (
     gtk::ListBoxRow,
     gtk::Label,
+    gtk::Label,
     gtk::Button,
     gtk::Button,
     gtk::Label,
@@ -2985,8 +3116,16 @@ fn build_sidebar_row(
     actions.append(&bell_button);
     actions.append(&favorite_button);
 
+    let avatar = gtk::Label::builder()
+        .hexpand(true)
+        .halign(gtk::Align::Center)
+        .visible(false)
+        .build();
+    avatar.add_css_class("ghostdeck-ws-avatar");
+
     let content = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     content.add_css_class("ghostdeck-sidebar-row-box");
+    content.append(&avatar);
     content.append(&details);
     content.append(&actions);
 
@@ -2996,6 +3135,7 @@ fn build_sidebar_row(
     (
         row,
         name_label,
+        avatar,
         favorite_button,
         bell_button,
         path_label,
@@ -3138,6 +3278,7 @@ fn sync_sidebar_row_order(state: &mut AppState) {
     for workspace in &state.workspaces {
         state.sidebar_list.append(&workspace.sidebar_row);
     }
+    sync_sidebar_rows(state);
 }
 
 fn set_workspace_favorite_visual(workspace: &Workspace) {
@@ -3243,8 +3384,22 @@ fn begin_workspace_inline_rename(state: &State, workspace_id: &str) {
         entry.add_css_class(css_class);
     }
 
-    label.set_visible(false);
-    parent.insert_child_after(&entry, Some(&label));
+    // The compact sidebar hides the name, so edit it in a popover instead.
+    if state.borrow().sidebar_compact {
+        let popover = gtk::Popover::builder()
+            .child(&entry)
+            .position(gtk::PositionType::Right)
+            .build();
+        popover.set_parent(&parent.parent().unwrap_or_else(|| parent.clone().upcast()));
+        popover.connect_closed(|popover| {
+            let popover = popover.clone();
+            glib::idle_add_local_once(move || popover.unparent());
+        });
+        popover.popup();
+    } else {
+        label.set_visible(false);
+        parent.insert_child_after(&entry, Some(&label));
+    }
     entry.grab_focus();
     entry.select_region(0, -1);
 
@@ -3272,12 +3427,16 @@ fn begin_workspace_inline_rename(state: &State, workspace_id: &str) {
                 {
                     workspace.name = next_name;
                 }
+                sync_sidebar_rows(&s);
                 drop(s);
                 request_session_save(&state_for_commit);
             }
 
             label_for_commit.set_visible(true);
-            parent_for_commit.remove(entry);
+            match entry.ancestor(gtk::Popover::static_type()) {
+                Some(popover) => popover.downcast::<gtk::Popover>().unwrap().popdown(),
+                None => parent_for_commit.remove(entry),
+            }
         }
     };
 
@@ -3509,7 +3668,7 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
     );
     let root = pane.clone().upcast::<gtk::Widget>();
 
-    let (row, name_label, favorite_button, bell_button, path_label, attention_badge) =
+    let (row, name_label, avatar, favorite_button, bell_button, path_label, attention_badge) =
         build_sidebar_row(&seed.name, seed.folder_path.as_deref());
     let row_clone = row.clone();
     {
@@ -3530,6 +3689,7 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
             root: root.clone().upcast(),
             sidebar_row: row,
             name_label,
+            avatar,
             favorite_button,
             bell_button,
             attention_badge,
@@ -3538,6 +3698,7 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
             folder_path: seed.folder_path.clone(),
             path_label,
         });
+        sync_sidebar_rows(&app_state);
         app_state.active_idx = app_state.workspaces.len() - 1;
         app_state.stack.set_visible_child_name(&stack_name);
     }
@@ -4376,6 +4537,7 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 let workspace = &mut app_state.workspaces[index];
                 workspace.name = title.clone();
                 workspace.name_label.set_label(&title);
+                sync_sidebar_rows(&app_state);
             }
             request_session_save(state);
 
@@ -4690,7 +4852,7 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
             .upcast::<gtk::Widget>();
     stack.add_named(&root, Some(&stack_name));
 
-    let (row, name_label, favorite_button, bell_button, path_label, attention_badge) =
+    let (row, name_label, avatar, favorite_button, bell_button, path_label, attention_badge) =
         build_sidebar_row(&workspace.name, workspace.folder_path.as_deref());
     sidebar_list.append(&row);
     install_workspace_row_interactions(state, &id, &row, &favorite_button, &bell_button);
@@ -4702,6 +4864,7 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
         root,
         sidebar_row: row.clone(),
         name_label,
+        avatar,
         favorite_button,
         bell_button,
         attention_badge,
@@ -4718,6 +4881,7 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
     {
         let mut s = state.borrow_mut();
         s.workspaces.push(ws);
+        sync_sidebar_rows(&s);
         s.active_idx = s.workspaces.len() - 1;
     }
 
@@ -4745,6 +4909,7 @@ pub(crate) fn create_pane_for_workspace(
     let ws_id_empty = ws_id.to_string();
     let state_for_config = state.clone();
     let state_for_config_changed = state.clone();
+    let state_for_sidebar = state.clone();
     let ws_id_for_env = ws_id.to_string();
 
     let callbacks = Rc::new(PaneCallbacks {
@@ -4885,6 +5050,7 @@ pub(crate) fn create_pane_for_workspace(
                 }
             },
         ),
+        sidebar_mode: Rc::new(move |mode| sidebar_mode(&state_for_sidebar, mode)),
         workspace_for_pane: Box::new(move |_pane_widget| Some(ws_id_for_env.clone())),
     });
 
@@ -4929,6 +5095,7 @@ fn close_workspace_by_id_internal(
     pane::close_processes(&ws.root);
     s.stack.remove(&ws.root);
     s.sidebar_list.remove(&ws.sidebar_row);
+    sync_sidebar_rows(&s);
 
     if s.workspaces.is_empty() {
         s.active_idx = 0;
@@ -5052,6 +5219,7 @@ fn first_leaf_pane(widget: &gtk::Widget) -> gtk::Widget {
 
 /// Default sidebar width in pixels.
 const SIDEBAR_WIDTH: i32 = 220;
+const SIDEBAR_COMPACT_WIDTH: i32 = 64;
 
 fn sync_top_bar_visibility(state: &State) {
     let (top_bar, preferred_visible, fullscreened) = {
@@ -5091,10 +5259,10 @@ fn toggle_sidebar(state: &State) {
         let mut s = state.borrow_mut();
         let current = sidebar_width(&s.sidebar_shell);
         let is_visible = current > 10; // treat < 10px as collapsed
-        if is_visible {
+        if is_visible && !s.sidebar_compact {
             s.sidebar_expanded_width = current;
         }
-        let target_width = s.sidebar_expanded_width.max(SIDEBAR_WIDTH);
+        let target_width = sidebar_target_width(&s);
         let prior_animation = s.sidebar_animation.take();
         s.sidebar_animation_epoch = s.sidebar_animation_epoch.wrapping_add(1);
         (
@@ -5140,7 +5308,7 @@ fn toggle_sidebar(state: &State) {
                 }
             };
             if is_current {
-                set_sidebar_state_widgets(&sidebar_shell, &sidebar_handle, 0, false);
+                set_sidebar_state_widgets(&sidebar_shell, &sidebar_handle, 0, false, false);
                 request_session_save(&state_for_done);
             }
         });
@@ -5148,7 +5316,8 @@ fn toggle_sidebar(state: &State) {
         animation.play();
     } else {
         // Expand: make sidebar visible, then animate position from 0 to remembered width.
-        set_sidebar_state_widgets(&sidebar_shell, &sidebar_handle, 0, true);
+        let resizable = !state.borrow().sidebar_compact;
+        set_sidebar_state_widgets(&sidebar_shell, &sidebar_handle, 0, true, resizable);
         let target = adw::CallbackAnimationTarget::new({
             let sidebar_shell = sidebar_shell.clone();
             move |value| {
