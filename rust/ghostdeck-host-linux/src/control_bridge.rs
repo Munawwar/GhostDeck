@@ -855,11 +855,10 @@ struct ConnectionSlot {
 
 impl ConnectionSlot {
     fn try_acquire(active_connections: Arc<AtomicUsize>) -> Option<Self> {
-        active_connections
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                (current < request_io::MAX_CONNECTIONS).then_some(current + 1)
-            })
-            .ok()?;
+        if active_connections.fetch_add(1, Ordering::AcqRel) >= request_io::MAX_CONNECTIONS {
+            active_connections.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
         Some(Self { active_connections })
     }
 }
